@@ -3,11 +3,52 @@ set -euo pipefail
 
 IMAGE_NAME="claude-code-sandbox"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUILD_LOCK="$SCRIPT_DIR/build.lock"
+BUILD_LOG="$SCRIPT_DIR/build.log"
+BUILD_PID="$SCRIPT_DIR/build.pid"
 
-# ── Build image if missing ───────────────────────────────────
+# ── Build image if missing (blocking — can't proceed without it) ─
 if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
-    echo "🔨 Building Claude Code image..."
-    docker build -t "$IMAGE_NAME" "$SCRIPT_DIR"
+    echo "🔨 Building Claude Code image (first time, please wait)..."
+    docker build --build-arg CACHE_BUST="$(date +%s)" -t "$IMAGE_NAME" "$SCRIPT_DIR"
+fi
+
+# ── Check for Claude Code updates ────────────────────────────
+# Skip update check if a build is already in progress
+if [ -f "$BUILD_LOCK" ] && flock -n "$BUILD_LOCK" true 2>/dev/null; then
+    # Lock file exists but is not locked — stale, clean up
+    rm -f "$BUILD_LOCK"
+fi
+
+if flock -n "$BUILD_LOCK" true 2>/dev/null || [ ! -f "$BUILD_LOCK" ]; then
+    echo "🔍 Checking for Claude Code updates..."
+    INSTALLED_VERSION="$(docker run --rm --entrypoint="" "$IMAGE_NAME" cat /etc/claude-code-version 2>/dev/null | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+    # Fallback for old images without the version file
+    if [ -z "$INSTALLED_VERSION" ]; then
+        INSTALLED_VERSION="$(docker run --rm --entrypoint="" "$IMAGE_NAME" claude --version 2>/dev/null | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+    fi
+    LATEST_VERSION="$(npm view @anthropic-ai/claude-code@latest version 2>/dev/null | tr -d '[:space:]' || true)"
+    echo "   Installed: ${INSTALLED_VERSION:-unknown}"
+    echo "   Latest:    ${LATEST_VERSION:-unknown}"
+
+    if [ -n "$LATEST_VERSION" ] && { [ -z "$INSTALLED_VERSION" ] || [ "$INSTALLED_VERSION" != "$LATEST_VERSION" ]; }; then
+        echo "⬆️  Claude Code update available: $INSTALLED_VERSION → $LATEST_VERSION"
+        read -rp "Rebuild image in background? [y/N] " answer
+        if [[ "$answer" =~ ^[Yy]$ ]]; then
+            # Background build in new process group (setsid) so kill -PGID kills entire tree
+            setsid "$SCRIPT_DIR/build-bg.sh" &
+            echo $! > "$BUILD_PID"
+            disown
+            echo "🔨 Starting background rebuild... (log: $BUILD_LOG)"
+            echo "   To cancel: kill -TERM -$(cat "$BUILD_PID")"
+        fi
+    else
+        echo "   ✓ Up to date"
+    fi
+else
+    BUILD_RUNNING_PID="$(cat "$BUILD_PID" 2>/dev/null || true)"
+    echo "🔨 Background image rebuild in progress... (log: $BUILD_LOG)"
+    [ -n "$BUILD_RUNNING_PID" ] && echo "   To cancel: kill -TERM -$BUILD_RUNNING_PID"
 fi
 
 # ── Container name from project dir ──────────────────────────
@@ -69,4 +110,6 @@ GIT_EMAIL="$(git config --global user.email 2>/dev/null || true)"
 )
 
 # ── Run ──────────────────────────────────────────────────────
-exec docker run "${ARGS[@]}" "$IMAGE_NAME" "$@"
+cleanup() { tput reset 2>/dev/null; }
+trap cleanup EXIT
+docker run "${ARGS[@]}" "$IMAGE_NAME" "$@"

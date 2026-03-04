@@ -13,4 +13,6 @@ HEAD
 hooks
 objects
 refs
-
+build.lock
+build.log
+build.pid

@@ -94,7 +94,8 @@ ARG CACHE_BUST=default
 RUN echo "Cache bust: ${CACHE_BUST}" && \
     curl -fsSL https://claude.ai/install.sh | bash && \
     install -m 0755 "$(readlink -f /root/.local/bin/claude)" /usr/local/bin/claude && \
-    /usr/local/bin/claude --version
+    /usr/local/bin/claude --version && \
+    /usr/local/bin/claude --version 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1 > /etc/claude-code-version
 
 # Clipboard support (Wayland)
 RUN apt-get update && apt-get install -y wl-clipboard && rm -rf /var/lib/apt/lists/*
