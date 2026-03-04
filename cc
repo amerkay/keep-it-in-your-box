@@ -77,13 +77,13 @@ ARGS=(
     -e HOST_HOME="$HOME"
     -e HOST_PWD="$PWD"
 
-    # Drop all capabilities, add back only what entrypoint needs for user setup + gosu
-    --cap-drop=ALL
-    --cap-add=SETUID
-    --cap-add=SETGID
-    --cap-add=CHOWN
-    --cap-add=DAC_OVERRIDE
-    --cap-add=FOWNER
+    # # Drop all capabilities, add back only what entrypoint needs for user setup + gosu
+    # --cap-drop=ALL
+    # --cap-add=SETUID
+    # --cap-add=SETGID
+    # --cap-add=CHOWN
+    # --cap-add=DAC_OVERRIDE
+    # --cap-add=FOWNER
 
     # Bridge network (Docker isolation) + Claude's built-in sandbox (domain allowlist)
     # Use --add-host to allow access to host dev servers if needed
@@ -113,4 +113,12 @@ GIT_EMAIL="$(git config --global user.email 2>/dev/null || true)"
 # ── Run ──────────────────────────────────────────────────────
 cleanup() { tput reset 2>/dev/null; }
 trap cleanup EXIT
-docker run "${ARGS[@]}" "$IMAGE_NAME" "$@"
+# If args are claude flags (start with -), prepend the default command
+# If no args, use default CMD; if first arg is a command (e.g. bash), pass through as-is
+if [ $# -eq 0 ]; then
+    docker run "${ARGS[@]}" "$IMAGE_NAME"
+elif [[ "$1" == -* ]]; then
+    docker run "${ARGS[@]}" "$IMAGE_NAME" claude --dangerously-skip-permissions "$@"
+else
+    docker run "${ARGS[@]}" "$IMAGE_NAME" "$@"
+fi

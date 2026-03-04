@@ -81,13 +81,8 @@ RUN ARCH=$(case $(uname -m) in \
 # Create symlinks for fd (some systems call it fdfind)
 RUN ln -sf /usr/bin/fdfind /usr/local/bin/fd
 
-# Install custom packages if specified
-ARG CUSTOM_PACKAGES=""
-RUN if [ -n "$CUSTOM_PACKAGES" ]; then \
-        apt-get update && \
-        DEBIAN_FRONTEND=noninteractive apt-get install -y $CUSTOM_PACKAGES && \
-        rm -rf /var/lib/apt/lists/*; \
-    fi
+# Install Playwright with browsers (cached before Claude Code)
+RUN npx playwright install --with-deps chromium
 
 # Install Claude Code via official native installer
 ARG CACHE_BUST=default
