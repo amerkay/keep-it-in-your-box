@@ -1,0 +1,16 @@
+.bash_profile
+.bashrc
+.gitconfig
+.gitmodules
+.idea
+.mcp.json
+.profile
+.ripgreprc
+.zprofile
+.zshrc
+config
+HEAD
+hooks
+objects
+refs
+
