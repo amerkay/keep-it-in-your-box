@@ -77,12 +77,13 @@ ARGS=(
     -e HOST_HOME="$HOME"
     -e HOST_PWD="$PWD"
 
-    # Bubblewrap runs in weaker nested mode (enableWeakerNestedSandbox in settings.json)
-    # Custom seccomp: Docker default + user namespaces + mount/umount2 (safe without CAP_SYS_ADMIN)
-    --security-opt seccomp="$SCRIPT_DIR/seccomp.json"
-    # AppArmor unconfined: required for bwrap bind mounts inside user namespaces
-    # No CAP_SYS_ADMIN means mount() only works inside unprivileged user namespaces
-    --security-opt apparmor=unconfined
+    # Drop all capabilities, add back only what entrypoint needs for user setup + gosu
+    --cap-drop=ALL
+    --cap-add=SETUID
+    --cap-add=SETGID
+    --cap-add=CHOWN
+    --cap-add=DAC_OVERRIDE
+    --cap-add=FOWNER
 
     # Bridge network (Docker isolation) + Claude's built-in sandbox (domain allowlist)
     # Use --add-host to allow access to host dev servers if needed
