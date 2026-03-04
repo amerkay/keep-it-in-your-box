@@ -27,7 +27,7 @@ if flock -n "$BUILD_LOCK" true 2>/dev/null || [ ! -f "$BUILD_LOCK" ]; then
     if [ -z "$INSTALLED_VERSION" ]; then
         INSTALLED_VERSION="$(docker run --rm --entrypoint="" "$IMAGE_NAME" claude --version 2>/dev/null | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
     fi
-    LATEST_VERSION="$(npm view @anthropic-ai/claude-code@latest version 2>/dev/null | tr -d '[:space:]' || true)"
+    LATEST_VERSION="$(curl -sf https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest 2>/dev/null | tr -d '[:space:]' || true)"
     echo "   Installed: ${INSTALLED_VERSION:-unknown}"
     echo "   Latest:    ${LATEST_VERSION:-unknown}"
 

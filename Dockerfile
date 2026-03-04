@@ -83,8 +83,10 @@ RUN ARCH=$(case $(uname -m) in \
 # Create symlinks for fd (some systems call it fdfind)
 RUN ln -sf /usr/bin/fdfind /usr/local/bin/fd
 
-# Install Playwright with browsers (cached before Claude Code)
-RUN npx playwright install --with-deps chromium
+# Install Playwright browsers to a shared location so any UID can use them
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+RUN npx playwright install --with-deps chromium && \
+    chmod -R o+rx /opt/playwright-browsers
 
 # Install Claude Code via official native installer
 ARG CACHE_BUST=default
@@ -100,6 +102,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENV SHELL=/bin/bash
 ENV TERM=xterm-256color
+ENV DISABLE_AUTOUPDATER=1
 
 # Set entrypoint for user management
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
