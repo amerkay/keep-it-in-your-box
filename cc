@@ -89,6 +89,10 @@ ARGS=(
     # Use --add-host to allow access to host dev servers if needed
     --add-host=host.docker.internal:host-gateway
 
+    # Disable telemetry
+    -e DISABLE_TELEMETRY=1
+    -e DISABLE_ERROR_REPORTING=1
+
     # Terminal
     -e COLUMNS="$(tput cols 2>/dev/null || echo 120)"
     -e LINES="$(tput lines 2>/dev/null || echo 40)"
