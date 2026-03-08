@@ -108,6 +108,26 @@ if [ -n "${HOST_HOME:-}" ] && [ "$HOST_HOME" != "$USER_HOME" ] && [ ! -e "$HOST_
 	ln -sf "$USER_HOME" "$HOST_HOME"
 fi
 
+# Symlink Playwright's Chromium to where Chrome DevTools MCP expects stable Chrome
+mkdir -p /opt/google/chrome 2>/dev/null || true
+ln -sf "$(readlink -f /usr/local/bin/google-chrome-stable)" /opt/google/chrome/chrome 2>/dev/null || true
+
+# npx wrapper: adds Docker-compatible flags when Chrome DevTools MCP is invoked.
+# Lives in /usr/local/bin (before /usr/bin in PATH) so it's container-only,
+# doesn't touch host-mounted plugin configs, and survives plugin updates.
+cat > /usr/local/bin/npx << 'NPXWRAPPER'
+#!/bin/sh
+real_npx="$(which -a npx | grep -v /usr/local/bin/npx | head -1)"
+for arg in "$@"; do
+  case "$arg" in chrome-devtools-mcp@*)
+    exec "$real_npx" "$@" --headless --executable-path=/usr/local/bin/google-chrome-stable --chrome-arg=--no-sandbox --chrome-arg=--disable-setuid-sandbox --no-usage-statistics
+    ;;
+  esac
+done
+exec "$real_npx" "$@"
+NPXWRAPPER
+chmod +x /usr/local/bin/npx
+
 # Set up environment for the target user
 export HOME="$USER_HOME"
 export PATH="$USER_HOME/.local/bin:${CCO_PREPEND_PATH:+$CCO_PREPEND_PATH:}$PATH"

@@ -36,6 +36,6 @@ docker build -t claude-code-sandbox .
 # Rebuild with custom packages
 docker build --build-arg CUSTOM_PACKAGES="golang ruby" -t claude-code-sandbox .
 
-# Force reinstall Claude Code (bust cache)
-docker build --build-arg CACHE_BUST=$(date +%s) -t claude-code-sandbox .
+# Force reinstall specific Claude Code version (Docker caches by version)
+docker build --build-arg CLAUDE_VERSION=2.1.71 -t claude-code-sandbox .
 ```

@@ -15,7 +15,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if docker build --build-arg CACHE_BUST="$(date +%s)" -t "${IMAGE_NAME}:building" "$SCRIPT_DIR" > "$BUILD_LOG" 2>&1 \
+LATEST_VERSION="$(curl -sf https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest 2>/dev/null | tr -d '[:space:]' || true)"
+if docker build --build-arg CLAUDE_VERSION="${LATEST_VERSION:-latest}" -t "${IMAGE_NAME}:building" "$SCRIPT_DIR" > "$BUILD_LOG" 2>&1 \
     && docker tag "${IMAGE_NAME}:building" "${IMAGE_NAME}:latest" \
     && docker rmi "${IMAGE_NAME}:building" >> "$BUILD_LOG" 2>&1; then
     echo "✅ Build complete — new image ready for next launch" >> "$BUILD_LOG"

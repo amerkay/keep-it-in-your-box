@@ -86,11 +86,13 @@ RUN ln -sf /usr/bin/fdfind /usr/local/bin/fd
 # Install Playwright browsers to a shared location so any UID can use them
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 RUN npx playwright install --with-deps chromium && \
-    chmod -R o+rx /opt/playwright-browsers
+    chmod -R o+rx /opt/playwright-browsers && \
+    ln -s "$(find /opt/playwright-browsers -name chrome -type f | head -1)" /usr/local/bin/google-chrome-stable && \
+    ln -s /usr/local/bin/google-chrome-stable /usr/local/bin/google-chrome
 
 # Install Claude Code via official native installer
-ARG CACHE_BUST=default
-RUN echo "Cache bust: ${CACHE_BUST}" && \
+ARG CLAUDE_VERSION=latest
+RUN echo "Installing Claude Code version: ${CLAUDE_VERSION}" && \
     curl -fsSL https://claude.ai/install.sh | bash && \
     install -m 0755 "$(readlink -f /root/.local/bin/claude)" /usr/local/bin/claude && \
     /usr/local/bin/claude --version && \

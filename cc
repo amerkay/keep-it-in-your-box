@@ -10,7 +10,8 @@ BUILD_PID="$SCRIPT_DIR/build.pid"
 # ── Build image if missing (blocking — can't proceed without it) ─
 if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
     echo "🔨 Building Claude Code image (first time, please wait)..."
-    docker build --build-arg CACHE_BUST="$(date +%s)" -t "$IMAGE_NAME" "$SCRIPT_DIR"
+    LATEST_VERSION="$(curl -sf https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest 2>/dev/null | tr -d '[:space:]' || true)"
+    docker build --build-arg CLAUDE_VERSION="${LATEST_VERSION:-latest}" -t "$IMAGE_NAME" "$SCRIPT_DIR"
 fi
 
 # ── Check for Claude Code updates ────────────────────────────
