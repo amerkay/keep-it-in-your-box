@@ -115,8 +115,15 @@ GIT_EMAIL="$(git config --global user.email 2>/dev/null || true)"
     -e GIT_COMMITTER_EMAIL="$GIT_EMAIL"
 )
 
+# ── Sleep guard (inhibit system sleep while Claude produces output) ──
+"$SCRIPT_DIR/sleep-guard.sh" "$CNAME" &
+SLEEP_GUARD_PID=$!
+
 # ── Run ──────────────────────────────────────────────────────
-cleanup() { tput reset 2>/dev/null; }
+cleanup() {
+    kill "$SLEEP_GUARD_PID" 2>/dev/null || true
+    tput reset 2>/dev/null
+}
 trap cleanup EXIT
 # If args are claude flags (start with -), prepend the default command
 # If no args, use default CMD; if first arg is a command (e.g. bash), pass through as-is
