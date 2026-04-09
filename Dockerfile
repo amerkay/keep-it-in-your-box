@@ -18,8 +18,6 @@ RUN apt-get update && apt-get install -y curl \
     netcat-openbsd telnet dnsutils iputils-ping \
     # Media processing
     ffmpeg \
-    # Container tools
-    docker.io \
     # System administration
     gosu procps \
     # Clipboard support (Wayland)
@@ -101,6 +99,9 @@ RUN echo "Installing Claude Code version: ${CLAUDE_VERSION}" && \
 # Copy entrypoint script (after Claude install so edits don't bust the cache)
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Audio (PulseAudio client for voice mode)
+RUN apt-get update && apt-get install -y pulseaudio-utils libpulse0 && rm -rf /var/lib/apt/lists/*
 
 ENV SHELL=/bin/bash
 ENV TERM=xterm-256color

@@ -23,6 +23,20 @@ Docker-based sandbox for running Claude Code in an isolated container. The `cc` 
 - Default CMD runs `claude --dangerously-skip-permissions`.
 - **Auto-update check**: On each launch, `cc` compares the installed Claude Code version (from `/etc/claude-code-version` in the image, with fallback to `claude --version`) against the latest npm version. If an update is available, user is prompted to rebuild in the background while continuing to use the current image. A lock file (`build.lock`) prevents concurrent rebuilds.
 
+## Security Posture
+
+**Hardened against container escape:** seccomp (mode 2), AppArmor (`docker-default` enforce), `--cap-drop=ALL` (only SETUID/SETGID/CHOWN/DAC_OVERRIDE/FOWNER added back for entrypoint), PID namespace isolation, no Docker socket, no host block devices, no writable `/proc/sys`.
+
+**Read-only mounts for host-executable paths:**
+- `.git/hooks` — prevents injecting hooks that run on host at next `git commit`
+- `~/.claude/hooks` — prevents injecting hooks that run on host in future Claude sessions
+
+**Accepted risks (required for workflow):**
+- `~/.claude.json` writable + network egress = credentials theoretically exfiltrable
+- Wayland socket mounted = container can read/write host clipboard
+- `host.docker.internal` routable to host network stack
+- Project directory writable (by design)
+
 ## Build & Run
 
 ```bash

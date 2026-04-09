@@ -42,7 +42,7 @@ if [ "$(id -u)" = "$HOST_UID" ]; then
 fi
 
 # Running as root, need to set up user
-echo "▶ Setting up container user with UID:GID ${HOST_UID}:${HOST_GID}..."
+echo "▶ Setting up container user with UID:GID ${HOST_UID}:${HOST_GID}..." >/dev/null
 
 # Create group if needed
 if ! getent group "$HOST_GID" >/dev/null 2>&1; then

@@ -9,7 +9,7 @@ BUILD_PID="$SCRIPT_DIR/build.pid"
 
 # ── Build image if missing (blocking — can't proceed without it) ─
 if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
-    echo "🔨 Building Claude Code image (first time, please wait)..."
+    echo "🔨 Building Claude Code image (first time, please wait)..." >&2
     LATEST_VERSION="$(curl -sf https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest 2>/dev/null | tr -d '[:space:]' || true)"
     docker build --build-arg CLAUDE_VERSION="${LATEST_VERSION:-latest}" -t "$IMAGE_NAME" "$SCRIPT_DIR"
 fi
@@ -22,34 +22,34 @@ if [ -f "$BUILD_LOCK" ] && flock -n "$BUILD_LOCK" true 2>/dev/null; then
 fi
 
 if flock -n "$BUILD_LOCK" true 2>/dev/null || [ ! -f "$BUILD_LOCK" ]; then
-    echo "🔍 Checking for Claude Code updates..."
+    echo "🔍 Checking for Claude Code updates..." >&2
     INSTALLED_VERSION="$(docker run --rm --entrypoint="" "$IMAGE_NAME" cat /etc/claude-code-version 2>/dev/null | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
     # Fallback for old images without the version file
     if [ -z "$INSTALLED_VERSION" ]; then
         INSTALLED_VERSION="$(docker run --rm --entrypoint="" "$IMAGE_NAME" claude --version 2>/dev/null | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
     fi
     LATEST_VERSION="$(curl -sf https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest 2>/dev/null | tr -d '[:space:]' || true)"
-    echo "   Installed: ${INSTALLED_VERSION:-unknown}"
-    echo "   Latest:    ${LATEST_VERSION:-unknown}"
+    echo "   Installed: ${INSTALLED_VERSION:-unknown}" >&2
+    echo "   Latest:    ${LATEST_VERSION:-unknown}" >&2
 
     if [ -n "$LATEST_VERSION" ] && { [ -z "$INSTALLED_VERSION" ] || [ "$INSTALLED_VERSION" != "$LATEST_VERSION" ]; }; then
-        echo "⬆️  Claude Code update available: $INSTALLED_VERSION → $LATEST_VERSION"
+        echo "⬆️  Claude Code update available: $INSTALLED_VERSION → $LATEST_VERSION" >&2
         read -rp "Rebuild image in background? [y/N] " answer
         if [[ "$answer" =~ ^[Yy]$ ]]; then
             # Background build in new process group (setsid) so kill -PGID kills entire tree
             setsid "$SCRIPT_DIR/build-bg.sh" &
             echo $! > "$BUILD_PID"
             disown
-            echo "🔨 Starting background rebuild... (log: $BUILD_LOG)"
-            echo "   To cancel: kill -TERM -$(cat "$BUILD_PID")"
+            echo "🔨 Starting background rebuild... (log: $BUILD_LOG)" >&2
+            echo "   To cancel: kill -TERM -$(cat "$BUILD_PID")" >&2
         fi
     else
-        echo "   ✓ Up to date"
+        echo "   ✓ Up to date" >&2
     fi
 else
     BUILD_RUNNING_PID="$(cat "$BUILD_PID" 2>/dev/null || true)"
-    echo "🔨 Background image rebuild in progress... (log: $BUILD_LOG)"
-    [ -n "$BUILD_RUNNING_PID" ] && echo "   To cancel: kill -TERM -$BUILD_RUNNING_PID"
+    echo "🔨 Background image rebuild in progress... (log: $BUILD_LOG)" >&2
+    [ -n "$BUILD_RUNNING_PID" ] && echo "   To cancel: kill -TERM -$BUILD_RUNNING_PID" >&2
 fi
 
 # ── Container name from project dir ──────────────────────────
@@ -78,13 +78,13 @@ ARGS=(
     -e HOST_HOME="$HOME"
     -e HOST_PWD="$PWD"
 
-    # # Drop all capabilities, add back only what entrypoint needs for user setup + gosu
-    # --cap-drop=ALL
-    # --cap-add=SETUID
-    # --cap-add=SETGID
-    # --cap-add=CHOWN
-    # --cap-add=DAC_OVERRIDE
-    # --cap-add=FOWNER
+    # Drop all capabilities, add back only what entrypoint needs for user setup + gosu
+    --cap-drop=ALL
+    --cap-add=SETUID
+    --cap-add=SETGID
+    --cap-add=CHOWN
+    --cap-add=DAC_OVERRIDE
+    --cap-add=FOWNER
 
     # Bridge network (Docker isolation) + Claude's built-in sandbox (domain allowlist)
     # Use --add-host to allow access to host dev servers if needed
@@ -115,6 +115,15 @@ GIT_EMAIL="$(git config --global user.email 2>/dev/null || true)"
     -e GIT_COMMITTER_EMAIL="$GIT_EMAIL"
 )
 
+# ── Protect paths that could execute code on the host ──
+if [ -d "$PWD/.git/hooks" ]; then
+    ARGS+=(-v "$PWD/.git/hooks:$PWD/.git/hooks:ro")
+fi
+if [ -d "$HOME/.claude/hooks" ]; then
+    ARGS+=(-v "$HOME/.claude/hooks:$HOME/.claude/hooks:ro")
+    ARGS+=(-v "$HOME/.claude/hooks:/home/hostuser/.claude/hooks:ro")
+fi
+
 # ── Sleep guard (inhibit system sleep while Claude produces output) ──
 "$SCRIPT_DIR/sleep-guard.sh" "$CNAME" &
 SLEEP_GUARD_PID=$!
@@ -125,6 +134,10 @@ cleanup() {
     tput reset 2>/dev/null
 }
 trap cleanup EXIT
+
+# Reset terminal so Claude's TUI starts with a clean screen
+tput reset 2>/dev/null
+
 # If args are claude flags (start with -), prepend the default command
 # If no args, use default CMD; if first arg is a command (e.g. bash), pass through as-is
 if [ $# -eq 0 ]; then
