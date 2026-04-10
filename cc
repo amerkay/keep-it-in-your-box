@@ -124,6 +124,55 @@ if [ -d "$HOME/.claude/hooks" ]; then
     ARGS+=(-v "$HOME/.claude/hooks:/home/hostuser/.claude/hooks:ro")
 fi
 
+# ── Honor .ccignore: mask listed paths from the project mount ──
+# Lines with no '/' match recursively by basename (e.g. ".env" masks every
+# .env in the tree, skipping .git). Lines with '/' are exact paths relative
+# to $PWD. Files become a '#'-commented stub; directories become an overlay
+# containing only REDACTED.md. Entries nested under an already-masked path
+# are dropped — Docker can't create mountpoints inside a read-only overlay.
+CCIGNORE_TMP=""
+if [ -f "$PWD/.ccignore" ]; then
+    CCIGNORE_TMP="$(mktemp -d)"
+    mkdir -p "$CCIGNORE_TMP/dir"
+    REDACT_MSG="# REDACTED: This path was redacted inside the Claude Code container by .ccignore. The real contents are available on the host machine."
+    printf '%s\n' "$REDACT_MSG" > "$CCIGNORE_TMP/dir/REDACTED.md"
+    printf '%s\n' "$REDACT_MSG" > "$CCIGNORE_TMP/file"
+
+    targets=()
+    while IFS= read -r entry || [ -n "$entry" ]; do
+        entry="${entry%%#*}"; entry="${entry%$'\r'}"; entry="${entry%/}"
+        [ -z "$entry" ] && continue
+        case "$entry" in /*|*..*) echo "⚠️  .ccignore: unsafe path '$entry'" >&2; continue;; esac
+        if [[ "$entry" != */* ]]; then
+            found=0
+            while IFS= read -r -d '' m; do targets+=("$m"); found=1; done \
+                < <(find "$PWD" -name .git -prune -o -name "$entry" -print0 2>/dev/null)
+            [ "$found" = 0 ] && echo "⚠️  .ccignore: no matches for '$entry'" >&2
+        elif [ -e "$PWD/$entry" ]; then
+            targets+=("$PWD/$entry")
+        else
+            echo "⚠️  .ccignore: '$entry' does not exist" >&2
+        fi
+    done < "$PWD/.ccignore"
+
+    # Sort shortest-first, then skip anything equal-to or nested-under an accepted path.
+    accepted=()
+    if [ "${#targets[@]}" -gt 0 ]; then
+        while IFS= read -r t; do
+            for p in "${accepted[@]}"; do
+                [[ "$t" == "$p" || "$t" == "$p"/* ]] && continue 2
+            done
+            accepted+=("$t")
+            if [ -d "$t" ]; then
+                ARGS+=(-v "$CCIGNORE_TMP/dir:$t:ro")
+            else
+                ARGS+=(-v "$CCIGNORE_TMP/file:$t:ro")
+            fi
+        done < <(printf '%s\n' "${targets[@]}" | awk '{print length,$0}' | sort -n -s | cut -d' ' -f2-)
+        echo "🛡️  .ccignore: masking ${#accepted[@]} path(s)" >&2
+    fi
+fi
+
 # ── Sleep guard (inhibit system sleep while Claude produces output) ──
 "$SCRIPT_DIR/sleep-guard.sh" "$CNAME" &
 SLEEP_GUARD_PID=$!
@@ -131,6 +180,7 @@ SLEEP_GUARD_PID=$!
 # ── Run ──────────────────────────────────────────────────────
 cleanup() {
     kill "$SLEEP_GUARD_PID" 2>/dev/null || true
+    [ -n "$CCIGNORE_TMP" ] && rm -rf "$CCIGNORE_TMP"
     tput reset 2>/dev/null
 }
 trap cleanup EXIT
