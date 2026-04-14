@@ -55,13 +55,84 @@ fi
 # ── Container name from project dir ──────────────────────────
 CNAME="cc-$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')-$$"
 
+# ── .ccignore FUSE sidecar (masks matched paths at launch AND mid-session) ──
+# Runs a FUSE redacting passthrough in a separate container and exposes it
+# to the main container via shared-mount propagation. Host needs nothing
+# beyond docker; main container keeps cap-drop=ALL — only the sidecar gets
+# SYS_ADMIN + /dev/fuse, and its only code is ccignore-fuse.py over a
+# read-only view of $PWD.
+FUSE_SESSION_DIR=""
+FUSE_CNAME=""
+FUSE_FAILED=0
+PROJECT_MOUNT_SRC="$PWD"
+PROJECT_MOUNT_OPTS=""
+if [ -f "$PWD/.ccignore" ]; then
+    # Propagation of the scratch dir must be shared so the sidecar's FUSE
+    # mount is visible to the main container through the host.
+    _prop="$(findmnt -no PROPAGATION --target /tmp 2>/dev/null || true)"
+    if [[ "$_prop" != *shared* ]]; then
+        echo "⚠️  .ccignore: /tmp is not a shared mount ($_prop); falling back to" >&2
+        echo "   launch-time-only masking. Files created mid-session will NOT be masked." >&2
+        FUSE_SESSION_DIR=""
+    else
+        FUSE_SESSION_DIR="$(mktemp -d -p /tmp cc-fuse.XXXXXX)"
+        chmod 755 "$FUSE_SESSION_DIR"
+        mkdir -m 755 "$FUSE_SESSION_DIR/mnt"
+        cp "$PWD/.ccignore" "$FUSE_SESSION_DIR/patterns"
+        chmod 644 "$FUSE_SESSION_DIR/patterns"
+        FUSE_CNAME="${CNAME}-fuse"
+        if docker run -d --name "$FUSE_CNAME" \
+            --cap-drop=ALL --cap-add=SYS_ADMIN \
+            --device /dev/fuse --security-opt apparmor=unconfined \
+            --user "$(id -u):$(id -g)" --userns=host --entrypoint python3 \
+            --network none \
+            -v "$PWD:/src" \
+            -v "$FUSE_SESSION_DIR:$FUSE_SESSION_DIR:rshared" \
+            -v /etc/passwd:/etc/passwd:ro \
+            -v /etc/group:/etc/group:ro \
+            "$IMAGE_NAME" \
+            /usr/local/bin/ccignore-fuse.py \
+                --src /src --mnt "$FUSE_SESSION_DIR/mnt" \
+                --patterns-file "$FUSE_SESSION_DIR/patterns" >/dev/null; then
+            # Wait for mount to be live (≤5s).
+            for _ in $(seq 1 100); do
+                if mountpoint -q "$FUSE_SESSION_DIR/mnt" 2>/dev/null; then break; fi
+                sleep 0.05
+            done
+            if mountpoint -q "$FUSE_SESSION_DIR/mnt" 2>/dev/null; then
+                PROJECT_MOUNT_SRC="$FUSE_SESSION_DIR/mnt"
+                PROJECT_MOUNT_OPTS=":rslave"
+                echo "🛡️  .ccignore: FUSE redacting mount active (sidecar: $FUSE_CNAME)" >&2
+            else
+                echo "❌ .ccignore: FUSE sidecar failed to mount; sidecar logs:" >&2
+                docker logs "$FUSE_CNAME" 2>&1 | sed 's/^/   /' >&2 || true
+                docker rm -f "$FUSE_CNAME" >/dev/null 2>&1 || true
+                rm -rf "$FUSE_SESSION_DIR"
+                FUSE_SESSION_DIR=""
+                FUSE_CNAME=""
+                echo "   Refusing to launch with leaky fallback masking. Aborting." >&2
+                FUSE_FAILED=1
+                exit 1
+            fi
+        else
+            echo "❌ .ccignore: could not start FUSE sidecar. Aborting." >&2
+            rm -rf "$FUSE_SESSION_DIR"
+            FUSE_SESSION_DIR=""
+            FUSE_CNAME=""
+            FUSE_FAILED=1
+            exit 1
+        fi
+    fi
+fi
+
 # ── Docker args ──────────────────────────────────────────────
 ARGS=(
     --rm -it
     --name "$CNAME"
 
-    # Mount project at same path as host so Claude uses correct project config
-    -v "$PWD:$PWD"
+    # Mount project at same path as host so Claude uses correct project config.
+    # When FUSE is active, source is the redacting mount with rslave propagation.
+    -v "$PROJECT_MOUNT_SRC:$PWD$PROJECT_MOUNT_OPTS"
 
     # Shared config: OAuth tokens, settings, conversation history
     # Mount at both host home path and container user home so both resolve
@@ -124,14 +195,11 @@ if [ -d "$HOME/.claude/hooks" ]; then
     ARGS+=(-v "$HOME/.claude/hooks:/home/hostuser/.claude/hooks:ro")
 fi
 
-# ── Honor .ccignore: mask listed paths from the project mount ──
-# Lines with no '/' match recursively by basename (e.g. ".env" masks every
-# .env in the tree, skipping .git). Lines with '/' are exact paths relative
-# to $PWD. Files become a '#'-commented stub; directories become an overlay
-# containing only REDACTED.md. Entries nested under an already-masked path
-# are dropped — Docker can't create mountpoints inside a read-only overlay.
+# ── Fallback: launch-time-only .ccignore masking via bind mounts ──
+# Only used when the FUSE sidecar above didn't activate (e.g. /tmp not shared).
+# Same caveat as before: files created on host AFTER launch are NOT masked.
 CCIGNORE_TMP=""
-if [ -f "$PWD/.ccignore" ]; then
+if [ -f "$PWD/.ccignore" ] && [ -z "$FUSE_SESSION_DIR" ]; then
     CCIGNORE_TMP="$(mktemp -d)"
     mkdir -p "$CCIGNORE_TMP/dir"
     REDACT_MSG="# REDACTED: This path was redacted inside the Claude Code container by .ccignore. The real contents are available on the host machine."
@@ -181,7 +249,16 @@ SLEEP_GUARD_PID=$!
 cleanup() {
     kill "$SLEEP_GUARD_PID" 2>/dev/null || true
     [ -n "$CCIGNORE_TMP" ] && rm -rf "$CCIGNORE_TMP"
-    tput reset 2>/dev/null
+    if [ -n "$FUSE_CNAME" ]; then
+        docker stop "$FUSE_CNAME" >/dev/null 2>&1 || true
+        docker rm -f "$FUSE_CNAME" >/dev/null 2>&1 || true
+    fi
+    if [ -n "$FUSE_SESSION_DIR" ]; then
+        fusermount3 -u "$FUSE_SESSION_DIR/mnt" 2>/dev/null \
+            || fusermount -u "$FUSE_SESSION_DIR/mnt" 2>/dev/null || true
+        rm -rf "$FUSE_SESSION_DIR"
+    fi
+    [ "$FUSE_FAILED" = 1 ] || tput reset 2>/dev/null
 }
 trap cleanup EXIT
 

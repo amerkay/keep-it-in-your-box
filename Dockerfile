@@ -28,7 +28,11 @@ RUN apt-get update && apt-get install -y curl \
     direnv \
     # Required for Claude Code's built-in sandbox
     bubblewrap socat \
+    # FUSE runtime for the .ccignore redacting sidecar
+    fuse3 libfuse2 \
     && rm -rf /var/lib/apt/lists/* \
+    && pip install --break-system-packages --no-cache-dir fusepy \
+    && echo 'user_allow_other' > /etc/fuse.conf \
     && echo 'eval "$(direnv hook bash)"' >> /etc/bash.bashrc
 
 # Install packages not available in Debian repos
@@ -98,7 +102,8 @@ RUN echo "Installing Claude Code version: ${CLAUDE_VERSION}" && \
 
 # Copy entrypoint script (after Claude install so edits don't bust the cache)
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+COPY ccignore-fuse.py /usr/local/bin/ccignore-fuse.py
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/ccignore-fuse.py
 
 # Audio (PulseAudio client for voice mode)
 RUN apt-get update && apt-get install -y pulseaudio-utils libpulse0 && rm -rf /var/lib/apt/lists/*
