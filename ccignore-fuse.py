@@ -4,9 +4,12 @@
 # reads return the redaction stub and writes return EACCES.
 # Patterns file uses .ccignore syntax: bare basename = recursive (excluding
 # .git), path with '/' = exact relative to src root, '#' starts a comment.
+# Patterns may contain shell-glob wildcards (*, ?, []); for '/'-containing
+# rules each path component is matched independently so '*' never crosses '/'.
 
 import argparse
 import errno
+import fnmatch
 import os
 import sys
 from pathlib import PurePosixPath
@@ -14,8 +17,9 @@ from pathlib import PurePosixPath
 from fuse import FUSE, FuseOSError, Operations
 
 STUB = (
-    b"# REDACTED: This path was redacted inside the Claude Code container "
-    b"by .ccignore. The real contents are available on the host machine.\n"
+    b"# REDACTED BY .ccignore \xe2\x80\x94 hidden from this Claude Code Docker sandbox by user policy.\n"
+    b"# Intentional, not an error. All access paths return this stub; writes return EACCES.\n"
+    b"# Ask the user directly if you need the contents \xe2\x80\x94 don't try to work around it.\n"
 )
 REDACTED_NAME = "REDACTED.md"
 
@@ -46,6 +50,24 @@ class Redact(Operations):
     def _rel(self, path):
         return path.lstrip("/")
 
+    def _match_basename(self, seg):
+        """True if a path segment matches any bare-basename rule (glob-aware)."""
+        return any(fnmatch.fnmatch(seg, pat) for pat in self.basenames)
+
+    def _match_exact(self, anc):
+        """True if a relative ancestor matches any '/'-containing rule.
+
+        Matches component-by-component so a '*' in a rule never spans '/'.
+        """
+        apar = anc.split("/")
+        for pat in self.exacts:
+            ppar = pat.split("/")
+            if len(ppar) == len(apar) and all(
+                fnmatch.fnmatch(a, p) for a, p in zip(apar, ppar)
+            ):
+                return True
+        return False
+
     def _classify(self, path):
         """Return ('pass'|'file'|'dir'|'inside', masked_rel_root).
 
@@ -64,7 +86,7 @@ class Redact(Operations):
         # Check exact rules against ancestors.
         for i in range(1, len(parts) + 1):
             anc = "/".join(parts[:i])
-            if anc in self.exacts:
+            if self._match_exact(anc):
                 real = self._real(anc)
                 kind = "dir" if os.path.isdir(real) else "file"
                 if i == len(parts):
@@ -74,7 +96,7 @@ class Redact(Operations):
         # Basename rules against each path segment (skip inside .git).
         if not under_git:
             for i, seg in enumerate(parts, start=1):
-                if seg in self.basenames:
+                if self._match_basename(seg):
                     anc = "/".join(parts[:i])
                     real = self._real(anc)
                     if not os.path.lexists(real):
