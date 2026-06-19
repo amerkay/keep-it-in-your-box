@@ -16,3 +16,4 @@ refs
 build.lock
 build.log
 build.pid
+__pycache__/
