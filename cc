@@ -83,6 +83,76 @@ fi
 # ── Container name from project dir ──────────────────────────
 CNAME="cc-$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g')-$$"
 
+# ── Sync .ccignore → .gitignore + install host pre-commit guard ──
+# .ccignore hides sensitive paths from the container, but nothing stops git
+# from committing them on the host — leaking their real contents into history
+# and diffs. Keep them out of git two ways: (1) mirror .ccignore into a managed
+# block in .gitignore (blocks untracked files from being added), and (2) install
+# a pre-commit hook (the real backstop — also catches already-tracked files).
+# Anchored at the git toplevel; if cc is launched from a subdir, skip with a note.
+if [ -f "$PWD/.ccignore" ]; then
+    _git_top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [ -z "$_git_top" ]; then
+        : # not a git repo — nothing to sync
+    elif [ "$(realpath "$_git_top" 2>/dev/null || echo "$_git_top")" != "$(realpath "$PWD" 2>/dev/null || echo "$PWD")" ]; then
+        echo "ℹ️  .ccignore: launched from a subdir of the git repo; skipping" >&2
+        echo "   .gitignore sync + pre-commit guard (they anchor at the repo root)." >&2
+    else
+        # (1) Translate .ccignore rules to gitignore syntax. Bare names match
+        #     anywhere (same as gitignore); '/'-containing rules anchor at root.
+        #     Skip leading-'/' and '..'-component rules (unsafe — fuse skips too).
+        _cc_patterns=""
+        while IFS= read -r _line || [ -n "$_line" ]; do
+            _line="${_line%%#*}"
+            _line="${_line#"${_line%%[![:space:]]*}"}" # ltrim
+            _line="${_line%"${_line##*[![:space:]]}"}" # rtrim
+            _line="${_line%/}"
+            [ -z "$_line" ] && continue
+            case "$_line" in
+                /*) continue ;;
+            esac
+            case "/$_line/" in
+                */../*) continue ;;
+            esac
+            case "$_line" in
+                */*) _cc_patterns+="/$_line"$'\n' ;;
+                *) _cc_patterns+="$_line"$'\n' ;;
+            esac
+        done < "$PWD/.ccignore"
+
+        _gi="$PWD/.gitignore"
+        _begin="# >>> ccignore (auto-synced by cc — do not edit this block) >>>"
+        _end="# <<< ccignore (auto-synced by cc) <<<"
+        # Strip any prior managed block, preserving everything else.
+        _rest=""
+        [ -f "$_gi" ] && _rest="$(awk -v b="$_begin" -v e="$_end" '
+            $0==b {skip=1; next} $0==e {skip=0; next} !skip {print}' "$_gi")"
+        {
+            [ -n "$_rest" ] && printf '%s\n' "$_rest"
+            if [ -n "$_cc_patterns" ]; then
+                printf '%s\n' "$_begin"
+                printf '%s\n' "# Mirrors .ccignore so paths hidden from the sandbox are never committed."
+                printf '%s' "$_cc_patterns"
+                printf '%s\n' "$_end"
+            fi
+        } > "$_gi.cc.tmp" && mv "$_gi.cc.tmp" "$_gi"
+
+        # (2) Install / refresh the pre-commit guard (host-side enforcement).
+        _hooks="$PWD/.git/hooks"
+        _hook="$_hooks/pre-commit"
+        [ -d "$_hooks" ] || mkdir -p "$_hooks"
+        if [ -e "$_hook" ] && ! grep -q "MARKER: ccignore-precommit" "$_hook" 2>/dev/null; then
+            echo "⚠️  .ccignore: existing pre-commit hook at $_hook; not overwriting." >&2
+            echo "   ccignored files may still be committable — merge the guard manually" >&2
+            echo "   from $SCRIPT_DIR/ccignore-precommit.py" >&2
+        elif ! cmp -s "$SCRIPT_DIR/ccignore-precommit.py" "$_hook" 2>/dev/null; then
+            cp "$SCRIPT_DIR/ccignore-precommit.py" "$_hook" && chmod +x "$_hook"
+        fi
+        unset _cc_patterns _gi _begin _end _rest _hooks _hook _line
+    fi
+    unset _git_top
+fi
+
 # ── .ccignore FUSE sidecar (masks matched paths at launch AND mid-session) ──
 # Runs a FUSE redacting passthrough in a separate container and exposes it
 # to the main container via shared-mount propagation. Host needs nothing
