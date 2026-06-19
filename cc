@@ -1,6 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ── Guard: forbid launching from sensitive host directories ──
+# Blocks $HOME, ~/Desktop, ~/Documents, ~/Downloads when they are the
+# current directory exactly. Subdirectories are allowed. Runs before
+# any trap or `tput reset` so the error stays on screen after exit.
+_resolved_pwd="$(realpath "$PWD" 2>/dev/null || echo "$PWD")"
+_resolved_home="$(realpath "$HOME" 2>/dev/null || echo "$HOME")"
+_blocked=""
+if [ "$_resolved_pwd" = "$_resolved_home" ]; then
+    _blocked="\$HOME"
+else
+    for _dir in Desktop Documents Downloads; do
+        if [ "$_resolved_pwd" = "$_resolved_home/$_dir" ]; then
+            _blocked="~/$_dir"
+            break
+        fi
+    done
+fi
+if [ -n "$_blocked" ]; then
+    echo "" >&2
+    echo "❌ cc refuses to launch from $_blocked ($PWD)." >&2
+    echo "   These directories are on the permanent forbidden list:" >&2
+    echo "     \$HOME, ~/Desktop, ~/Documents, ~/Downloads" >&2
+    echo "   (subdirectories are allowed — cd into one and retry.)" >&2
+    echo "" >&2
+    exit 1
+fi
+unset _resolved_pwd _resolved_home _blocked _dir
+
 IMAGE_NAME="claude-code-sandbox"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_LOCK="$SCRIPT_DIR/build.lock"
