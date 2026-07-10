@@ -106,6 +106,13 @@ if [ -f "$PWD/.ccignore" ]; then
             _line="${_line%%#*}"
             _line="${_line#"${_line%%[![:space:]]*}"}" # ltrim
             _line="${_line%"${_line##*[![:space:]]}"}" # rtrim
+            # Detach a leading '!' (negation) so the anchoring '/' we add below
+            # goes *after* it (!/foo, not /!foo — the latter is a literal path
+            # starting with '!' and negates nothing). Re-attached at the end.
+            _neg=""
+            case "$_line" in
+                !*) _neg="!"; _line="${_line#!}" ;;
+            esac
             _line="${_line%/}"
             [ -z "$_line" ] && continue
             case "$_line" in
@@ -115,8 +122,8 @@ if [ -f "$PWD/.ccignore" ]; then
                 */../*) continue ;;
             esac
             case "$_line" in
-                */*) _cc_patterns+="/$_line"$'\n' ;;
-                *) _cc_patterns+="$_line"$'\n' ;;
+                */*) _cc_patterns+="$_neg/$_line"$'\n' ;;
+                *) _cc_patterns+="$_neg$_line"$'\n' ;;
             esac
         done < "$PWD/.ccignore"
 
