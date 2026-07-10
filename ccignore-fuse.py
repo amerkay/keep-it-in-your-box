@@ -6,6 +6,9 @@
 # .git), path with '/' = exact relative to src root, '#' starts a comment.
 # Patterns may contain shell-glob wildcards (*, ?, []); for '/'-containing
 # rules each path component is matched independently so '*' never crosses '/'.
+# A leading '!' negates (re-includes), gitignore-style: rules apply in order,
+# last match wins, so 'dir/*' then '!dir/keep' un-masks keep. A path under an
+# already-masked parent directory can't be re-included (git's parent rule).
 
 import argparse
 import errno
@@ -25,24 +28,34 @@ REDACTED_NAME = "REDACTED.md"
 
 
 def load_rules(path):
-    basenames, exacts = set(), set()
+    """Parse .ccignore into an ordered list of (negated, pattern, is_exact).
+
+    Order is preserved so gitignore-style last-match-wins negation works:
+    a later '!' rule re-includes a path an earlier rule masked.
+    """
+    rules = []
     with open(path) as f:
         for line in f:
-            line = line.split("#", 1)[0].strip().rstrip("/")
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            neg = line.startswith("!")
+            if neg:
+                line = line[1:].strip()
+            line = line.rstrip("/")
             if not line:
                 continue
             if line.startswith("/") or ".." in line.split("/"):
                 print(f"ccignore-fuse: skipping unsafe rule {line!r}", file=sys.stderr)
                 continue
-            (exacts if "/" in line else basenames).add(line)
-    return basenames, exacts
+            rules.append((neg, line, "/" in line))
+    return rules
 
 
 class Redact(Operations):
-    def __init__(self, src, basenames, exacts):
+    def __init__(self, src, rules):
         self.src = os.path.realpath(src)
-        self.basenames = basenames
-        self.exacts = exacts
+        self.rules = rules
 
     def _real(self, path):
         return os.path.join(self.src, path.lstrip("/"))
@@ -50,23 +63,41 @@ class Redact(Operations):
     def _rel(self, path):
         return path.lstrip("/")
 
-    def _match_basename(self, seg):
-        """True if a path segment matches any bare-basename rule (glob-aware)."""
-        return any(fnmatch.fnmatch(seg, pat) for pat in self.basenames)
+    def _rule_matches(self, pat, exact, anc, seg, under_git):
+        """True if a single rule matches this ancestor / segment (glob-aware).
 
-    def _match_exact(self, anc):
-        """True if a relative ancestor matches any '/'-containing rule.
-
-        Matches component-by-component so a '*' in a rule never spans '/'.
+        Exact ('/'-containing) rules match the ancestor component-by-component
+        so a '*' never spans '/'; bare-basename rules match one segment and
+        never apply inside .git.
         """
-        apar = anc.split("/")
-        for pat in self.exacts:
+        if exact:
+            apar = anc.split("/")
             ppar = pat.split("/")
-            if len(ppar) == len(apar) and all(
+            return len(ppar) == len(apar) and all(
                 fnmatch.fnmatch(a, p) for a, p in zip(apar, ppar)
-            ):
+            )
+        return not under_git and fnmatch.fnmatch(seg, pat)
+
+    def _ignored(self, rel):
+        """Gitignore-consistent mask test for one relative path.
+
+        Rules apply in order and the last match wins, so 'dir/*' followed by
+        '!dir/keep' leaves keep un-masked. A path beneath an already-masked
+        *parent directory* can't be re-included (git's parent-exclusion rule).
+        """
+        parts = rel.split("/")
+        under_git = parts[0] == ".git"
+        ignored = False
+        for i in range(1, len(parts) + 1):
+            anc = "/".join(parts[:i])
+            seg = parts[i - 1]
+            for neg, pat, exact in self.rules:
+                if self._rule_matches(pat, exact, anc, seg, under_git):
+                    ignored = not neg
+            # A masked proper-ancestor directory seals everything beneath it.
+            if ignored and i < len(parts):
                 return True
-        return False
+        return ignored
 
     def _classify(self, path):
         """Return ('pass'|'file'|'dir'|'inside', masked_rel_root).
@@ -80,34 +111,20 @@ class Redact(Operations):
         if rel == "":
             return ("pass", "")
         parts = rel.split("/")
-        # .git is never masked by bare-basename rules
-        under_git = parts[0] == ".git"
-
-        # Check exact rules against ancestors.
+        # The shallowest masked ancestor is the redaction root; negation
+        # (honored inside _ignored) can leave the leaf un-masked entirely.
         for i in range(1, len(parts) + 1):
             anc = "/".join(parts[:i])
-            if self._match_exact(anc):
+            if self._ignored(anc):
                 real = self._real(anc)
-                kind = "dir" if os.path.isdir(real) else "file"
+                is_dir = os.path.isdir(real)
                 if i == len(parts):
-                    return (kind, anc)
-                return ("inside", anc) if kind == "dir" else ("file", anc)
-
-        # Basename rules against each path segment (skip inside .git).
-        if not under_git:
-            for i, seg in enumerate(parts, start=1):
-                if self._match_basename(seg):
-                    anc = "/".join(parts[:i])
-                    real = self._real(anc)
-                    if not os.path.lexists(real):
-                        # Non-existent path but matches a rule: treat as masked file
-                        # so creation attempts are denied too.
-                        return ("file", anc) if i == len(parts) else ("inside", anc)
-                    kind = "dir" if os.path.isdir(real) else "file"
-                    if i == len(parts):
-                        return (kind, anc)
-                    return ("inside", anc) if kind == "dir" else ("file", anc)
-
+                    return ("dir" if is_dir else "file", anc)
+                # Proper ancestor: a real dir (or non-existent path, so
+                # creation stays denied) shrouds what's beneath it.
+                if is_dir or not os.path.lexists(real):
+                    return ("inside", anc)
+                return ("file", anc)
         return ("pass", "")
 
     # ── read-only metadata ───────────────────────────────────────
@@ -300,16 +317,16 @@ def main():
     ap.add_argument("--patterns-file", required=True)
     args = ap.parse_args()
 
-    basenames, exacts = load_rules(args.patterns_file)
+    rules = load_rules(args.patterns_file)
     print(
         f"ccignore-fuse: src={args.src} mnt={args.mnt} "
-        f"basenames={sorted(basenames)} exacts={sorted(exacts)}",
+        f"rules={[('!' if n else '') + p for n, p, _ in rules]}",
         file=sys.stderr,
         flush=True,
     )
 
     FUSE(
-        Redact(args.src, basenames, exacts),
+        Redact(args.src, rules),
         args.mnt,
         foreground=True,
         allow_other=True,

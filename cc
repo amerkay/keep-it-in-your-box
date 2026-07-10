@@ -195,6 +195,7 @@ if [ -f "$PWD/.ccignore" ]; then
             -v "$FUSE_SESSION_DIR:$FUSE_SESSION_DIR:rshared" \
             -v /etc/passwd:/etc/passwd:ro \
             -v /etc/group:/etc/group:ro \
+            -v "$SCRIPT_DIR/ccignore-fuse.py:/usr/local/bin/ccignore-fuse.py:ro" \
             "$IMAGE_NAME" \
             /usr/local/bin/ccignore-fuse.py \
                 --src /src --mnt "$FUSE_SESSION_DIR/mnt" \

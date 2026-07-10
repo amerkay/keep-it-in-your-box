@@ -9,6 +9,7 @@
 # Rule syntax mirrors ccignore-fuse.py exactly:
 #   bare basename  -> matches that name as any path component (excluding .git)
 #   path with '/'  -> exact, relative to repo root, '*' never crosses '/'
+#   leading '!'    -> negation (re-include), gitignore last-match-wins order
 #   '#'            -> comment; leading-'/' and '..' rules are skipped as unsafe
 #
 # Bypass intentionally (not recommended) with: git commit --no-verify
@@ -20,39 +21,49 @@ import sys
 
 
 def load_rules(path):
-    basenames, exacts = set(), set()
+    """Ordered list of (negated, pattern, is_exact); order preserved so a
+    later '!' rule re-includes a path an earlier rule matched."""
+    rules = []
     with open(path) as f:
         for line in f:
-            line = line.split("#", 1)[0].strip().rstrip("/")
+            line = line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            neg = line.startswith("!")
+            if neg:
+                line = line[1:].strip()
+            line = line.rstrip("/")
             if not line:
                 continue
             if line.startswith("/") or ".." in line.split("/"):
                 continue
-            (exacts if "/" in line else basenames).add(line)
-    return basenames, exacts
+            rules.append((neg, line, "/" in line))
+    return rules
 
 
-def matches(rel, basenames, exacts):
+def matches(rel, rules):
+    """Gitignore-consistent: last matching rule wins, and a path under an
+    already-masked parent directory can't be re-included by negation."""
     parts = rel.split("/")
     under_git = parts[0] == ".git"
-
-    # Exact rules against each ancestor, component-by-component so '*' never
-    # spans a '/'.
+    ignored = False
     for i in range(1, len(parts) + 1):
-        apar = parts[:i]
-        for pat in exacts:
-            ppar = pat.split("/")
-            if len(ppar) == len(apar) and all(
-                fnmatch.fnmatch(a, p) for a, p in zip(apar, ppar)
-            ):
-                return True
-
-    # Basename rules against each path segment (never inside .git).
-    if not under_git:
-        for seg in parts:
-            if any(fnmatch.fnmatch(seg, pat) for pat in basenames):
-                return True
-    return False
+        anc = parts[:i]
+        seg = parts[i - 1]
+        for neg, pat, exact in rules:
+            if exact:
+                ppar = pat.split("/")
+                hit = len(ppar) == len(anc) and all(
+                    fnmatch.fnmatch(a, p) for a, p in zip(anc, ppar)
+                )
+            else:
+                hit = not under_git and fnmatch.fnmatch(seg, pat)
+            if hit:
+                ignored = not neg
+        # A masked proper-ancestor directory seals everything beneath it.
+        if ignored and i < len(parts):
+            return True
+    return ignored
 
 
 def main():
@@ -69,13 +80,13 @@ def main():
     if not os.path.exists(ccignore):
         return 0
 
-    basenames, exacts = load_rules(ccignore)
-    if not basenames and not exacts:
+    rules = load_rules(ccignore)
+    if not rules:
         return 0
 
     out = subprocess.check_output(["git", "diff", "--cached", "--name-only", "-z"])
     staged = [p for p in out.decode().split("\0") if p]
-    bad = [p for p in staged if matches(p, basenames, exacts)]
+    bad = [p for p in staged if matches(p, rules)]
     if not bad:
         return 0
 
