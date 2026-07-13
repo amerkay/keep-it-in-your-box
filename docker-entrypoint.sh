@@ -6,20 +6,17 @@ HOST_UID="${HOST_UID:-1000}"
 HOST_GID="${HOST_GID:-1000}"
 
 # Ensure Claude is also available at the native per-user location.
+# POSIX sh has no `local`, so the variables are prefixed to avoid clobbering the caller's.
 ensure_user_local_claude() {
-	ensure_user_local_claude_user_home="$1"
-	ensure_user_local_claude_target="$ensure_user_local_claude_user_home/.local/bin/claude"
-	ensure_user_local_claude_system_claude=""
-	ensure_user_local_claude_system_claude=$(command -v claude 2>/dev/null || true)
+	eulc_home="$1"
+	eulc_target="$eulc_home/.local/bin/claude"
+	eulc_claude="$(command -v claude 2>/dev/null || true)"
 
-	if [ -z "$ensure_user_local_claude_system_claude" ]; then
-		return 0
-	fi
+	[ -n "$eulc_claude" ] || return 0
 
-	mkdir -p "$ensure_user_local_claude_user_home/.local/bin" 2>/dev/null || true
-
-	if [ ! -e "$ensure_user_local_claude_target" ]; then
-		ln -sf "$ensure_user_local_claude_system_claude" "$ensure_user_local_claude_target" 2>/dev/null || true
+	mkdir -p "$eulc_home/.local/bin" 2>/dev/null || true
+	if [ ! -e "$eulc_target" ]; then
+		ln -sf "$eulc_claude" "$eulc_target" 2>/dev/null || true
 	fi
 }
 
@@ -83,13 +80,12 @@ ensure_user_local_claude "$USER_HOME"
 chown -h "$HOST_UID:$HOST_GID" "$USER_HOME/.local/bin/claude" 2>/dev/null || true
 
 # ── Claude config: per-project session dir + shared assets ────────────────
-# cc mounts two dirs and points Claude at them:
-#   CLAUDE_CONFIG_DIR            → this project's private state (daemon, sessions,
-#                                  jobs, transcripts, history, .claude.json)
-#   CLAUDE_SECURESTORAGE_CONFIG_DIR → shared across every project (login token)
-# The shared dir also holds the assets that *should* be common — settings, plugins,
-# skills, agents, commands, hooks, CLAUDE.md — which Claude only looks for inside
-# CLAUDE_CONFIG_DIR. Symlink them across so both are true at once.
+# cc points Claude at two mounted dirs: CLAUDE_CONFIG_DIR (this project's private state
+# — daemon, sessions, jobs, transcripts, history, .claude.json) and
+# CLAUDE_SECURESTORAGE_CONFIG_DIR (shared across every project — the login token).
+# The shared dir also holds the assets that *should* be common (settings, plugins,
+# skills, agents, commands, hooks, CLAUDE.md), but Claude only looks for those inside
+# CLAUDE_CONFIG_DIR — so symlink them across, making both true at once.
 CLAUDE_SESSION_DIR="${CLAUDE_CONFIG_DIR:-}"
 CLAUDE_SHARED_DIR="${CLAUDE_SECURESTORAGE_CONFIG_DIR:-}"
 
@@ -100,12 +96,11 @@ if [ -n "$CLAUDE_SESSION_DIR" ] && [ -d "$CLAUDE_SHARED_DIR" ]; then
 		src="$CLAUDE_SHARED_DIR/$entry"
 		dst="$CLAUDE_SESSION_DIR/$entry"
 		[ -e "$src" ] || continue
-		# Claude writes settings.json atomically (temp file + rename), which replaces
-		# our symlink with a real file. Fold that edit back into the shared copy
-		# before relinking, so a setting changed in-session isn't silently dropped —
-		# but only if it really is newer, or we'd revert a change another project
-		# made through the shared file in the meantime. (`find -newer`, not `-nt`:
-		# this runs under dash.)
+		# Claude rewrites settings.json atomically (temp file + rename), replacing our
+		# symlink with a real file. Fold that edit back into the shared copy before
+		# relinking, so an in-session settings change isn't dropped — but only when it
+		# really is newer, or we'd revert a change another project made through the
+		# shared file meanwhile. (`find -newer`, not `-nt`: this runs under dash.)
 		if [ -f "$dst" ] && [ ! -L "$dst" ]; then
 			if [ -n "$(find "$dst" -newer "$src" 2>/dev/null)" ]; then
 				cp -p "$dst" "$src" 2>/dev/null || true
@@ -115,15 +110,14 @@ if [ -n "$CLAUDE_SESSION_DIR" ] && [ -d "$CLAUDE_SHARED_DIR" ]; then
 		ln -sfn "$src" "$dst" 2>/dev/null || true
 	done
 
-	# The session dir belongs to one project, so no other container is walking it —
-	# a recursive chown here cannot race. (The old code chowned the whole shared
-	# tree on every launch; two containers starting at once raced on the same
-	# inodes.) -h so it retags the symlinks above instead of dereferencing them
-	# into the shared dir.
+	# The session dir belongs to one project, so no other container is walking it and this
+	# recursive chown cannot race. `-h` retags the symlinks above instead of dereferencing
+	# them into the shared dir.
 	chown -Rh "$HOST_UID:$HOST_GID" "$CLAUDE_SESSION_DIR" 2>/dev/null || true
 
-	# The shared dir IS touched by every container, so only fix it when the owner
-	# actually differs — normally it doesn't, since the container user is the host user.
+	# The shared dir IS touched by every container, so only fix it when the owner actually
+	# differs — normally it doesn't, the container user being the host user. (Chowning it
+	# unconditionally made two containers starting at once race on the same inodes.)
 	if [ "$(stat -c %u "$CLAUDE_SHARED_DIR" 2>/dev/null || echo "$HOST_UID")" != "$HOST_UID" ]; then
 		chown -Rh "$HOST_UID:$HOST_GID" "$CLAUDE_SHARED_DIR" 2>/dev/null || true
 	fi

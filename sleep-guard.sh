@@ -1,21 +1,19 @@
 #!/usr/bin/env bash
-# Inhibits system sleep while a Claude session in a container is actively producing
-# output — so a long run isn't suspended mid-flight, while an idle session still
-# lets the machine sleep.
+# Inhibits system sleep while a Claude session in the container is actively producing
+# output; an idle session still lets the machine sleep.
 #
-# Detection: sum the `wchar` counter (bytes written) over every process in the
-# container and watch it grow. `docker logs` can't be used: the container's PID 1 is
-# `sleep infinity`, and each Claude session runs under `docker exec`, whose output
-# goes to that terminal's TTY and never reaches the container's log stream.
-#
-# The sampling exec runs as the *host uid* on purpose. /proc/<pid>/io is gated by
-# ptrace_may_access, which root-without-CAP_SYS_PTRACE fails against a uid-1000
-# process — a same-uid reader passes.
+# Activity = the `wchar` counter (bytes written) summed over every process in the
+# container, growing. Two non-obvious constraints:
+#   - `docker logs` is useless here: PID 1 is `sleep infinity` and each session runs
+#     under `docker exec`, whose output goes to that terminal's TTY, never the log stream.
+#   - the sampling exec runs as the *host uid* deliberately: /proc/<pid>/io is gated by
+#     ptrace_may_access, which root-without-CAP_SYS_PTRACE fails against a uid-1000
+#     process, while a same-uid reader passes.
 #
 # Usage: sleep-guard.sh <container-name>
-#   SLEEP_GUARD_GRACE=30        seconds of quiet before releasing the lock
-#   SLEEP_GUARD_MIN_BYTES=1024  bytes written per poll that count as "active"
-#                               (filters idle TUI repaints)
+#   SLEEP_GUARD_GRACE=30        seconds of quiet before releasing the inhibitor
+#   SLEEP_GUARD_MIN_BYTES=1024  bytes per poll that count as "active" (filters idle
+#                               TUI repaints, which are ~24B)
 #   SLEEP_GUARD_DEBUG=1         print every sample, to sanity-check the thresholds
 
 CONTAINER="${1:?Usage: sleep-guard.sh <container-name>}"
