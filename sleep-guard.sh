@@ -1,13 +1,32 @@
 #!/usr/bin/env bash
-# Inhibits system sleep while a Docker container is actively producing output.
-# Polls "docker logs --since" to detect new output — no root needed, works with TTY.
+# Inhibits system sleep while a Claude session in a container is actively producing
+# output — so a long run isn't suspended mid-flight, while an idle session still
+# lets the machine sleep.
+#
+# Detection: sum the `wchar` counter (bytes written) over every process in the
+# container and watch it grow. `docker logs` can't be used: the container's PID 1 is
+# `sleep infinity`, and each Claude session runs under `docker exec`, whose output
+# goes to that terminal's TTY and never reaches the container's log stream.
+#
+# The sampling exec runs as the *host uid* on purpose. /proc/<pid>/io is gated by
+# ptrace_may_access, which root-without-CAP_SYS_PTRACE fails against a uid-1000
+# process — a same-uid reader passes.
+#
 # Usage: sleep-guard.sh <container-name>
+#   SLEEP_GUARD_GRACE=30        seconds of quiet before releasing the lock
+#   SLEEP_GUARD_MIN_BYTES=1024  bytes written per poll that count as "active"
+#                               (filters idle TUI repaints)
+#   SLEEP_GUARD_DEBUG=1         print every sample, to sanity-check the thresholds
 
 CONTAINER="${1:?Usage: sleep-guard.sh <container-name>}"
-POLL=3          # seconds between polls
-GRACE=30        # seconds of inactivity before releasing lock
+POLL=3
+GRACE="${SLEEP_GUARD_GRACE:-30}"
+MIN_BYTES="${SLEEP_GUARD_MIN_BYTES:-1024}"
+DEBUG="${SLEEP_GUARD_DEBUG:-0}"
+
 INHIBIT_PID=""
 LAST_ACTIVE=0
+PREV=-1
 
 release_lock() {
     if [ -n "$INHIBIT_PID" ] && kill -0 "$INHIBIT_PID" 2>/dev/null; then
@@ -25,6 +44,13 @@ acquire_lock() {
     fi
 }
 
+# Total bytes written by every process in the container; empty if unreadable.
+sample_wchar() {
+    docker exec --user "$(id -u)" "$CONTAINER" \
+        sh -c 'cat /proc/[0-9]*/io 2>/dev/null' 2>/dev/null \
+        | awk '/^wchar:/ {s += $2} END {if (NR) print s+0}'
+}
+
 trap 'release_lock; exit 0' EXIT INT TERM
 
 # Wait for container to exist (up to 30s)
@@ -35,14 +61,25 @@ done
 docker inspect "$CONTAINER" &>/dev/null || exit 1
 
 while docker inspect "$CONTAINER" &>/dev/null; do
-    BYTES=$(docker logs --since "${POLL}s" "$CONTAINER" 2>&1 | wc -c)
     NOW=$(date +%s)
+    CUR="$(sample_wchar)"
 
-    if [ "$BYTES" -gt 0 ]; then
-        acquire_lock
-        LAST_ACTIVE=$NOW
-    elif [ "$LAST_ACTIVE" -gt 0 ] && [ $((NOW - LAST_ACTIVE)) -ge "$GRACE" ]; then
-        release_lock
+    if [ -n "$CUR" ]; then
+        # The first sample only sets a baseline: a container that has been up for a
+        # while has a large wchar total that says nothing about activity right now.
+        if [ "$PREV" -ge 0 ]; then
+            DELTA=$((CUR - PREV))
+            [ "$DEBUG" = 1 ] && \
+                echo "[sleep-guard] +${DELTA}B this poll (active if ≥${MIN_BYTES}B), inhibit=${INHIBIT_PID:-none}" >&2
+
+            if [ "$DELTA" -ge "$MIN_BYTES" ]; then
+                acquire_lock
+                LAST_ACTIVE=$NOW
+            elif [ "$LAST_ACTIVE" -gt 0 ] && [ $((NOW - LAST_ACTIVE)) -ge "$GRACE" ]; then
+                release_lock
+            fi
+        fi
+        PREV="$CUR"
     fi
 
     sleep "$POLL"

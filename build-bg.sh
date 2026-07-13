@@ -8,7 +8,9 @@ BUILD_LOG="$SCRIPT_DIR/build.log"
 BUILD_PID="$SCRIPT_DIR/build.pid"
 
 exec 9>"$BUILD_LOCK"
-flock 9
+# Non-blocking: a second build would only redo the first one's work, and both would
+# truncate build.log and race on `docker tag`. Bail instead of queueing.
+flock -n 9 || exit 0
 
 cleanup() {
     rm -f "$BUILD_PID"
