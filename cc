@@ -200,6 +200,9 @@ teardown_container() {
     fi
     docker rm -f "$FUSE_CNAME" >/dev/null 2>&1 || true
 
+    # The resolv.conf watcher is an in-container process (a detached `docker exec`), so it is
+    # killed when the container is removed — nothing to tear down here.
+
     # `|| true`: never let a failed cleanup kill cc under `set -e` — least of all from the
     # EXIT trap, where it would also overwrite the session's exit code.
     rm -rf "$FUSE_ROOT" "$MASK_ROOT" 2>/dev/null || true
@@ -259,6 +262,11 @@ start_container() {
         -e WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
         -v "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/${WAYLAND_DISPLAY:-wayland-0}:/run/user/$(id -u)/${WAYLAND_DISPLAY:-wayland-0}"
     )
+
+    # Follow the host's live DNS: mount systemd-resolved's live resolv.conf dir + the watcher
+    # (see add_resolv_sync_args in cc-lib.sh). No-op if the host has no systemd-resolved, in
+    # which case the container keeps Docker's default resolv.conf (frozen), as before.
+    add_resolv_sync_args
 
     local git_name git_email
     git_name="$(git config --global user.name 2>/dev/null || true)"
@@ -323,6 +331,7 @@ else
     teardown_container    # clear anything a crashed session left behind
     start_container
     wait_for_container_ready
+    start_resolv_sync     # one watcher for the container's lifetime; see cc-lib.sh
 fi
 flock -u 201
 exec 201>&-

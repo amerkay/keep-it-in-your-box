@@ -302,3 +302,74 @@ add_fallback_mask_args() {
     done < <(printf '%s\n' "${targets[@]}" | awk '{print length,$0}' | sort -n -s | cut -d' ' -f2-)
     echo "🛡️  .ccignore: masking ${#accepted[@]} path(s)" >&2
 }
+
+# Desktop alert — the one launch channel that survives claude's TUI clearing the screen a
+# few milliseconds after cc prints to stderr. Best-effort: with no notify-send, or no desktop
+# session (ssh, `cc … -p`), it's a silent no-op. urgency: normal (info) | critical (sticky).
+notify() {
+    local urgency="$1" title="$2" body="$3" icon=dialog-information
+    [ "$urgency" = critical ] && icon=dialog-error
+    command -v notify-send >/dev/null 2>&1 || return 0
+    notify-send -u "$urgency" -i "$icon" "$title" "$body" 2>/dev/null || true
+}
+
+# ── DNS: follow the host's live resolver, without editing the host ───
+# A long-lived container freezes /etc/resolv.conf at creation, so after the host switches wifi
+# or attaches a VPN it keeps the *previous* network's nameserver — unreachable now — and every
+# lookup in every attached session times out (routing stays fine; only DNS breaks).
+#
+# systemd-resolved writes the host's *real* per-link upstream nameservers to
+# /run/systemd/resolve/resolv.conf and rewrites it (by atomic rename) on every network change.
+# cc bind-mounts that directory read-only and runs a tiny in-container watcher (resolv-sync.sh)
+# that copies the current upstreams into the container's /etc/resolv.conf whenever they change,
+# so every attached session follows the host across wifi/VPN switches. The container talks DNS
+# straight to those real upstreams — never to the host/gateway — which is also what makes this
+# work behind a per-connection host firewall (e.g. Portmaster) that holds a relay's
+# container->gateway:53 hop while permitting DNS to real servers.
+#
+# The *directory* is mounted, not the file: systemd-resolved swaps the file by rename, so a
+# file bind-mount would pin the old inode and go stale, while a directory mount always resolves
+# the current inode. Best-effort: no systemd-resolved (no /run/systemd/resolve/resolv.conf) →
+# no mount, no watcher, and the container keeps Docker's default resolv.conf, frozen at
+# creation — exactly the pre-fix behaviour, never worse.
+RESOLV_SRC_DIR=/run/systemd/resolve                 # host dir systemd-resolved rewrites live
+RESOLV_SRC_FILE="$RESOLV_SRC_DIR/resolv.conf"
+
+host_has_resolved() { [ -r "$RESOLV_SRC_FILE" ]; }
+
+# Bind-mount args (read-only) for the live resolver dir + the watcher script. Appended to the
+# main container's `docker run` only when the host runs systemd-resolved; a no-op otherwise.
+add_resolv_sync_args() {
+    host_has_resolved || return 0
+    ARGS+=(
+        -v "$RESOLV_SRC_DIR:/run/host-resolve:ro"
+        -v "$SCRIPT_DIR/resolv-sync.sh:/usr/local/bin/resolv-sync.sh:ro"
+    )
+}
+
+# Start the in-container resolv.conf watcher once, right after the container is ready. Called
+# only on the create path (under the boot lock), so exactly one watcher is started; it lives
+# for the container's whole life — shared by every attached terminal — and is killed when the
+# container is removed, so there is nothing to tear down. Run as root (uid 0, bypassing the
+# entrypoint) because it writes /etc/resolv.conf, and detached (-d) because it loops forever.
+# Reports through a desktop notification: claude's TUI wipes stderr milliseconds after launch.
+start_resolv_sync() {
+    if ! host_has_resolved; then
+        echo "ℹ️  DNS: no systemd-resolved on this host — keeping Docker's default resolv.conf" >&2
+        echo "   (frozen at creation; sessions won't follow a wifi/VPN change). See CLAUDE.md § DNS." >&2
+        notify normal "cc · DNS not following the host" \
+            "No systemd-resolved on this host, so the sandbox keeps Docker's default DNS and won't follow a network change."
+        return 0
+    fi
+    if docker exec -u 0 -d "$CNAME" \
+        sh /usr/local/bin/resolv-sync.sh /run/host-resolve/resolv.conf 2>/dev/null; then
+        echo "🌐 DNS: syncing resolv.conf to the host live — follows wifi/VPN changes." >&2
+        notify normal "cc · DNS is following the host live" \
+            "This sandbox keeps its resolv.conf synced to the host's live upstreams and survives wifi/VPN changes."
+    else
+        echo "⚠️  DNS: could not start the resolv.conf watcher — DNS is frozen at creation." >&2
+        notify critical "cc · DNS is NOT following the host" \
+            "The resolv.conf watcher failed to start; sessions won't follow a wifi/VPN change. See CLAUDE.md § DNS."
+    fi
+    return 0
+}
