@@ -339,10 +339,20 @@ host_has_resolved() { [ -r "$RESOLV_SRC_FILE" ]; }
 
 # Bind-mount args (read-only) for the live resolver dir + the watcher script. Appended to the
 # main container's `docker run` only when the host runs systemd-resolved; a no-op otherwise.
+#
+# The dir also holds systemd-resolved's Varlink control sockets (io.systemd.Resolve[.Monitor]).
+# A read-only *mount* does NOT stop a connect(), and those sockets speak to the host daemon in
+# the host's namespace — an unauthenticated connect can drive host-side resolution and dump the
+# host's full DNS/interface topology (DumpDNSConfiguration), i.e. a live sandbox->host channel.
+# So shadow each socket with /dev/null (an inert char device: connect() → ENOTSOCK), closing the
+# channel while the dir mount still tracks resolv.conf across systemd-resolved's atomic renames.
+# Nested-under-mount shadowing is fine: Docker applies mounts parent-first by destination depth.
 add_resolv_sync_args() {
     host_has_resolved || return 0
     ARGS+=(
         -v "$RESOLV_SRC_DIR:/run/host-resolve:ro"
+        -v "/dev/null:/run/host-resolve/io.systemd.Resolve:ro"
+        -v "/dev/null:/run/host-resolve/io.systemd.Resolve.Monitor:ro"
         -v "$SCRIPT_DIR/resolv-sync.sh:/usr/local/bin/resolv-sync.sh:ro"
     )
 }

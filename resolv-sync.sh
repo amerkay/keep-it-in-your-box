@@ -24,6 +24,11 @@
 
 set -u
 
+# Fixed, trusted PATH: this runs as root (detached `docker exec -u 0`), so never resolve the
+# bare grep/sleep below through an inherited PATH that might front a sandbox-writable dir.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
 SRC="${1:-/run/host-resolve/resolv.conf}"
 DST=/etc/resolv.conf
 INTERVAL="${CC_RESOLV_SYNC_INTERVAL:-3}"
