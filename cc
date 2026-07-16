@@ -337,9 +337,15 @@ flock -u 201
 exec 201>&-
 
 # ── Sleep guard (inhibits sleep while Claude is producing output) ──
+# The container is shared by every terminal on the project, so the guard must be told
+# which processes are *ours*: we stamp this terminal's session with a unique marker in
+# its environment (below), and the guard samples only pids carrying it. Without this,
+# one working session makes every terminal's guard inhibit.
+SESSION_TAG="cc-$$-$(date +%s)"
+
 # 200>&- / 201>&-: it must not inherit our lock fds. A guard outliving cc would keep
 # holding the project's shared lock and stop the container from ever being torn down.
-"$SCRIPT_DIR/sleep-guard.sh" "$CNAME" 200>&- 201>&- &
+"$SCRIPT_DIR/sleep-guard.sh" "$CNAME" "$SESSION_TAG" 200>&- 201>&- &
 SLEEP_GUARD_PID=$!
 
 cleanup() {
@@ -392,10 +398,15 @@ fi
 # session ever started.
 tput reset 2>/dev/null || true
 
+# CC_SESSION_TAG marks every process in this terminal's session: claude, its tools and
+# its subagents all inherit it across fork/exec, so the sleep guard can scope its /proc
+# sample to this session alone. It is set on the *exec*, not the container, so it is
+# per-terminal and works against a container created before this existed.
 docker exec -it \
     --user "$(id -u):$(id -g)" \
     --workdir "$PWD" \
     -e COLUMNS="$(tput cols 2>/dev/null || echo 120)" \
     -e LINES="$(tput lines 2>/dev/null || echo 40)" \
     -e TERM="${TERM:-xterm-256color}" \
+    -e CC_SESSION_TAG="$SESSION_TAG" \
     "$CNAME" /usr/local/bin/docker-entrypoint.sh "${CMD[@]}"
