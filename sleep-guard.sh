@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Inhibits system sleep while a Claude session in the container is actively producing
-# output; an idle session still lets the machine sleep.
+# output; an idle session still lets the machine sleep. When the session goes idle
+# while the lid is already shut, it suspends the machine itself — see the note above
+# suspend_if_lid_shut() for why that has to be proactive.
 #
 # Activity = the `wchar` counter (bytes written) of the *busiest single process* in this
 # terminal's session, growing. Measured, per 3s poll: idle session 218-374B, mid-turn
@@ -32,6 +34,8 @@
 #   SLEEP_GUARD_GRACE=30        seconds of quiet before releasing the inhibitor
 #   SLEEP_GUARD_MIN_BYTES=1024  bytes per poll, by one process, that count as "active"
 #   SLEEP_GUARD_DEBUG=1         print every sample, to sanity-check the thresholds
+#   SLEEP_GUARD_LID_SUSPEND=1   on going idle with the lid shut, suspend the machine
+#                               (0 disables — e.g. if you run lid-shut on purpose)
 
 CONTAINER="${1:?Usage: sleep-guard.sh <container-name> <session-tag>}"
 TAG="${2:?Usage: sleep-guard.sh <container-name> <session-tag>}"
@@ -39,6 +43,7 @@ POLL=3
 GRACE="${SLEEP_GUARD_GRACE:-30}"
 MIN_BYTES="${SLEEP_GUARD_MIN_BYTES:-1024}"
 DEBUG="${SLEEP_GUARD_DEBUG:-0}"
+LID_SUSPEND="${SLEEP_GUARD_LID_SUSPEND:-1}"
 
 INHIBIT_PID=""
 LAST_ACTIVE=0
@@ -57,6 +62,55 @@ acquire_lock() {
         systemd-inhibit --what=sleep --who="claude-code" \
             --why="Claude Code is producing output" sleep infinity &
         INHIBIT_PID=$!
+    fi
+}
+
+# A --what=sleep block inhibitor keeps a task alive across a lid close — which is the
+# point — but logind fires the lid-close suspend exactly once, and having blocked it
+# while we held the lock, it never retries once we let go. So a task that finishes with
+# the lid already shut leaves the machine awake and draining until the lid is reopened
+# (the overnight battery-drain bug). We therefore re-issue the suspend ourselves the
+# moment we go idle, but only where it is unambiguously wanted:
+#   - lid actually shut (open lid + idle is PowerDevil's job, not ours — never force it);
+#   - no external display connected (lid-shut-while-docked means "keep working", the same
+#     signal KDE's triggerLidActionWhenExternalMonitorPresent uses);
+#   - no *other* Claude session still holding a lock (so the machine sleeps only once the
+#     last working session on the host has quietened, not while a sibling tab is busy).
+# systemctl suspend still honours any non-cc block inhibitor, and this runs every poll
+# while idle, so a blocked attempt simply retries and succeeds once the blocker clears.
+lid_closed() {
+    grep -qi 'closed' /proc/acpi/button/lid/*/state 2>/dev/null
+}
+external_display() {   # any connected output that is not the internal panel
+    local f st
+    for f in /sys/class/drm/*/status; do
+        [ -r "$f" ] || continue
+        read -r st < "$f" 2>/dev/null || continue
+        [ "$st" = connected ] || continue
+        case "$f" in *eDP*|*LVDS*|*DSI*) ;; *) return 0 ;; esac
+    done
+    return 1
+}
+other_cc_working() {   # a different session's guard still holds a claude-code lock
+    systemd-inhibit --list 2>/dev/null | grep -q 'claude-code'
+}
+suspend_if_lid_shut() {
+    [ "$LID_SUSPEND" = 1 ] || return
+    lid_closed || return
+    external_display && return
+    other_cc_working && return
+    [ "$DEBUG" = 1 ] && echo "[sleep-guard] idle + lid shut, no external display or other session — suspending" >&2
+    # Two guards (one per terminal/project) can reach here on the same idle tick once
+    # both sessions have released their locks — each sees no *other* claude-code lock and
+    # calls suspend. logind honours the first and answers the rest "Action suspend already
+    # in progress, refusing" on stderr. That's expected coordination between sibling
+    # guards, not a fault, so swallow it — otherwise the refusal leaks into the session's
+    # terminal. Under DEBUG the message is kept for diagnosis. (No set -e here, so a
+    # non-zero exit never kills the guard, but || true keeps that intentional.)
+    if [ "$DEBUG" = 1 ]; then
+        systemctl suspend || true
+    else
+        systemctl suspend 2>/dev/null || true
     fi
 }
 
@@ -115,6 +169,7 @@ while docker inspect "$CONTAINER" &>/dev/null; do
         LAST_ACTIVE=$NOW
     elif [ "$LAST_ACTIVE" -gt 0 ] && [ $((NOW - LAST_ACTIVE)) -ge "$GRACE" ]; then
         release_lock
+        suspend_if_lid_shut     # honour the lid-close we blocked while the task ran
     fi
 
     # Replace wholesale, so dead pids age out instead of accumulating forever. An empty
