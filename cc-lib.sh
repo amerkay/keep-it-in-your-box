@@ -8,7 +8,7 @@
 #
 # Runs in cc's shell, so it shares cc's `set -euo pipefail` and its globals:
 #   SCRIPT_DIR IMAGE_NAME PWD CLAUDE_SHARED
-#   FUSE_CNAME FUSE_ROOT MASK_ROOT FUSE_FAILED
+#   FUSE_CNAME FUSE_ROOT FUSE_FAILED
 #   PROJECT_MOUNT_SRC PROJECT_MOUNT_OPTS ARGS
 #
 # Several of those are *written* here and *read* back in cc, which shellcheck can't see
@@ -185,21 +185,34 @@ unmount_fuse() {
     ! fuse_mounted "$m"
 }
 
-# ── .ccignore redaction, primary: FUSE sidecar ───────────────────
+# ── .ccignore redaction + host-config guard: FUSE sidecar ────────
 # A redacting passthrough (ccignore-fuse.py) runs in its own container and is exposed to
-# the main one through shared-mount propagation. Matched paths read as a stub and refuse
-# writes — including files created *after* launch, which the bind-mount fallback cannot
-# cover. Only the sidecar gets SYS_ADMIN + /dev/fuse; the main container keeps cap-drop=ALL.
+# the main one through shared-mount propagation. Matched paths refuse writes — including
+# files created *after* launch, which no bind mount can cover, and which is precisely
+# what a nested `git init` or a mid-session clone relies on. Redacted paths also read as
+# a stub. Only the sidecar gets SYS_ADMIN + /dev/fuse; the main container keeps
+# cap-drop=ALL.
 start_fuse_sidecar() {
-    [ -f "$PWD/.ccignore" ] || return 0
+    # Always on, even with no .ccignore: the sidecar also enforces global.ccignore,
+    # the guard against writing files the *host* later executes (.git/config,
+    # .git/hooks, .vscode/…). Gating it on .ccignore is what left every project
+    # without one — this repo included — running as a raw bind mount with no
+    # protection at all.
 
     # The scratch dir must propagate shared, or the sidecar's mount never becomes
-    # visible to the main container through the host.
+    # visible to the main container through the host. There is no fallback: a
+    # launch-time bind mask cannot cover files created mid-session (a repo cloned
+    # into the project, a nested `git init`), which is exactly what the guard is
+    # for. Same principle as the mount-failure abort below — never silently
+    # downgrade a redaction the user is relying on.
     local prop; prop="$(findmnt -no PROPAGATION --target /tmp 2>/dev/null || true)"
     if [[ "$prop" != *shared* ]]; then
-        echo "⚠️  .ccignore: /tmp is not a shared mount ($prop); falling back to" >&2
-        echo "   launch-time-only masking. Files created mid-session will NOT be masked." >&2
-        return 0
+        FUSE_FAILED=1   # keep the EXIT trap's `tput reset` from wiping this message
+        die "cc needs /tmp to be a shared mount for .ccignore redaction and the" \
+            "host-config guard, but it is '${prop:-unknown}'. Fix it with:" \
+            "  sudo mount --make-shared /tmp" \
+            "To make that survive a reboot, add a systemd drop-in at" \
+            "/etc/systemd/system/tmp.mount.d/shared.conf or mount it shared in fstab."
     fi
 
     # 755 on both: the sidecar runs as our uid, but the main container traverses this
@@ -207,7 +220,15 @@ start_fuse_sidecar() {
     # deepest dir, so set the modes explicitly.)
     mkdir -p "$FUSE_ROOT/mnt"
     chmod 755 "$FUSE_ROOT" "$FUSE_ROOT/mnt"
-    cp "$PWD/.ccignore" "$FUSE_ROOT/patterns"
+    # An absent .ccignore is an empty rule set, not a reason to skip the sidecar.
+    # The guard file is *not* copied here: it is mounted read-only straight from
+    # $SCRIPT_DIR, so there is no second copy to keep in step and nothing for the
+    # attach-time staleness check to compare.
+    if [ -f "$PWD/.ccignore" ]; then
+        cp "$PWD/.ccignore" "$FUSE_ROOT/patterns"
+    else
+        : > "$FUSE_ROOT/patterns"
+    fi
     chmod 644 "$FUSE_ROOT/patterns"
 
     if ! docker run -d --name "$FUSE_CNAME" \
@@ -220,10 +241,12 @@ start_fuse_sidecar() {
         -v /etc/passwd:/etc/passwd:ro \
         -v /etc/group:/etc/group:ro \
         -v "$SCRIPT_DIR/ccignore-fuse.py:/usr/local/bin/ccignore-fuse.py:ro" \
+        -v "$SCRIPT_DIR/global.ccignore:/usr/local/share/global.ccignore:ro" \
         "$IMAGE_NAME" \
         /usr/local/bin/ccignore-fuse.py \
             --src /src --mnt "$FUSE_ROOT/mnt" \
-            --patterns-file "$FUSE_ROOT/patterns" >/dev/null; then
+            --patterns-file "$FUSE_ROOT/patterns" \
+            --guard-file /usr/local/share/global.ccignore >/dev/null; then
         rm -rf "$FUSE_ROOT"
         FUSE_FAILED=1
         echo "❌ .ccignore: could not start FUSE sidecar. Aborting." >&2
@@ -243,64 +266,14 @@ start_fuse_sidecar() {
         FUSE_FAILED=1
         # Never fall through to the leaky fallback: that would silently downgrade the
         # redaction the user asked for.
-        echo "   Refusing to launch with leaky fallback masking. Aborting." >&2
+        echo "   Refusing to launch unprotected: without the sidecar neither .ccignore" >&2
+        echo "   nor the host-config guard is enforced. Aborting." >&2
         exit 1
     fi
 
     PROJECT_MOUNT_SRC="$FUSE_ROOT/mnt"
     PROJECT_MOUNT_OPTS=":rslave"
     echo "🛡️  .ccignore: FUSE redacting mount active (sidecar: $FUSE_CNAME)" >&2
-}
-
-# ── .ccignore redaction, fallback: launch-time bind mounts ───────
-# Used only where the sidecar can't run (/tmp not a shared mount). Masks the paths that
-# match *at launch* by bind-mounting a stub over each. Files created on the host after
-# launch are NOT masked — hence it is the fallback, and cc allows only one session at a
-# time in this mode (the masks are baked into `docker run` and can't be re-evaluated).
-add_fallback_mask_args() {
-    [ -f "$PWD/.ccignore" ] || return 0
-    [ -z "$PROJECT_MOUNT_OPTS" ] || return 0        # FUSE is active; nothing to do
-
-    mkdir -p "$MASK_ROOT/dir"
-    local msg="# REDACTED: This path was redacted inside the Claude Code container by .ccignore. The real contents are available on the host machine."
-    printf '%s\n' "$msg" > "$MASK_ROOT/dir/REDACTED.md"
-    printf '%s\n' "$msg" > "$MASK_ROOT/file"
-
-    local targets=() entry m found t p
-    while IFS= read -r entry || [ -n "$entry" ]; do
-        entry="${entry%%#*}"; entry="${entry%$'\r'}"; entry="${entry%/}"
-        [ -z "$entry" ] && continue
-        case "$entry" in /*|*..*) echo "⚠️  .ccignore: unsafe path '$entry'" >&2; continue;; esac
-        if [[ "$entry" != */* ]]; then
-            found=0
-            while IFS= read -r -d '' m; do targets+=("$m"); found=1; done \
-                < <(find "$PWD" -name .git -prune -o -name "$entry" -print0 2>/dev/null)
-            [ "$found" = 0 ] && echo "⚠️  .ccignore: no matches for '$entry'" >&2
-        elif [ -e "$PWD/$entry" ]; then
-            targets+=("$PWD/$entry")
-        else
-            echo "⚠️  .ccignore: '$entry' does not exist" >&2
-        fi
-    done < "$PWD/.ccignore"
-
-    [ "${#targets[@]}" -gt 0 ] || return 0
-
-    # Shortest path first, then skip anything equal to or nested under an accepted path:
-    # bind-mounting a child over a parent that is itself masked would be pointless, and
-    # the ordering makes "already covered" a simple prefix test.
-    local accepted=()
-    while IFS= read -r t; do
-        for p in "${accepted[@]}"; do
-            [[ "$t" == "$p" || "$t" == "$p"/* ]] && continue 2
-        done
-        accepted+=("$t")
-        if [ -d "$t" ]; then
-            ARGS+=(-v "$MASK_ROOT/dir:$t:ro")
-        else
-            ARGS+=(-v "$MASK_ROOT/file:$t:ro")
-        fi
-    done < <(printf '%s\n' "${targets[@]}" | awk '{print length,$0}' | sort -n -s | cut -d' ' -f2-)
-    echo "🛡️  .ccignore: masking ${#accepted[@]} path(s)" >&2
 }
 
 # Desktop alert — the one launch channel that survives claude's TUI clearing the screen a

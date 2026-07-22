@@ -27,17 +27,49 @@ STUB = (
 REDACTED_NAME = "REDACTED.md"
 
 
-def load_rules(path):
-    """Parse .ccignore into an ordered list of (negated, pattern, is_exact).
+# Git config keys whose *value is a command the host runs*. A sandbox that can set one
+# of these has host code execution at the next git invocation — core.fsmonitor fires on
+# a bare `git status`, before any diff review. Matched on the key's last component, so
+# `filter.lfs.clean` matches on "clean"; over-matching only costs a refused write.
+DANGEROUS_GIT_KEYS = frozenset(
+    """hookspath fsmonitor sshcommand pager editor askpass gitproxy external textconv
+    command driver clean smudge process helper templatedir program cmd variant
+    packobjectshook uploadpack receivepack""".split()
+)
+DANGEROUS_GIT_SECTIONS = frozenset({"alias", "pager"})
 
-    Order is preserved so gitignore-style last-match-wins negation works:
-    a later '!' rule re-includes a path an earlier rule masked.
+GUARD_ACTIONS = ("protect", "redact")
+
+
+def load_rules(path, guard=False):
+    """Parse .ccignore into an ordered list of (neg, pattern, anchor, action, immune).
+
+    anchor: 'bare'  — one path segment, matches at any depth, never inside .git
+            'exact' — the whole path, relative to the src root
+            'tail'  — trailing path components, at any depth (guard rules only)
+    action: 'redact'  — stub on read, EACCES on write (the .ccignore behaviour)
+            'protect' — read through, EACCES on write
+
+    Order is preserved so gitignore-style last-match-wins negation works: a later
+    '!' rule re-includes a path an earlier rule masked. Guard rules take part in
+    that among *themselves* only; _verdict tallies them separately from project
+    rules and lets the guard win, so a project cannot un-protect itself.
     """
     rules = []
+    action = "redact"
     with open(path) as f:
         for line in f:
             line = line.split("#", 1)[0].strip()
             if not line:
+                continue
+            if guard and line.startswith("[") and line.endswith("]"):
+                section = line[1:-1].strip().lower()
+                if section not in GUARD_ACTIONS:
+                    print(
+                        f"ccignore-fuse: unknown guard section {line!r}", file=sys.stderr
+                    )
+                    continue
+                action = section
                 continue
             neg = line.startswith("!")
             if neg:
@@ -48,7 +80,14 @@ def load_rules(path):
             if line.startswith("/") or ".." in line.split("/"):
                 print(f"ccignore-fuse: skipping unsafe rule {line!r}", file=sys.stderr)
                 continue
-            rules.append((neg, line, "/" in line))
+            if guard:
+                # Guard rules may negate *each other* (last match wins within the
+                # guard set), which is how '.env.*' can redact while '!.env.example'
+                # lets the committed placeholder through. They remain immune to a
+                # project's '!' — see _verdict.
+                rules.append((neg, line, "tail", action, True))
+            else:
+                rules.append((neg, line, "exact" if "/" in line else "bare", "redact", False))
     return rules
 
 
@@ -63,41 +102,62 @@ class Redact(Operations):
     def _rel(self, path):
         return path.lstrip("/")
 
-    def _rule_matches(self, pat, exact, anc, seg, under_git):
+    def _rule_matches(self, pat, anchor, anc, seg, under_git):
         """True if a single rule matches this ancestor / segment (glob-aware).
 
-        Exact ('/'-containing) rules match the ancestor component-by-component
-        so a '*' never spans '/'; bare-basename rules match one segment and
-        never apply inside .git.
+        Every anchor compares component-by-component, so a '*' never spans '/'.
+        'bare' matches one segment and never applies inside .git; 'exact' pins
+        the whole path to the src root; 'tail' pins only the trailing
+        components, which is what lets a guard rule of '.git/config' cover
+        'sub/.git/config' and '.git/modules/x/config' at any depth.
         """
-        if exact:
-            apar = anc.split("/")
-            ppar = pat.split("/")
-            return len(ppar) == len(apar) and all(
-                fnmatch.fnmatch(a, p) for a, p in zip(apar, ppar)
-            )
-        return not under_git and fnmatch.fnmatch(seg, pat)
+        if anchor == "bare":
+            return not under_git and fnmatch.fnmatch(seg, pat)
+        apar = anc.split("/")
+        ppar = pat.split("/")
+        if anchor == "tail":
+            if len(ppar) > len(apar):
+                return False
+            apar = apar[len(apar) - len(ppar) :]
+        elif len(ppar) != len(apar):
+            return False
+        return all(fnmatch.fnmatch(a, p) for a, p in zip(apar, ppar))
 
-    def _ignored(self, rel):
-        """Gitignore-consistent mask test for one relative path.
+    def _verdict(self, rel):
+        """None | 'redact' | 'protect' for one relative path.
 
         Rules apply in order and the last match wins, so 'dir/*' followed by
-        '!dir/keep' leaves keep un-masked. A path beneath an already-masked
+        '!dir/keep' leaves keep un-masked. A path beneath an already-matched
         *parent directory* can't be re-included (git's parent-exclusion rule).
+
+        Guard and project rules are tallied separately and the guard wins when
+        it has a verdict. That is what makes guard rules immune to a project's
+        '!' — a project cannot write '!.git/config' to un-protect itself —
+        while still letting the guard file negate *itself*, so '.env.*' can
+        redact broadly and '!.env.example' can carve out the placeholder.
         """
         parts = rel.split("/")
         under_git = parts[0] == ".git"
-        ignored = False
+        guard = verdict = None
         for i in range(1, len(parts) + 1):
             anc = "/".join(parts[:i])
             seg = parts[i - 1]
-            for neg, pat, exact in self.rules:
-                if self._rule_matches(pat, exact, anc, seg, under_git):
-                    ignored = not neg
-            # A masked proper-ancestor directory seals everything beneath it.
-            if ignored and i < len(parts):
-                return True
-        return ignored
+            for neg, pat, anchor, action, immune in self.rules:
+                if self._rule_matches(pat, anchor, anc, seg, under_git):
+                    if immune:
+                        guard = None if neg else action
+                    else:
+                        verdict = None if neg else action
+            # A matched proper-ancestor directory seals everything beneath it.
+            effective = guard or verdict
+            if effective and i < len(parts):
+                return effective
+        return guard or verdict
+
+    def _protected(self, path):
+        """True if writes to this path must be refused but reads pass through."""
+        rel = self._rel(path)
+        return rel != "" and (self._verdict(rel) == "protect" or self._git_sensitive(rel))
 
     def _classify(self, path):
         """Return ('pass'|'file'|'dir'|'inside', masked_rel_root).
@@ -106,16 +166,22 @@ class Redact(Operations):
         - 'file': path itself is a masked file → serve stub
         - 'dir':  path itself is a masked directory → serve single REDACTED.md
         - 'inside': path is inside a masked dir → serve REDACTED.md or ENOENT
+
+        Only 'redact' reaches here. A 'protect' verdict deliberately returns
+        'pass' so every read path stays a plain passthrough — masking
+        .git/config with the stub would break in-container git outright, since
+        git reads it on virtually every command. Protection is enforced on the
+        write paths instead, via _protected().
         """
         rel = self._rel(path)
         if rel == "":
             return ("pass", "")
         parts = rel.split("/")
         # The shallowest masked ancestor is the redaction root; negation
-        # (honored inside _ignored) can leave the leaf un-masked entirely.
+        # (honored inside _verdict) can leave the leaf un-masked entirely.
         for i in range(1, len(parts) + 1):
             anc = "/".join(parts[:i])
-            if self._ignored(anc):
+            if self._verdict(anc) == "redact":
                 real = self._real(anc)
                 is_dir = os.path.isdir(real)
                 if i == len(parts):
@@ -225,7 +291,9 @@ class Redact(Operations):
     def open(self, path, flags):
         kind, _ = self._classify(path)
         if flags & (os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC):
-            if kind != "pass":
+            # Protected paths are writable only through the validated rename below;
+            # nothing legitimate writes .git/config in place (git uses config.lock).
+            if kind != "pass" or self._protected(path):
                 raise FuseOSError(errno.EACCES)
         if kind != "pass":
             return 0  # virtual fd; reads served from STUB
@@ -246,8 +314,84 @@ class Redact(Operations):
     # ── writes (passthrough for unmasked paths) ──────────────────
     def _deny_if_masked(self, path):
         kind, _ = self._classify(path)
-        if kind != "pass":
+        if kind != "pass" or self._protected(path):
             raise FuseOSError(errno.EACCES)
+
+    # ── .git/config: validated writes ────────────────────────────
+    # git never writes config in place — it writes config.lock and renames over the
+    # target. So the rename *is* the write, and validating there needs no buffering
+    # of write() calls. Blanket-denying instead would break `git remote add` and
+    # `git push -u` inside the sandbox, which is why this exists at all.
+    @staticmethod
+    def _is_git_config(rel):
+        parts = rel.split("/")
+        return ".git" in parts[:-1] and parts[-1] in ("config", "config.worktree")
+
+    @staticmethod
+    def _git_sensitive(rel):
+        """Host-executed paths inside any git dir, at any nesting.
+
+        Kept as code rather than guard patterns because the shapes need
+        depth-aware logic a tail rule can't express: submodules put these under
+        .git/modules/<name>/ (arbitrarily deep, since submodules nest) and
+        worktrees under .git/worktrees/<name>/. Sharing _is_git_config with the
+        rename validation below also keeps "what is a git config" defined once.
+        """
+        parts = rel.split("/")
+        if Redact._is_git_config(rel):
+            return True
+        return ".git" in parts and "hooks" in parts
+
+    @staticmethod
+    def _dangerous_entries(text):
+        """The (section, key, value) triples in a git config that name a command."""
+        found, section = set(), ""
+        for raw in text.splitlines():
+            line = raw.split("#", 1)[0].split(";", 1)[0].strip()
+            if not line:
+                continue
+            if line.startswith("["):
+                # '[filter "lfs"]' → 'filter'; subsection names are not keys.
+                section = line[1:].split("]", 1)[0].strip().split()[0].strip('"').lower()
+                continue
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip().lower()
+            if section in DANGEROUS_GIT_SECTIONS or key.split(".")[-1] in DANGEROUS_GIT_KEYS:
+                found.add((section, key, value.strip()))
+        return found
+
+    def _git_config_write_ok(self, src_real, dst_real):
+        """Allow a config write that introduces no *new* command-valued setting.
+
+        Compared against the current file rather than judged absolutely: a repo
+        that already has, say, a git-lfs filter is the user's own host-side
+        config, and rewriting the file for an unrelated reason (a new remote)
+        must not trip over it. Only entries the sandbox is adding or changing
+        are refused. Unreadable/undecodable input fails closed.
+        """
+        try:
+            with open(src_real, encoding="utf-8", errors="strict") as f:
+                new = self._dangerous_entries(f.read())
+        except (OSError, UnicodeDecodeError):
+            return False
+        if not new:
+            return True
+        try:
+            with open(dst_real, encoding="utf-8", errors="strict") as f:
+                old = self._dangerous_entries(f.read())
+        except (OSError, UnicodeDecodeError):
+            old = set()
+        added = new - old
+        for section, key, _ in sorted(added):
+            print(
+                f"ccignore-fuse: refusing git config write — '{section}.{key}' names a "
+                "command the host would execute",
+                file=sys.stderr,
+                flush=True,
+            )
+        return not added
 
     def create(self, path, mode, fi=None):
         self._deny_if_masked(path)
@@ -276,7 +420,11 @@ class Redact(Operations):
 
     def rename(self, old, new):
         self._deny_if_masked(old)
-        self._deny_if_masked(new)
+        if self._is_git_config(self._rel(new)):
+            if not self._git_config_write_ok(self._real(old), self._real(new)):
+                raise FuseOSError(errno.EACCES)
+        else:
+            self._deny_if_masked(new)
         os.rename(self._real(old), self._real(new))
 
     def chmod(self, path, mode):
@@ -315,12 +463,18 @@ def main():
     ap.add_argument("--src", required=True)
     ap.add_argument("--mnt", required=True)
     ap.add_argument("--patterns-file", required=True)
+    ap.add_argument("--guard-file")
     args = ap.parse_args()
 
-    rules = load_rules(args.patterns_file)
+    # Guard rules first for readability only: _verdict tallies immune rules
+    # separately, so they outrank project rules regardless of position here.
+    # Their order relative to *each other* is what matters (last match wins).
+    rules = load_rules(args.guard_file, guard=True) if args.guard_file else []
+    guard_count = len(rules)
+    rules += load_rules(args.patterns_file)
     print(
-        f"ccignore-fuse: src={args.src} mnt={args.mnt} "
-        f"rules={[('!' if n else '') + p for n, p, _ in rules]}",
+        f"ccignore-fuse: src={args.src} mnt={args.mnt} guard={guard_count} "
+        f"rules={[('!' if n else '') + p for n, p, _, _, _ in rules]}",
         file=sys.stderr,
         flush=True,
     )

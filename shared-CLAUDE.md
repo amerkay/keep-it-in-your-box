@@ -1,33 +1,34 @@
-# Sandbox rules — apply to every `cc` session
+# Sandbox rules — every `cc` session
 
-## 🔴 Secrets — hard stop
+## 🔴 Secrets and PII — hard stop
 
-If a secret, password, API key, token, or credential appears anywhere — a file you read, command
-output, `git diff`/`git show`/`git log -p`, a log, an env var — **stop immediately**. Print:
+The moment a credential or personal data enters context — a file, command output, a diff, a log, an env var — stop, print one of these, and wait for the user:
 
-`🔴 SECRET ENCOUNTERED — stopping. <what, and where it came from>`
+`🔴 SECRET ENCOUNTERED — stopping. <what, where from>`
+`🔴 PII ENCOUNTERED — stopping. <what, where from>`
 
-Then wait for the user. Do not summarise it, echo it, store it, or keep working around it.
+- **Secrets:** passwords, API keys, tokens, credentials. Treat `.env*`, `*secret*`, `*key*`, `*token*`, `*credential*`, `*.pem`, `id_rsa*` as suspect — ask before opening one.
+- **PII:** real names, emails, phone numbers, addresses, dates of birth, government or payment IDs, IPs tied to a person. **Exempt — the user's own identifiers:** any `*@wildamer.com` address and anything containing `amerk86`. Those are expected; carry on.
+- Reading it into context **is** sending it to the Anthropic API. There is no safe peek.
+- Never summarise, echo, store, or keep working around it. If it is already committed, say so — do not rewrite history yourself.
 
-- Reading a secret into context **is** sending it to the Anthropic API. There is no safe peek.
-- Never commit, stage, or diff a file matching a `.ccignore` rule. Never `git commit --no-verify`.
-- Treat `.env*`, `*secret*`, `*key*`, `*credential*`, `*token*`, `*.pem`, `id_rsa*` as suspect:
-  check `.ccignore` and ask before opening one.
-- If a secret is already committed, stop and tell the user — do not rewrite history yourself.
+## 🔴 Commit only when asked
 
-## .ccignore
+Never commit on your own initiative. Finishing a task is not permission to commit it: "fix X" is not "commit X", and approval once is not approval next time. Ask every time. Never `git commit --no-verify`, never `--amend`, never rewrite history, never `push` unless told to. The user reads the diff before it lands — that review is a real control.
 
-Paths matching `.ccignore` are redacted by a FUSE layer: reads return a stub, writes fail with
-EACCES. That is deliberate, not a bug. Do not attempt to reach the real contents by any route —
-`git`, `tar`, a subprocess, the network, or a path that dodges the mount. If you genuinely need a
-redacted file, ask the user for the specific value.
+## 🔴 Redacted and protected paths
+
+Enforced by a FUSE layer over the project. Deliberate policy, not bugs — **not yours to bypass.**
+
+- **Redacted** (`.ccignore`, `.env` and `.env.*`) — reads return a stub, writes fail EACCES. Need a
+  value? Ask. Placeholders (`.env.example`, `.env.sample`, `.env.template`, `.env.defaults`,
+  `.env.dist`) are exempt and work normally — they hold no secrets.
+- **Protected** (`.git/config`, `.git/hooks`, `.vscode/`, `.devcontainer/`, `.idea/`, `.envrc`, and submodule/worktree equivalents) — reads work, writes fail EACCES. The **host** executes these later, so writing one is host code execution from inside the sandbox. `git config` is content-checked: ordinary keys are fine; `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`, `core.pager`, `alias.*`, `filter.*.clean` are refused.
+
+On EACCES, or on a commit blocked by the host's pre-commit hook: stop and report it verbatim, including what you were attempting. Do not retry via another path, another tool, a different config scope (`--global`, `--system`), or by asking the user to disable the guard. A legitimate need is a conversation, not a workaround.
 
 ## Sandbox limits
 
-- You are in a Docker container: no `docker` binary, no Docker socket, no host processes.
-- `HOME` is `/home/hostuser`. Paths under `/home/kay/...` are bind mounts of real host files —
-  writes land on the host.
-- Commands that must run on the host (docker, `cc`, systemd, host package installs) are not yours
-  to run. Hand them to the user; `! <cmd>` runs a command host-side from their prompt.
-- Claude's config is split: `$CLAUDE_CONFIG_DIR` is this project's private state, and
-  `~/.claude-shared` is shared across projects. You can only see this project's history.
+- Docker container: no `docker` binary, no socket, no host processes. `HOME` is `/home/hostuser`; paths under `/home/kay/...` are host bind mounts — writes land on the host.
+- Host-side commands (docker, `cc`, systemd, package installs) are the user's to run in a **host terminal**. `!` does not reach the host — it runs in this container. Hand them a fenced block they can paste whole: no `!`, no `$` prompts, real paths filled in. Keep each command on its own line, or joined with `&&` or trailing `\` for multiline; keeping each line short.
+- `$CLAUDE_CONFIG_DIR` is this project's private state. `~/.claude-shared` is shared with **every** project — change it only for explicitly global requests, and say so when you do.

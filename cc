@@ -137,7 +137,6 @@ sync_ccignore_gitignore
 # hence paths derived from the project hash rather than mktemp.
 FUSE_CNAME="${CNAME}-fuse"
 FUSE_ROOT="/tmp/cc-fuse.${PROJ_HASH}${SCRATCH_SUFFIX}"
-MASK_ROOT="/tmp/cc-mask.${PROJ_HASH}${SCRATCH_SUFFIX}"
 FUSE_FAILED=0
 PROJECT_MOUNT_SRC="$PWD"
 PROJECT_MOUNT_OPTS=""
@@ -205,7 +204,7 @@ teardown_container() {
 
     # `|| true`: never let a failed cleanup kill cc under `set -e` — least of all from the
     # EXIT trap, where it would also overwrite the session's exit code.
-    rm -rf "$FUSE_ROOT" "$MASK_ROOT" 2>/dev/null || true
+    rm -rf "$FUSE_ROOT" 2>/dev/null || true
 }
 
 start_container() {
@@ -250,6 +249,12 @@ start_container() {
         --cap-add=DAC_OVERRIDE
         --cap-add=FOWNER
 
+        # The image still ships setuid binaries (su, mount, passwd, fusermount3), and the
+        # entrypoint drops to the host uid via gosu. no-new-privileges makes a setuid exec
+        # unable to regain privileges afterwards. Defence in depth: the session's caps are
+        # already empty, so this closes the escalation route rather than a live hole.
+        --security-opt no-new-privileges
+
         # Bridge network + Claude's own domain allowlist. --add-host so a dev server on
         # the host stays reachable.
         --add-host=host.docker.internal:host-gateway
@@ -282,11 +287,11 @@ start_container() {
 
     # Read-only: both are executed on the *host* later, so a container that could write
     # them would have host code execution (git hooks at the next commit; Claude hooks in
-    # a future session).
+    # a future session). The .git/hooks mount is belt-and-braces only — it covers just
+    # this repo's top-level .git, and only if it exists at launch. The FUSE guard is what
+    # actually covers nested repos, submodules, and repos created mid-session.
     [ -d "$PWD/.git/hooks" ] && ARGS+=(-v "$PWD/.git/hooks:$PWD/.git/hooks:ro")
     [ -d "$CLAUDE_SHARED/hooks" ] && ARGS+=(-v "$CLAUDE_SHARED/hooks:/home/hostuser/.claude-shared/hooks:ro")
-
-    add_fallback_mask_args
 
     # The container just idles; the real work runs in `docker exec` sessions, so it
     # survives any one terminal closing.
@@ -300,30 +305,23 @@ start_container() {
 exec 201>"$BOOT_LOCK"
 flock -x 201
 if container_running; then
-    # Redaction is fixed at container creation: the sidecar reads .ccignore once, and the
-    # fallback masks are bind mounts baked into `docker run`. A second terminal must never
-    # silently run under stale — or absent — rules.
-    if [ -f "$PWD/.ccignore" ] && ! sidecar_running; then
-        if [ -d "$MASK_ROOT" ]; then
-            die "this project's container is using launch-time .ccignore masking" \
-                "(the FUSE sidecar didn't start — /tmp isn't a shared mount here)." \
-                "That mode masks a fixed set of paths chosen when the container was" \
-                "created, so it can't be re-evaluated for a second terminal. One cc" \
-                "session at a time on this project — close the other one first."
-        else
-            die ".ccignore exists, but this project's running container was started" \
-                "without redaction. Refusing to attach — close all cc sessions for" \
-                "this project and relaunch to apply it."
-        fi
+    # Redaction is fixed at container creation: the sidecar reads the rules once. A second
+    # terminal must never silently run under stale — or absent — rules. The sidecar is now
+    # unconditional, so its absence is always an error, whether or not .ccignore exists:
+    # without it there is no host-config guard either.
+    if ! sidecar_running; then
+        die "this project's container was started without the redaction sidecar, so" \
+            "neither .ccignore nor the host-config guard is being enforced in it." \
+            "Refusing to attach — close all cc sessions for this project and relaunch." \
+            "(A container created by an older cc will always land here.)"
     fi
-    if [ -f "$PWD/.ccignore" ] && ! cmp -s "$PWD/.ccignore" "$FUSE_ROOT/patterns" 2>/dev/null; then
+    # Only the project's .ccignore can go stale; global.ccignore is mounted read-only
+    # from $SCRIPT_DIR, so the sidecar and this process read the very same file.
+    if ! cmp -s "${PWD}/.ccignore" "$FUSE_ROOT/patterns" 2>/dev/null \
+       && ! { [ ! -f "$PWD/.ccignore" ] && [ ! -s "$FUSE_ROOT/patterns" ]; }; then
         die ".ccignore changed since this project's container started." \
             "The running redaction layer still enforces the OLD rules. Refusing to" \
             "attach — close all cc sessions for this project and relaunch."
-    fi
-    if [ ! -f "$PWD/.ccignore" ] && sidecar_running; then
-        warn ".ccignore was removed, but the running container still redacts per the" \
-             "old rules. Close all sessions and relaunch to clear it."
     fi
     wait_for_container_ready   # in case its creator died mid-startup
     echo "🔗 cc: attaching to this project's running container ($CNAME)." >&2
