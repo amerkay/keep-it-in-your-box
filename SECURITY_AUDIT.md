@@ -1,17 +1,17 @@
 <!-- Hero: rendered from assets/security-audit/hero.svg -->
 <p align="center">
   <img src="assets/security-audit/hero.svg" width="100%"
-       alt="Security Audit of the cc Claude Code Docker sandbox. Verdict: the container holds, but the git-config guard is breached. 4 critical findings, 8 high findings, 6 host-RCE paths, 0 container escapes." />
+       alt="Security Audit of the cc Claude Code Docker sandbox. Six host-RCE paths were found by live exploitation and all six are now closed; zero container escapes. A terminal pane shows each exploit re-run against the patched guard and refused with EACCES." />
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Critical-4-da3633?style=flat-square" alt="4 critical" />
-  <img src="https://img.shields.io/badge/High-8-fb8500?style=flat-square" alt="8 high" />
-  <img src="https://img.shields.io/badge/Low-1-1f6feb?style=flat-square" alt="1 low" />
-  <img src="https://img.shields.io/badge/Container_escapes-0-2ea043?style=flat-square" alt="0 container escapes" />
-  <img src="https://img.shields.io/badge/Method-live_exploitation-8957e5?style=flat-square" alt="method: live exploitation" />
-  <img src="https://img.shields.io/badge/Date-2026--07--22-30363d?style=flat-square" alt="2026-07-22" />
-  <img src="https://img.shields.io/badge/P0-remediated-2ea043?style=flat-square" alt="P0 remediated" />
+  <img src="https://img.shields.io/badge/host--RCE%20paths-6%20found%20%E2%86%92%206%20closed-2ea043?style=flat-square" alt="host-RCE paths: 6 found, 6 closed" />
+  <img src="https://img.shields.io/badge/container%20escapes-0%20reproduced-2ea043?style=flat-square" alt="container escapes: 0 reproduced" />
+  <img src="https://img.shields.io/badge/vectors%20swept-118-30363d?style=flat-square" alt="118 candidate vectors swept" />
+  <img src="https://img.shields.io/badge/critical%20%2B%20high-6%20fixed%20%C2%B7%206%20accepted-1f6feb?style=flat-square" alt="critical and high: 6 fixed, 6 documented as accepted risk" />
+  <img src="https://img.shields.io/badge/every%20fix-re--verified%20live-8957e5?style=flat-square" alt="every fix re-verified live" />
+  <img src="https://img.shields.io/badge/method-live%20exploitation-30363d?style=flat-square" alt="method: live exploitation" />
+  <img src="https://img.shields.io/badge/audited-2026--07--22-30363d?style=flat-square" alt="audited 2026-07-22" />
 </p>
 
 ---
