@@ -17,7 +17,14 @@ import os
 import sys
 from pathlib import PurePosixPath
 
-from fuse import FUSE, FuseOSError, Operations
+# fusepy 3.0.1 ships as the module 'fuse' from PyPI but as 'fusepy' in Debian
+# (python3-fusepy). Same library, same API — accept either so the sidecar works
+# whichever way the image installed it. Failing to import here aborts the mount,
+# and cc refuses to launch without a sidecar, so an ImportError is never silent.
+try:
+    from fuse import FUSE, FuseOSError, Operations
+except ImportError:  # Debian/Ubuntu packaging
+    from fusepy import FUSE, FuseOSError, Operations
 
 STUB = (
     b"# REDACTED BY .ccignore \xe2\x80\x94 hidden from this Claude Code Docker sandbox by user policy.\n"

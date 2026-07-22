@@ -1,8 +1,9 @@
-FROM debian:bookworm
+FROM debian:trixie
 
 # Install Node.js via NodeSource repository and all system dependencies in one layer
+ARG NODE_MAJOR=26
 RUN apt-get update && apt-get install -y curl \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     # Node.js from NodeSource
     nodejs \
@@ -15,9 +16,17 @@ RUN apt-get update && apt-get install -y curl \
     # Database clients (minimal set)
     postgresql-client sqlite3 \
     # Network and system tools
-    netcat-openbsd telnet dnsutils iputils-ping \
-    # Media processing
-    ffmpeg \
+    # (trixie renamed dnsutils -> bind9-dnsutils)
+    netcat-openbsd telnet bind9-dnsutils iputils-ping \
+    # Media processing.
+    # rsvg-convert is the SVG rasterizer tooling expects on PATH; unlike cairosvg it renders
+    # through Pango, so a CSS font-family *list* ("ui-monospace, SFMono-Regular, monospace")
+    # resolves instead of collapsing to the default sans. cairosvg + Pillow are the
+    # library-level fallback, baked in so nothing has to build a venv per session.
+    ffmpeg librsvg2-bin python3-pil python3-cairosvg python3-cairocffi \
+    fontconfig fonts-dejavu fonts-liberation \
+    # Audio (PulseAudio client for voice mode)
+    pulseaudio-utils libpulse0 \
     # System administration
     gosu procps \
     # Clipboard support (Wayland)
@@ -28,12 +37,29 @@ RUN apt-get update && apt-get install -y curl \
     direnv \
     # Required for Claude Code's built-in sandbox
     bubblewrap socat \
-    # FUSE runtime for the .ccignore redacting sidecar
-    fuse3 libfuse2 \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip install --break-system-packages --no-cache-dir fusepy \
-    && echo 'user_allow_other' > /etc/fuse.conf \
+    # FUSE runtime for the .ccignore redacting sidecar.
+    # trixie's 64-bit time_t transition renamed libfuse2 -> libfuse2t64, and fusepy is
+    # packaged, so it comes from apt instead of a PEP 668 --break-system-packages override.
+    fuse3 libfuse2t64 python3-fusepy \
+    && rm -rf /var/lib/apt/lists/*
+
+# Runtime config for the packages above. Its own RUN so editing either line is a
+# seconds-long cached rebuild rather than a full re-do of the apt layer.
+# user_allow_other lets the FUSE sidecar mount with -o allow_other, which is what
+# makes the redacted view visible to the main container's user.
+RUN echo 'user_allow_other' > /etc/fuse.conf \
     && echo 'eval "$(direnv hook bash)"' >> /etc/bash.bashrc
+
+# Smoke-test the layers above. Kept as its own cheap RUN on purpose: editing an
+# assertion then re-runs in seconds off the cache, instead of re-doing the whole
+# ~10-minute apt install. Each check is one an earlier build actually failed on:
+# fusepy is 'fusepy' in Debian but 'fuse' from PyPI, and rsvg-convert/cairosvg
+# have both been silently absent before.
+RUN node --version && npm --version \
+    && python3 -c "from fusepy import FUSE, FuseOSError, Operations; print('fusepy OK')" \
+    && rsvg-convert --version \
+    && python3 -c "import PIL, cairosvg; print('Pillow', PIL.__version__, '/ cairosvg', cairosvg.__version__)" \
+    && grep -qx 'user_allow_other' /etc/fuse.conf
 
 # Install packages not available in Debian repos
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
@@ -92,7 +118,29 @@ RUN npx playwright install --with-deps chromium && \
     ln -s "$(find /opt/playwright-browsers -name chrome -type f | head -1)" /usr/local/bin/google-chrome-stable && \
     ln -s /usr/local/bin/google-chrome-stable /usr/local/bin/google-chrome
 
+# Map the monospace names CSS font stacks lead with onto a font that exists here, so a
+# cairosvg render that does pick a single family off the stack still lands on a mono face.
+RUN printf '%s\n' \
+    '<?xml version="1.0"?>' \
+    '<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">' \
+    '<fontconfig>' \
+    '  <alias binding="strong"><family>ui-monospace</family><accept><family>monospace</family></accept></alias>' \
+    '  <alias binding="strong"><family>SFMono-Regular</family><accept><family>monospace</family></accept></alias>' \
+    '  <alias binding="strong"><family>SF Mono</family><accept><family>monospace</family></accept></alias>' \
+    '  <alias binding="strong"><family>Menlo</family><accept><family>monospace</family></accept></alias>' \
+    '  <alias binding="strong"><family>Monaco</family><accept><family>monospace</family></accept></alias>' \
+    '  <alias binding="strong"><family>Consolas</family><accept><family>monospace</family></accept></alias>' \
+    '  <alias binding="strong"><family>Cascadia Mono</family><accept><family>monospace</family></accept></alias>' \
+    '  <alias binding="strong"><family>JetBrains Mono</family><accept><family>monospace</family></accept></alias>' \
+    '  <alias binding="strong"><family>monospace</family><prefer><family>DejaVu Sans Mono</family><family>Liberation Mono</family></prefer></alias>' \
+    '</fontconfig>' > /etc/fonts/conf.d/99-cc-monospace.conf \
+    && fc-cache -f \
+    && fc-match monospace \
+    && fc-match ui-monospace
+
 # Install Claude Code via official native installer
+# NOTE: everything below this line rebuilds on every Claude Code version bump.
+# Keep new apt/tooling layers ABOVE it so a routine upgrade stays a fast, cached build.
 ARG CLAUDE_VERSION=latest
 RUN echo "Installing Claude Code version: ${CLAUDE_VERSION}" && \
     curl -fsSL https://claude.ai/install.sh | bash && \
@@ -104,9 +152,6 @@ RUN echo "Installing Claude Code version: ${CLAUDE_VERSION}" && \
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY ccignore-fuse.py /usr/local/bin/ccignore-fuse.py
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/ccignore-fuse.py
-
-# Audio (PulseAudio client for voice mode)
-RUN apt-get update && apt-get install -y pulseaudio-utils libpulse0 && rm -rf /var/lib/apt/lists/*
 
 ENV SHELL=/bin/bash
 ENV TERM=xterm-256color
