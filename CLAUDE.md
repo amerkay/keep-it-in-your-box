@@ -103,7 +103,7 @@ The guard reuses the `.ccignore` machinery rather than adding a parallel mechani
 - **Why the `.git/hooks` read-only bind mount is not enough** (it stays as belt-and-braces): it is conditional on the directory existing **at launch** (`cc:286`) and covers only the top-level repo, so a repo cloned or `git init`ed mid-session gets nothing. Worse, it was bypassable without touching it at all — `.git/config` sits next to it and `core.hooksPath` redirects git straight past it.
 - **`no-new-privileges`** is set on the main container. The image still ships setuid binaries (`su`, `mount`, `passwd`, `fusermount3`) and `NoNewPrivs` was `0`. Defence in depth — session caps are already empty — and deliberately **not** set on the FUSE sidecar, which needs `SYS_ADMIN` and `fusermount3`.
 
-**Closed since, by the shared-config lock and the clipboard proxy** (both below). What remains open is the shared OAuth token under open egress (audit H3/H4/H7) — see "Accepted risks".
+**Closed since, by the shared-config lock and the clipboard proxy** (both below). What remains open is the shared OAuth token under open egress (audit H3/H4) — see "Accepted risks".
 
 ## Shared config surface (cross-project pivot)
 
@@ -170,7 +170,7 @@ Neither is sufficient alone: a read-only `hooks/` is bypassable by whatever *cho
 **Cross-project isolation:** a container mounts only its own `~/.claude-sandbox/<slug>/`, so it cannot read another project's transcripts, prompt history, jobs or pasted content. `.claude.json` is pruned per project (globals + that project's entry, including its `mcpServers`); `githubRepoPaths` is scoped so other projects' paths don't leak either.
 
 **Accepted risks (required for the workflow):**
-- **Open egress + a durable shared credential.** `~/.claude-shared/.credentials.json` is same-uid readable and egress is unrestricted, so an injected session can exfiltrate the account OAuth token with no host trigger (audit H3/H4/H7). Deliberately not fixed: the token cannot be made unreadable — Claude needs it — and a default-deny allowlist conflicts with the sandbox's whole purpose, building untrusted repos that fetch from arbitrary registries. **Rotate the token if an untrusted session has run.**
+- **Open egress + a durable shared credential.** `~/.claude-shared/.credentials.json` is same-uid readable and egress is unrestricted, so an injected session can exfiltrate the account OAuth token with no host trigger (audit H3/H4). Deliberately not fixed: the token cannot be made unreadable — Claude needs it — and a default-deny allowlist conflicts with the sandbox's whole purpose, building untrusted repos that fetch from arbitrary registries. **Rotate the token if an untrusted session has run.**
 - Wayland socket mounted, but **proxied**: clipboard reads only, writes refused (see "Clipboard: mediated")
 - `host.docker.internal` routable to the host network stack
 - Project directory writable (by design)
