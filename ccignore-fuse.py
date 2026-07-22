@@ -43,7 +43,16 @@ DANGEROUS_GIT_KEYS = frozenset(
     command driver clean smudge process helper templatedir program cmd variant
     packobjectshook uploadpack receivepack""".split()
 )
-DANGEROUS_GIT_SECTIONS = frozenset({"alias", "pager"})
+# include/includeIf point git at another config file, which may then declare any of the
+# keys above. The validator sees only the file in front of it, so the indirection is the
+# bypass — refuse a *newly added* include outright. (Pre-existing ones are grandfathered
+# by _git_config_write_ok's old-vs-new diff: they are the user's own host-side config.)
+DANGEROUS_GIT_SECTIONS = frozenset({"alias", "pager", "include", "includeif"})
+
+# A git dir is identified by its layout, not its name: `git init --bare`,
+# `--separate-git-dir` and a `gitdir:` redirect all put config+hooks somewhere other
+# than a directory called '.git'.
+GITDIR_MARKERS = ("HEAD", "objects", "refs")
 
 GUARD_ACTIONS = ("protect", "redact")
 
@@ -329,13 +338,24 @@ class Redact(Operations):
     # target. So the rename *is* the write, and validating there needs no buffering
     # of write() calls. Blanket-denying instead would break `git remote add` and
     # `git push -u` inside the sandbox, which is why this exists at all.
-    @staticmethod
-    def _is_git_config(rel):
-        parts = rel.split("/")
-        return ".git" in parts[:-1] and parts[-1] in ("config", "config.worktree")
+    def _is_gitdir(self, rel_dir):
+        """True if this directory carries git's layout, whatever it is named.
 
-    @staticmethod
-    def _git_sensitive(rel):
+        `git init --bare store`, `git init --separate-git-dir=gd wt` and a `.git`
+        gitfile containing `gitdir: ../store` all place config+hooks under a
+        directory that is *not* called '.git', so a name-based check misses them
+        entirely — while the host still executes what they configure.
+        """
+        real = self._real(rel_dir)
+        return all(os.path.exists(os.path.join(real, m)) for m in GITDIR_MARKERS)
+
+    def _is_git_config(self, rel):
+        parts = rel.split("/")
+        if len(parts) < 2 or parts[-1] not in ("config", "config.worktree"):
+            return False
+        return ".git" in parts[:-1] or self._is_gitdir("/".join(parts[:-1]))
+
+    def _git_sensitive(self, rel):
         """Host-executed paths inside any git dir, at any nesting.
 
         Kept as code rather than guard patterns because the shapes need
@@ -344,10 +364,13 @@ class Redact(Operations):
         worktrees under .git/worktrees/<name>/. Sharing _is_git_config with the
         rename validation below also keeps "what is a git config" defined once.
         """
-        parts = rel.split("/")
-        if Redact._is_git_config(rel):
+        if self._is_git_config(rel):
             return True
-        return ".git" in parts and "hooks" in parts
+        parts = rel.split("/")
+        if "hooks" not in parts:
+            return False
+        i = parts.index("hooks")
+        return i >= 1 and (".git" in parts[:i] or self._is_gitdir("/".join(parts[:i])))
 
     @staticmethod
     def _dangerous_entries(text):
@@ -359,8 +382,13 @@ class Redact(Operations):
                 continue
             if line.startswith("["):
                 # '[filter "lfs"]' → 'filter'; subsection names are not keys.
-                section = line[1:].split("]", 1)[0].strip().split()[0].strip('"').lower()
-                continue
+                # Git's parser resumes scanning after ']', so '[core]hooksPath = x' on
+                # one line is a valid setting — keep the remainder instead of dropping it.
+                head, _, rest = line[1:].partition("]")
+                section = (head.split() or [""])[0].strip('"').lower()
+                line = rest.strip()
+                if not line:
+                    continue
             if "=" not in line:
                 continue
             key, value = line.split("=", 1)
@@ -452,6 +480,11 @@ class Redact(Operations):
 
     def link(self, target, source):
         self._deny_if_masked(target)
+        # The source matters as much as the name: a hardlink is a second directory entry
+        # for the *same inode*, and the VFS does not re-resolve it (a symlink does, which
+        # is why the symlink form is already blocked). Without this, an unmasked alias
+        # launders a protected inode past every path-based check — readable and writable.
+        self._deny_if_masked(source)
         os.link(self._real(source), self._real(target))
 
     def flush(self, path, fh):

@@ -29,27 +29,67 @@ DANGEROUS_GIT_KEYS = frozenset(
     command driver clean smudge process helper templatedir program cmd variant
     packobjectshook uploadpack receivepack""".split()
 )
-DANGEROUS_GIT_SECTIONS = frozenset({"alias", "pager"})
+DANGEROUS_GIT_SECTIONS = frozenset({"alias", "pager", "include", "includeif"})
 PRUNE_DIRS = {"node_modules", ".venv", "venv", "target", "dist", "build", ".tox"}
+GITDIR_MARKERS = ("HEAD", "objects", "refs")
 
 
-def audit_git_config():
-    """Local git config entries whose value is a command the host would run."""
-    try:
-        out = subprocess.run(
-            ["git", "config", "--local", "--list"],
-            capture_output=True, text=True, check=False,
-        ).stdout
-    except OSError:
-        return []
+def bad_keys(listing):
+    """Lines of `git config --list` output naming a command the host would run."""
     bad = []
-    for line in out.splitlines():
+    for line in listing.splitlines():
         key = line.split("=", 1)[0].strip().lower()
         if not key:
             continue
         parts = key.split(".")
         if parts[0] in DANGEROUS_GIT_SECTIONS or parts[-1] in DANGEROUS_GIT_KEYS:
             bad.append(line)
+    return bad
+
+
+def git_config_list(args):
+    try:
+        return subprocess.run(
+            ["git", "config", *args, "--list", "--includes"],
+            capture_output=True, text=True, check=False,
+        ).stdout
+    except OSError:
+        return ""
+
+
+def audit_git_config():
+    """Local git config entries whose value is a command the host would run.
+
+    `--includes` is what makes this see through `include.path` indirection; without
+    it a poisoned config reads as a benign one-liner. `--local` is deliberate — the
+    unscoped form would pull in the user's own ~/.gitconfig (core.pager, alias.*)
+    and block every commit.
+    """
+    return bad_keys(git_config_list(["--local"]))
+
+
+def audit_nested_gitdirs(top):
+    """Dangerous config in git dirs the top-level scope never sees.
+
+    Bare repos, `--separate-git-dir` targets and gitfile redirects are ordinary
+    directories as far as `git config --local` is concerned, yet the host runs
+    what they configure the moment it touches that repo.
+    """
+    bad = []
+    for dirpath, dirnames, _ in os.walk(top):
+        dirnames[:] = [d for d in dirnames if d not in PRUNE_DIRS]
+        if not all(os.path.exists(os.path.join(dirpath, m)) for m in GITDIR_MARKERS):
+            continue
+        # Inside a git dir only nested git dirs matter; objects/ alone is thousands
+        # of directories and none of them can hold a config.
+        dirnames[:] = [d for d in dirnames if d in ("modules", "worktrees")]
+        if dirpath == os.path.join(top, ".git"):
+            continue  # the top repo — already covered by audit_git_config()
+        cfg = os.path.join(dirpath, "config")
+        if not os.path.isfile(cfg):
+            continue
+        rel = os.path.relpath(dirpath, top)
+        bad += [f"{rel}: {line}" for line in bad_keys(git_config_list(["--file", cfg]))]
     return bad
 
 
@@ -140,7 +180,7 @@ def main():
 
     # Runs whether or not the repo has a .ccignore: a poisoned git config is a
     # host-execution bug on its own, independent of any redaction rules.
-    cfg = audit_git_config()
+    cfg = audit_git_config() + audit_nested_gitdirs(top)
     hooks = audit_nested_hooks(top)
     if cfg or hooks:
         sys.stderr.write(
@@ -148,12 +188,17 @@ def main():
         )
         if cfg:
             sys.stderr.write(
-                "\nThese local git config entries name a command git runs on the HOST\n"
-                "(core.fsmonitor fires on a bare `git status`, before you read any diff):\n"
+                "\nThese git config entries name a command git runs on the HOST\n"
+                "(core.fsmonitor fires on a bare `git status`, before you read any diff).\n"
+                "An 'include.path' entry counts too: it can pull any of them in from\n"
+                "another file. A '<dir>:' prefix means a nested or bare git dir:\n"
             )
             for line in cfg:
                 sys.stderr.write(f"    {line}\n")
-            sys.stderr.write("\nInspect, then remove with:  git config --local --unset <key>\n")
+            sys.stderr.write(
+                "\nInspect, then remove with:  git config --local --unset <key>\n"
+                "                        or:  git config --file <dir>/config --unset <key>\n"
+            )
         if hooks:
             sys.stderr.write("\nExecutable hooks in nested git dirs:\n")
             for p in hooks:
