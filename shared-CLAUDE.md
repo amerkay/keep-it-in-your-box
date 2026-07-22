@@ -33,6 +33,12 @@ On EACCES, or on a commit blocked by the host's pre-commit hook: stop and report
 - Host-side commands (docker, `cc`, systemd, package installs) are the user's to run in a **host terminal**. `!` does not reach the host — it runs in this container. Hand them a fenced block they can paste whole: no `!`, no `$` prompts, real paths filled in. Keep each command on its own line, or joined with `&&` or trailing `\` for multiline; keeping each line short.
 - `$CLAUDE_CONFIG_DIR` is this project's private state. `~/.claude-shared` is shared with **every** project — change it only for explicitly global requests, and say so when you do.
 
+## Disabled on purpose: `←` opens the agent view
+
+`cc` pins `leftArrowOpensAgents: false` into `.claude.json` on every launch, so **`←` does nothing** in a `cc` session. Do not re-enable it, and never tell the user to press `←` to reach the agent list.
+
+From a *foreground* session `←` does not mean "go back" — it means "background this session", which aborts the in-flight Workflow and every subagent before forking. That work is structurally non-carryable, so it is lost, and each press also mints a duplicate session in `--resume`. The agent view is still reachable: `claude agents`, `/background`, `--bg`.
+
 ## How to write/update CLAUDE.md
 
 Write CLAUDE.md files that include only what the agent can't discover on its own—exact build/test/lint commands, repo-specific tooling, and hard constraints—while omitting codebase overviews, directory listings, and generic best practices the model already knows. Focus on project-unique patterns, written as step-by-step procedures with one working code example each, rather than comprehensive descriptions of what exists. Keep the whole file short (aim for ~1,500 tokens); every line should pass the test "would the agent fail without this?" and get cut if not. Never auto-generate the file wholesale, and remove any instruction that isn't actively preventing a mistake, since unnecessary guidance measurably lowers success rates and raises cost. Keep instructions short, concise and authoritative.

@@ -102,6 +102,57 @@ sync_shared_claude_md() {
     } > "$md.cc.tmp" && mv "$md.cc.tmp" "$md"
 }
 
+# ── Global-config pins (.claude.json) ────────────────────────────
+# Keys Claude reads from its *global config* rather than settings.json. That file is
+# per-project here, and claude-json.seed only lands on a project's FIRST run — so a pin
+# added later never reaches a project that already exists. Re-assert them every launch.
+#
+# leftArrowOpensAgents=false: from a foreground session `←` means "background this
+# session", not "go back". With a turn in flight it aborts the running Workflow and
+# every subagent, then forks — and work with live agents is structurally non-carryable,
+# so it is simply lost. It also mints a new session id per press, littering the resume
+# list with empty title-only stubs. See CLAUDE.md "leftArrowOpensAgents".
+#
+# Writes only when a pin is actually missing or wrong, so the common attach path
+# touches nothing: a concurrent session holds this file in memory and rewrites it
+# wholesale, and we would rather lose the pin (re-applied next cold start) than clobber
+# that session's state. Best-effort — a host without python3 just gets a warning.
+pin_global_config() {
+    local f="$1"
+    [ -f "$f" ] || return 0
+    command -v python3 >/dev/null 2>&1 || {
+        warn "python3 not found on the host — cannot pin .claude.json keys."
+        return 0
+    }
+    python3 - "$f" <<'PY' || warn "could not pin .claude.json keys (left it untouched)."
+import json, os, sys, tempfile
+
+PINS = {"leftArrowOpensAgents": False}
+
+path = sys.argv[1]
+try:
+    with open(path) as fh:
+        cfg = json.load(fh)
+except (OSError, ValueError):
+    sys.exit(1)                       # unreadable or not JSON: leave it well alone
+if not isinstance(cfg, dict):
+    sys.exit(1)
+if all(cfg.get(k) == v for k, v in PINS.items()):
+    sys.exit(0)                       # already pinned — no write, no clobber window
+cfg.update(PINS)
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".")   # same dir → atomic rename
+try:
+    with os.fdopen(fd, "w") as fh:
+        json.dump(cfg, fh, indent=2)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
+print("🔧 cc: pinned %s in .claude.json" % ", ".join(PINS), file=sys.stderr)
+PY
+}
+
 # ── .ccignore → .gitignore + host pre-commit guard ────────────────
 # .ccignore hides sensitive paths from the container, but nothing stops git from
 # committing them on the host — leaking their real contents into history and diffs.

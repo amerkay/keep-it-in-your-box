@@ -129,6 +129,9 @@ else
     flock -w 60 -s 200 || die "timed out waiting for the project lock ($LOCK_FILE)."
 fi
 
+# Every launch, not just the first: the seed covers only a brand-new session dir.
+pin_global_config "$SESSION_DIR/.claude.json"
+
 sync_ccignore_gitignore
 
 # ── Container lifecycle ──────────────────────────────────────
