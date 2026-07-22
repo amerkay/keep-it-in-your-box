@@ -415,8 +415,10 @@ start_fuse_sidecar() {
 }
 
 # Desktop alert — the one launch channel that survives claude's TUI clearing the screen a
-# few milliseconds after cc prints to stderr. Best-effort: with no notify-send, or no desktop
-# session (ssh, `cc … -p`), it's a silent no-op. urgency: normal (info) | critical (sticky).
+# few milliseconds after cc prints to stderr. Reserved for *problems*: a launch that works
+# notifies nothing, so any popup means something needs the user. Best-effort: with no
+# notify-send, or no desktop session (ssh, `cc … -p`), it's a silent no-op.
+# urgency: normal (degraded) | critical (sticky).
 notify() {
     local urgency="$1" title="$2" body="$3" icon=dialog-information
     [ "$urgency" = critical ] && icon=dialog-error
@@ -584,7 +586,9 @@ add_resolv_sync_args() {
 # for the container's whole life — shared by every attached terminal — and is killed when the
 # container is removed, so there is nothing to tear down. Run as root (uid 0, bypassing the
 # entrypoint) because it writes /etc/resolv.conf, and detached (-d) because it loops forever.
-# Reports through a desktop notification: claude's TUI wipes stderr milliseconds after launch.
+# Only *failures* raise a desktop notification (claude's TUI wipes stderr milliseconds after
+# launch, so stderr alone is unreadable); the working case stays silent — a popup on every
+# launch saying "things are normal" is noise the user has to dismiss.
 start_resolv_sync() {
     if ! host_has_resolved; then
         echo "ℹ️  DNS: no systemd-resolved on this host — keeping Docker's default resolv.conf" >&2
@@ -596,8 +600,6 @@ start_resolv_sync() {
     if docker exec -u 0 -d "$CNAME" \
         sh /usr/local/bin/resolv-sync.sh /run/host-resolve/resolv.conf 2>/dev/null; then
         echo "🌐 DNS: syncing resolv.conf to the host live — follows wifi/VPN changes." >&2
-        notify normal "cc · DNS is following the host live" \
-            "This sandbox keeps its resolv.conf synced to the host's live upstreams and survives wifi/VPN changes."
     else
         echo "⚠️  DNS: could not start the resolv.conf watcher — DNS is frozen at creation." >&2
         notify critical "cc · DNS is NOT following the host" \
