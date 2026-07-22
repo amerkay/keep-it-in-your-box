@@ -39,3 +39,6 @@ Write CLAUDE.md files that include only what the agent can't discover on its own
 
 ## Commit message
 Must always use conventional commit style.
+
+## Code writing standard
+Write great, DRY, maintainable, briefly commented and documented code, easy to maintain and read, testable, modular code.
