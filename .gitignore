@@ -18,3 +18,8 @@ build.log
 build.pid
 __pycache__/
 sleep-inhibition-*.log
+
+# security-test.sh fixtures. Kept between runs on purpose: the guard rightly refuses to
+# unlink a .git/config, so they can only be cleared from the host.
+.sectest/
+.sectest-probe/

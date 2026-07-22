@@ -25,6 +25,19 @@ Enforced by a FUSE layer over the project. Deliberate policy, not bugs — **not
   `.env.dist`) are exempt and work normally — they hold no secrets.
 - **Protected** (`.git/config`, `.git/hooks`, `.vscode/`, `.devcontainer/`, `.idea/`, `.envrc`, and submodule/worktree equivalents) — reads work, writes fail EACCES. The **host** executes these later, so writing one is host code execution from inside the sandbox. `git config` is content-checked: ordinary keys are fine; `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`, `core.pager`, `alias.*`, `filter.*.clean` are refused.
 
+- **Shared assets** (`~/.claude-shared/CLAUDE.md`, `hooks/`, `plugins/`, `skills/`, `agents/`,
+  `commands/`) — read-only. They auto-load in **every** project's next session, so one poisoned
+  repo would pivot into all of them. Skills, agents, commands and plugins you create or install
+  in-session land in `$CLAUDE_CONFIG_DIR` and work normally — that is the intended path, not a
+  fallback. On EACCES here, stop and print exactly:
+
+  ```
+  ~/.claude-shared is read-only. Anything written here auto-runs in EVERY
+  project's next session, so a poisoned repo could pivot across all of them.
+  Per-project still works. To make this shared, close every cc session for
+  this project and relaunch with:  cc --unlock-shared
+  ```
+
 On EACCES, or on a commit blocked by the host's pre-commit hook: stop and report it verbatim, including what you were attempting. Do not retry via another path, another tool, a different config scope (`--global`, `--system`), or by asking the user to disable the guard. A legitimate need is a conversation, not a workaround.
 
 ## Sandbox limits
@@ -32,6 +45,7 @@ On EACCES, or on a commit blocked by the host's pre-commit hook: stop and report
 - Docker container: no `docker` binary, no socket, no host processes. `HOME` is `/home/hostuser`; paths under `/home/kay/...` are host bind mounts — writes land on the host.
 - Host-side commands (docker, `cc`, systemd, package installs) are the user's to run in a **host terminal**. `!` does not reach the host — it runs in this container. Hand them a fenced block they can paste whole: no `!`, no `$` prompts, real paths filled in. Keep each command on its own line, or joined with `&&` or trailing `\` for multiline; keeping each line short.
 - `$CLAUDE_CONFIG_DIR` is this project's private state. `~/.claude-shared` is shared with **every** project — change it only for explicitly global requests, and say so when you do.
+- The clipboard is one-way: you can **read** the host clipboard (`wl-paste`, image paste), never write it. `wl-copy` fails by design and raises a desktop alert — a clipboard write is host code execution at the user's next terminal paste. To hand them text, print it.
 
 ## Disabled on purpose: `←` opens the agent view
 
@@ -47,4 +61,7 @@ Write CLAUDE.md files that include only what the agent can't discover on its own
 Must always use conventional commit style.
 
 ## Code writing standard
+
 Write great, DRY, maintainable, briefly commented and documented code, easy to maintain and read, testable, modular code.
+
+Whenever possible to delete code, combine, reused, do it. Shorter, DRY code is always better.

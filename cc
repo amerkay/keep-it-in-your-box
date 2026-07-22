@@ -32,6 +32,16 @@ unset _pwd _home _blocked _dir
 IMAGE_NAME="claude-code-sandbox"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ── cc's own flags ───────────────────────────────────────────
+# Consumed here so they never reach claude. --unlock-shared drops the read-only mounts over
+# ~/.claude-shared, which is how you deliberately install a skill/plugin for EVERY project
+# rather than just this one (see "Shared config surface" in CLAUDE.md).
+UNLOCK_SHARED="${CC_UNLOCK_SHARED:-0}"
+if [ "${1:-}" = "--unlock-shared" ]; then
+    UNLOCK_SHARED=1
+    shift
+fi
+
 # shellcheck source=cc-lib.sh
 . "$SCRIPT_DIR/cc-lib.sh" || {
     echo "❌ cc: cannot load $SCRIPT_DIR/cc-lib.sh — the install is incomplete." >&2
@@ -97,6 +107,14 @@ if [ -d "$HOME/.claude/projects" ] || [ -f "$HOME/.claude/.credentials.json" ]; 
 fi
 
 sync_shared_claude_md
+validate_shared_settings
+
+if [ "$UNLOCK_SHARED" = 1 ]; then
+    echo "⚠️  --unlock-shared: ~/.claude-shared is WRITABLE this session. Anything written" >&2
+    echo "   there auto-runs in EVERY project's next session." >&2
+else
+    echo "🔒 shared config: read-only (installs land per-project; cc --unlock-shared to share)" >&2
+fi
 
 if [ "${CC_FORCE_NEW_SESSION:-0}" = "1" ]; then
     # Clean slate: its own container AND its own config dir, so it has its own daemon and
@@ -140,12 +158,23 @@ sync_ccignore_gitignore
 # hence paths derived from the project hash rather than mktemp.
 FUSE_CNAME="${CNAME}-fuse"
 FUSE_ROOT="/tmp/cc-fuse.${PROJ_HASH}${SCRATCH_SUFFIX}"
+WL_CNAME="${CNAME}-wl"
+WL_ROOT="/tmp/cc-wl.${PROJ_HASH}${SCRATCH_SUFFIX}"
 FUSE_FAILED=0
 PROJECT_MOUNT_SRC="$PWD"
 PROJECT_MOUNT_OPTS=""
 
 container_running() { [ -n "$(docker ps -q -f "name=^${CNAME}$" 2>/dev/null)" ]; }
 sidecar_running()   { [ -n "$(docker ps -q -f "name=^${FUSE_CNAME}$" 2>/dev/null)" ]; }
+
+# Was the running container created with --unlock-shared? Read it off the mounts, which are
+# the ground truth — no state file to go stale. CLAUDE.md is the probe because it is the one
+# entry guaranteed to exist (sync_shared_claude_md writes it every launch); skills/ or
+# plugins/ may legitimately be absent, which would read as "unlocked".
+running_unlocked() {
+    ! docker inspect -f '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' "$CNAME" 2>/dev/null |
+        grep -qx '/home/hostuser/.claude-shared/CLAUDE.md'
+}
 
 # `docker run -d` returns as soon as PID 1 exists, but the entrypoint still has real work
 # to do as root — useradd, the shared-asset symlink farm, chown of the session dir —
@@ -202,6 +231,10 @@ teardown_container() {
     fi
     docker rm -f "$FUSE_CNAME" >/dev/null 2>&1 || true
 
+    # Clipboard proxy + its host-side notification follower. A plain dir, so none of the
+    # unmount care above applies.
+    stop_wayland_guard
+
     # The resolv.conf watcher is an in-container process (a detached `docker exec`), so it is
     # killed when the container is removed — nothing to tear down here.
 
@@ -212,6 +245,7 @@ teardown_container() {
 
 start_container() {
     start_fuse_sidecar
+    start_wayland_guard   # must precede the mounts below: they bind its socket
 
     # --init: PID 1 is `sleep infinity`, which would never reap the zombies left behind by
     # exec'd sessions. Docker's init does.
@@ -265,11 +299,12 @@ start_container() {
         -e DISABLE_TELEMETRY=1
         -e DISABLE_ERROR_REPORTING=1
 
-        # Wayland socket, for image pasting from the host clipboard.
-        -e XDG_RUNTIME_DIR="/run/user/$(id -u)"
-        -e WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
-        -v "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/${WAYLAND_DISPLAY:-wayland-0}:/run/user/$(id -u)/${WAYLAND_DISPLAY:-wayland-0}"
     )
+
+    # Clipboard: the *proxied* Wayland socket only (see add_wayland_args in cc-lib.sh).
+    # Reads pass through, writes are refused — the raw socket would be host code execution
+    # at your next terminal paste.
+    add_wayland_args
 
     # Follow the host's live DNS: mount systemd-resolved's live resolv.conf dir + the watcher
     # (see add_resolv_sync_args in cc-lib.sh). No-op if the host has no systemd-resolved, in
@@ -294,7 +329,25 @@ start_container() {
     # this repo's top-level .git, and only if it exists at launch. The FUSE guard is what
     # actually covers nested repos, submodules, and repos created mid-session.
     [ -d "$PWD/.git/hooks" ] && ARGS+=(-v "$PWD/.git/hooks:$PWD/.git/hooks:ro")
-    [ -d "$CLAUDE_SHARED/hooks" ] && ARGS+=(-v "$CLAUDE_SHARED/hooks:/home/hostuser/.claude-shared/hooks:ro")
+
+    # Everything here auto-loads in EVERY project's next session, so a write from one
+    # sandboxed repo is a cross-project pivot (audit H6). Nested read-only binds over the
+    # shared mount, because ~/.claude-shared itself must stay writable: an OAuth refresh
+    # rewrites .credentials.json. settings.json is deliberately absent too — it stays
+    # writable for /config, and validate_shared_settings vets it host-side each launch.
+    #
+    # Nothing is lost by locking these: the entrypoint gives each project its own
+    # skills/agents/commands/plugins dir, so in-session creation and installs still work,
+    # they just land per-project. --unlock-shared is how you promote one to all projects.
+    if [ "$UNLOCK_SHARED" = 0 ]; then
+        # `if`, not `[ … ] && ARGS+=`: a false test on the final iteration would make the
+        # whole loop exit 1, which under `set -e` kills cc before the container starts.
+        for _entry in CLAUDE.md hooks plugins skills agents commands; do
+            if [ -e "$CLAUDE_SHARED/$_entry" ]; then
+                ARGS+=(-v "$CLAUDE_SHARED/$_entry:/home/hostuser/.claude-shared/$_entry:ro")
+            fi
+        done
+    fi
 
     # The container just idles; the real work runs in `docker exec` sessions, so it
     # survives any one terminal closing.
@@ -325,6 +378,24 @@ if container_running; then
         die ".ccignore changed since this project's container started." \
             "The running redaction layer still enforces the OLD rules. Refusing to" \
             "attach — close all cc sessions for this project and relaunch."
+    fi
+    # The read-only mounts over ~/.claude-shared are fixed at container creation, and the
+    # container outlives any one terminal — so a second terminal must never silently get the
+    # other mode. Same hazard, same shape of refusal, as the stale-.ccignore check above.
+    if [ "$(running_unlocked && echo 1 || echo 0)" != "$UNLOCK_SHARED" ]; then
+        if [ "$UNLOCK_SHARED" = 1 ]; then
+            die "this project's container is running with the shared config LOCKED, and" \
+                "the mounts are fixed at creation. Close all cc sessions for this project," \
+                "then run:" \
+                "    cc --unlock-shared"
+        fi
+        # Also the shape of a container created before the shared-config lock existed:
+        # it has no read-only mounts either, and must not be attached to as if it had.
+        die "this project's container has ~/.claude-shared WRITABLE — it was started with" \
+            "--unlock-shared, or it predates the shared-config lock. Refusing to attach" \
+            "without the flag: the session would look protected and would not be." \
+            "Close all cc sessions for this project and relaunch, or attach with:" \
+            "    cc --unlock-shared"
     fi
     wait_for_container_ready   # in case its creator died mid-startup
     echo "🔗 cc: attaching to this project's running container ($CNAME)." >&2

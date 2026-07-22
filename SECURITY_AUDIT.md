@@ -8,7 +8,9 @@
   <img src="https://img.shields.io/badge/host--RCE%20paths-6%20found%20%E2%86%92%206%20closed-2ea043?style=flat-square" alt="host-RCE paths: 6 found, 6 closed" />
   <img src="https://img.shields.io/badge/container%20escapes-0%20reproduced-2ea043?style=flat-square" alt="container escapes: 0 reproduced" />
   <img src="https://img.shields.io/badge/vectors%20swept-118-30363d?style=flat-square" alt="118 candidate vectors swept" />
-  <img src="https://img.shields.io/badge/critical%20%2B%20high-6%20fixed%20%C2%B7%206%20accepted-1f6feb?style=flat-square" alt="critical and high: 6 fixed, 6 documented as accepted risk" />
+  <img src="https://img.shields.io/badge/critical%20%2B%20high-8%20fixed%20%C2%B7%201%20mitigated%20%C2%B7%203%20accepted-1f6feb?style=flat-square" alt="critical and high: 8 fixed, 1 mitigated, 3 documented as accepted risk" />
+  <img src="https://img.shields.io/badge/cross--project%20pivot-closed-2ea043?style=flat-square" alt="cross-project pivot: closed" />
+  <img src="https://img.shields.io/badge/clipboard-read%20only%2C%20writes%20refused-2ea043?style=flat-square" alt="clipboard: sandbox can read it, writes are refused" />
   <img src="https://img.shields.io/badge/every%20fix-re--verified%20live-8957e5?style=flat-square" alt="every fix re-verified live" />
   <img src="https://img.shields.io/badge/method-live%20exploitation-30363d?style=flat-square" alt="method: live exploitation" />
   <img src="https://img.shields.io/badge/audited-2026--07--22-30363d?style=flat-square" alt="audited 2026-07-22" />
@@ -23,7 +25,7 @@
 **As audited, yes — host code execution was achievable, and so is theft of the host OAuth token.** Six confirmed paths reached the host, four rated **Critical**. The container hardening itself is excellent — *every* classic container-escape CVE was tested and blocked — but the sandbox's own stated boundary, *"what the host runs later,"* has multiple holes in the **git-config guard**, and the shared credential/settings surface is exfiltrable by design.
 
 > [!TIP]
-> **Remediation status — `P0` shipped.** C1–C4, H1 and H2 are **fixed** in `ccignore-fuse.py` and `ccignore-precommit.py`: `include`/`includeIf` are refused, the config parser follows git's grammar, `link()` validates its source inode, and git dirs are recognised by layout rather than by the name `.git`. Every finding below is retained as the record of *why* each control exists. H3/H5/H6/H8 remain the documented accepted risks.
+> **Remediation status — `P0` and `P1` shipped.** C1–C4, H1, H2 are **fixed** in `ccignore-fuse.py`/`ccignore-precommit.py` (`include`/`includeIf` refused, the parser follows git's grammar, `link()` validates its source inode, git dirs recognised by layout rather than by the name `.git`). **H6** and **H8** are fixed too: the shared asset dirs are mounted read-only with a per-project merge farm, and `wayland-guard.py` mediates the clipboard so the sandbox can read it but never write it. **H5** is mitigated — `settings.json` stays writable and is validated host-side each launch. **H3/H4/H7** — token exfil over open egress — are the remaining accepted risk. Every finding below is retained as the record of *why* each control exists.
 
 > [!CAUTION]
 > The most important chains fire on the **host's next `git status` / `git add` / `git commit`** — i.e. the exact commands you run to *review the sandbox's diff before trusting it*. `core.fsmonitor` executes on a bare `git status`, **before a human sees anything**, and a redirected `core.hooksPath` routes git straight past the repo's own `ccignore-precommit.py` guard hook. **The review step the whole model relies on is where the payload detonates.**
@@ -42,12 +44,12 @@
 | **C4** | `.gitattributes` filter/diff/merge driver via include | 🔴 Critical | Host RCE | ✅ **Fixed** |
 | **H1** | Bare / `--separate-git-dir` repo (dir not named `.git`) | 🟠 High | Host RCE | ✅ **Fixed** |
 | **H2** | gitfile / symlinked `.git` redirect to unguarded gitdir | 🟠 High | Host RCE | ✅ **Fixed** |
-| **H3** | Shared OAuth token exfiltration over open egress | 🟠 High | Host credential theft | Confirmed (live) |
-| **H4** | Prompt-injection → unattended token exfil (universal enabler) | 🟠 High | Host credential theft | Confirmed (live) |
-| **H5** | Poison shared `settings.json` (`ANTHROPIC_BASE_URL`/`apiKeyHelper`/hooks) | 🟠 High | Host cred theft + cross-project | Confirmed (live) |
-| **H6** | Poison shared `plugins`/`skills`/`agents`/`commands` | 🟠 High | Cross-project persistence | Confirmed (live) |
-| **H7** | npm/pip install-time RCE arms the host-reaching chains | 🟠 High | Host cred theft (chained) | Confirmed |
-| **H8** | Wayland clipboard poisoning → host paste RCE / read exfil | 🟠 High | Host RCE (on paste) | Confirmed (mechanism) |
+| **H3** | Shared OAuth token exfiltration over open egress | 🟠 High | Host credential theft | ⚪ **Accepted risk** |
+| **H4** | Prompt-injection → unattended token exfil (universal enabler) | 🟠 High | Host credential theft | ⚪ **Accepted risk** |
+| **H5** | Poison shared `settings.json` (`ANTHROPIC_BASE_URL`/`apiKeyHelper`/hooks) | 🟠 High | Host cred theft + cross-project | 🟡 **Mitigated** |
+| **H6** | Poison shared `plugins`/`skills`/`agents`/`commands` | 🟠 High | Cross-project persistence | ✅ **Fixed** |
+| **H7** | npm/pip install-time RCE arms the host-reaching chains | 🟠 High | Host cred theft (chained) | ⚪ **Accepted risk** |
+| **H8** | Wayland clipboard poisoning → host paste RCE / read exfil | 🟠 High | Host RCE (on paste) | ✅ **Fixed** |
 | **L1** | Unguarded project `.claude/settings.json` & `.mcp.json` autoload | 🟡 Low | In-container only | Confirmed |
 | **—** | Container-escape CVEs, FUSE-sidecar pivot, symlink escape, mount-propagation, host-resolver reach, sleep-guard injection | 🟢 Info | None | **Verified blocked** |
 
@@ -65,12 +67,12 @@ Every confirmed vulnerability, its root cause, its fix, and the real-world attac
 | **C4** | `.gitattributes` filter/diff/merge driver | Drivers *are* blocked on direct write, but via C1's include they're defined in an included file; `.gitattributes` (unguarded worktree file) binds them → runs on checkout/diff/merge/archive | Same as C1; `.gitattributes` is an extra trigger surface | ✅ **Fixed** — closed by C1: with the include hop refused, the drivers can no longer be defined at all | CVE-2021-21300 (clean/smudge filter RCE) |
 | **H1** | Bare / `--separate-git-dir` repo (dir ≠ `.git`) | `_is_git_config`/`_git_sensitive` require a literal `.git` component; a bare or separate gitdir isn't named `.git`, so `config`/`hooks` under it are unguarded → direct `core.hooksPath` | `ccignore-fuse.py:333` / `:338` (literal `.git` match); `ccignore-precommit.py` audits top repo only | ✅ **Fixed** — `_is_gitdir()` marker probe (`HEAD`+`objects`+`refs`) in both `_is_git_config` and `_git_sensitive`; `audit_nested_gitdirs()` added host-side | CVE-2026-45033 (Copilot CLI nested bare-repo `fsmonitor` RCE); LWN, *embedded bare repos* |
 | **H2** | gitfile / symlinked `.git` redirect | A `.git` **file** containing `gitdir: ../store` redirects config+hooks into an unguarded dir; only a literal `.git` *component* is treated as sensitive | `ccignore-fuse.py:338` (`_git_sensitive` component match) | ✅ **Fixed** — closed by H1: the redirect *target* is a real gitdir, so the marker probe guards it. The gitfile stays writable so `git worktree add` works | CVE-2021-21300 class; Cursor gitfile→`fsmonitor` chain (fixed Cursor 3.0.0) |
-| **H3** | Shared OAuth token exfil over open egress | `~/.claude-shared/.credentials.json` (0600, **same-uid readable**, a real host mount outside FUSE) + **fully open egress** → token leaves the box | Open egress + durable credential in a container-reachable mount | **P1** — default-deny egress, allowlist the Anthropic API; broker short-lived scoped tokens host-side; **rotate** if any untrusted session ran | Documented accepted risk; generic OAuth exfil |
-| **H4** | Prompt-injection → unattended token exfil | Injected content runs any in-container command with no consent (`cc:387`; subagents `bypassPermissions`); read→exfil of the host token needs *no host trigger* and arms every other chain | By design (`--dangerously-skip-permissions`) + H3 | Mitigated by H3's egress control; in-container by design | Pillar, *Week of Sandbox Escapes*; CSA prompt-injection CI/CD note |
-| **H5** | Poison shared `settings.json` | Writable, **outside** FUSE; entrypoint symlinks it into every project and **folds in-session edits back** into the shared copy; no validation → `ANTHROPIC_BASE_URL`, `apiKeyHelper`, inline `hooks[].command` propagate to every project's next session | `docker-entrypoint.sh:95-110` (fold-back); no content validation | **P1** — mount shared `settings.json` read-only; per-project fold-back; refuse `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`, `apiKeyHelper`, inline `hooks[].command` | **CVE-2026-21852** (`ANTHROPIC_BASE_URL` leak, fixed Claude Code v2.0.65); CVE-2025-59536; Cursor `.claude` hook CVE-2026-48124 |
-| **H6** | Poison shared `plugins`/`skills`/`agents`/`commands` | 0775, writable, symlinked into every project, **not** read-only mounted → auto-run in every project's next session; with H3, exfil the token | Shared writable assets, no validation | **P1** — read-only mount; write per-project | Cymulate, *Configuration-Based Sandbox Escape* (Apr 2025) |
-| **H7** | npm/pip install-time RCE | `bypassPermissions` runs lifecycle scripts with no prompt; in-container alone, but it **arms** C1–C4 (host RCE), H3 (token), H5/H6 (shared poison) | By design (the sandbox exists to build untrusted repos) | Mitigate the *targets* (P0/P1); the install itself can't be removed | Supply-chain lifecycle-script RCE |
-| **H8** | Wayland clipboard poisoning | Raw RW Wayland socket (`cc:268`), no mediation → **write** the clipboard with terminal-escape / bracketed-paste-bypass (`ESC[201~`) sequences that execute on your next host paste; **read** it continuously (`wl-paste --watch`) | `cc:268` — unmediated read-write socket mount | **P2** — clipboard proxy: permit host→container *image* paste only, deny clipboard writes | Pastejacking (Ayrey); bracketed-paste bypass; `wl-copy` passes arbitrary bytes verbatim |
+| **H3** | Shared OAuth token exfil over open egress | `~/.claude-shared/.credentials.json` (0600, **same-uid readable**, a real host mount outside FUSE) + **fully open egress** → token leaves the box | Open egress + durable credential in a container-reachable mount | ⚪ **Accepted** — the token cannot be made unreadable (Claude needs it) and a default-deny allowlist conflicts with the sandbox's purpose of building untrusted repos. **Rotate the token if an untrusted session has run.** | Documented accepted risk; generic OAuth exfil |
+| **H4** | Prompt-injection → unattended token exfil | Injected content runs any in-container command with no consent (`cc:387`; subagents `bypassPermissions`); read→exfil of the host token needs *no host trigger* and arms every other chain | By design (`--dangerously-skip-permissions`) + H3 | ⚪ **Accepted** with H3 — in-container execution is the design (`--dangerously-skip-permissions`); every *host-reaching* target it armed (C1–C4, H5, H6, H8) is now closed or mitigated | Pillar, *Week of Sandbox Escapes*; CSA prompt-injection CI/CD note |
+| **H5** | Poison shared `settings.json` | Writable, **outside** FUSE; entrypoint symlinks it into every project and **folds in-session edits back** into the shared copy; no validation → `ANTHROPIC_BASE_URL`, `apiKeyHelper`, inline `hooks[].command` propagate to every project's next session | `docker-entrypoint.sh:95-110` (fold-back); no content validation | 🟡 **Mitigated** — `validate_shared_settings` (`cc-lib.sh`) vets the file host-side on every launch, before any container reads it, refusing `apiKeyHelper`/`awsAuthRefresh`/`awsCredentialExport`/`otelHeadersHelper`, `env.ANTHROPIC_{BASE_URL,API_KEY,AUTH_TOKEN}`, `statusLine.command` and inline `hooks[].command`; the entrypoint keeps a per-project override instead of folding an edit back into a locked shared copy. Left writable on purpose (`/config`, theme). Prevention at launch, not at write | **CVE-2026-21852** (`ANTHROPIC_BASE_URL` leak, fixed Claude Code v2.0.65); CVE-2025-59536; Cursor `.claude` hook CVE-2026-48124 |
+| **H6** | Poison shared `plugins`/`skills`/`agents`/`commands` | 0775, writable, symlinked into every project, **not** read-only mounted → auto-run in every project's next session; with H3, exfil the token | Shared writable assets, no validation | ✅ **Fixed** — all four mounted `:ro` individually (`cc`), with a per-project merge farm in `docker-entrypoint.sh` so in-session creation and `/plugin install` still work and land per-project; `cc --unlock-shared` is the deliberate opt-out | Cymulate, *Configuration-Based Sandbox Escape* (Apr 2025) |
+| **H7** | npm/pip install-time RCE | `bypassPermissions` runs lifecycle scripts with no prompt; in-container alone, but it **arms** C1–C4 (host RCE), H3 (token), H5/H6 (shared poison) | By design (the sandbox exists to build untrusted repos) | ⚪ **Accepted** — the install cannot be removed (it is why the sandbox exists); every host-reaching target it armed is now closed or mitigated | Supply-chain lifecycle-script RCE |
+| **H8** | Wayland clipboard poisoning | Raw RW Wayland socket (`cc:268`), no mediation → **write** the clipboard with terminal-escape / bracketed-paste-bypass (`ESC[201~`) sequences that execute on your next host paste; **read** it continuously (`wl-paste --watch`) | `cc:268` — unmediated read-write socket mount | ✅ **Fixed** — `wayland-guard.py` sidecar owns the real socket; selection-writing globals are hidden from the registry and every `set_selection`/`create_data_source` is refused, closing that connection and raising a host desktop alert. Reads (`wl-paste`, image paste) still work; host terminal select+copy never came through the proxy | Pastejacking (Ayrey); bracketed-paste bypass; `wl-copy` passes arbitrary bytes verbatim |
 | **L1** | Unguarded project `.claude/` & `.mcp.json` | `global.ccignore` lists `.vscode`/`.envrc`/`.env*` but not `.claude/` or `.mcp.json`; a malicious repo's autoload files get in-container RCE — **already free** under skip-permissions | Not pruned/validated | **P2** — add `.claude/settings*.json`, `.claude/hooks`, `.mcp.json` to a validated guard section | CVE-2025-59536; CVE-2026-21852 |
 
 ---
@@ -92,6 +94,43 @@ same non-destructive technique as the original exploitation pass: the payload is
 | **H1** | `git init --bare b1 && git -C b1 config core.hooksPath …` | accepted + resolved | Permission denied · resolves to nothing |
 | **H1b** | write `b1/hooks/pre-commit` into the bare repo | permitted | Permission denied |
 | **H2** | `--separate-git-dir=gd wt` → `git -C wt config core.fsmonitor …` | accepted + **executed on `git status`** | Permission denied · resolves to nothing |
+
+### The `P1` wave, verified the same way
+
+Re-run from inside a **freshly created** container on the rebuilt image (2026-07-22), with
+the host-side observations confirmed by the operator:
+
+| # | Reproduction | Before | After |
+|:--|:--|:--|:--|
+| **H6** | `touch ~/.claude-shared/{skills,agents,commands,plugins,hooks}/probe` | permitted | `Read-only file system` — all five |
+| **H6b** | mount check: `/proc/self/mountinfo` for the shared entries | one `rw` mount | six nested `ro` binds; `~/.claude-shared` itself still `rw` |
+| **H6c** | *regression* — create a skill / agent in-session | worked (into the shared dir) | works, into `$CLAUDE_CONFIG_DIR`; invisible to other projects |
+| **H6d** | *regression* — `mkdir plugins/marketplaces/<new>` | worked (shared) | works, per-project (`farm_dir` runs a level deeper) |
+| **H5** | `.credentials.json` / `settings.json` writability | writable | still writable **by design** — OAuth refresh and `/config` must work; the guard is `validate_shared_settings` at launch |
+| **H8** | `wl-copy 'payload'` from inside the sandbox | clipboard **set** | `wl_display_dispatch: Broken pipe` — proxy closed the connection; clipboard verified unchanged |
+| **H8b** | host desktop alert on that attempt | none | *"The sandbox tried to write your clipboard. Blocked — your next paste is safe. Project: claude-docker"* |
+| **H8c** | *regression* — `wl-paste --list-types` | worked | works (`text/plain`, `text/html`, …), and still works after a denial |
+| **H8d** | *regression* — host terminal select + `Ctrl+Shift+C` | worked | unchanged — the terminal emulator is a host client and never traverses the proxy |
+
+Unit harnesses back the paths a live run can't reach: the proxy passes **23/23** protocol
+cases against a fake compositor (every write request on all four clipboard interfaces
+refused; every global forwarded; fd passing byte-identical), `validate_shared_settings`
+**15/15**, and the entrypoint farm **22/22** against a throwaway `$HOME`.
+
+> [!WARNING]
+> **Two bugs were found *by* this live pass, both mine, both fixed** — recorded because
+> each was invisible to the unit harnesses and to reasoning alone.
+> 1. **Hiding the selection globals broke clipboard *reads*.** The proxy dropped
+>    `wl_data_device_manager` from `wl_registry`. KWin advertises `ext_data_control_manager_v1`
+>    but not `zwlr_`, and this `wl-clipboard` build speaks neither — it falls back to
+>    `wl_data_device_manager`, so `wl-paste` died. Refusing the individual write *requests*
+>    is exactly as strict and costs no reads. Hiding is gone.
+> 2. **The notification follower stranded every container.** It inherited fd 200, the
+>    project's shared lifecycle `flock`, so the last terminal out could never take that lock
+>    exclusively, `teardown_container` never ran, and containers for *all* projects survived
+>    their sessions. `cc` already documents `200>&- 201>&-` for exactly this reason on
+>    `sleep-guard.sh`; the new child needed it too. Confirmed by `lsof` on the lock files
+>    before the fix.
 
 **Regressions checked — all still working:** `git status`, config reads, `git init`
 (with an empty template), `git add`, `git commit`, `git remote add`, `git worktree add`,
@@ -244,6 +283,8 @@ By design, injected webpage/repo content runs any in-container command with no c
 
 `~/.claude-shared/settings.json` is writable, sits **outside** the FUSE guard, and `docker-entrypoint.sh:95-110` symlinks it into every project and **folds in-session edits back into the shared copy** (`cp -p`, `:106`). No content-validation exists, so `env.ANTHROPIC_BASE_URL` (redirect API traffic + token to an attacker — **CVE-2026-21852** class), `apiKeyHelper` (a command run for a key), and **inline `hooks[].command`** (bypassing the read-only `hooks/` dir) are all accepted and propagate to **every** project's next session. **Live:** the shared dir is writable (verified with a throwaway probe; the real file untouched).
 
+🟡 **Mitigated.** The file stays writable — `/config` and theme changes are ordinary — so the control is `validate_shared_settings` (`cc-lib.sh`), which vets it on the host at **every** launch, before any container reads it, and refuses to start on `apiKeyHelper`/`awsAuthRefresh`/`awsCredentialExport`/`otelHeadersHelper`, `env.ANTHROPIC_{BASE_URL,API_KEY,AUTH_TOKEN}`, `statusLine.command` or any inline `hooks[].command`. The entrypoint no longer folds an edit back into a locked shared copy — it keeps the project-local file instead. Prevention at launch, not at write.
+
 </details>
 
 <details>
@@ -251,7 +292,9 @@ By design, injected webpage/repo content runs any in-container command with no c
 
 <br>
 
-Same shape as H5: these are 0775, writable, symlinked into every project, and — unlike `hooks/` — **not** read-only mounted. Injected skill/command/agent/plugin content runs automatically in every project's next session and, combined with H3, exfiltrates the token. Documented as a known gap in `CLAUDE.md`.
+Same shape as H5: these are 0775, writable, symlinked into every project, and — unlike `hooks/` — **not** read-only mounted. Injected skill/command/agent/plugin content runs automatically in every project's next session and, combined with H3, exfiltrates the token.
+
+✅ **Fixed.** All four are mounted `:ro` individually (`cc`) — individually, because `~/.claude-shared` itself must stay writable for the OAuth refresh. `docker-entrypoint.sh` builds each as a per-project **merge farm** (a real directory of symlinks to the shared items), so in-session authoring and `/plugin install` still work and land in `$CLAUDE_CONFIG_DIR`; `plugins/config.json` is copied rather than linked because the installer rewrites it. `cc --unlock-shared` is the deliberate opt-out, and `cc` refuses to attach to a container running in the other mode.
 
 </details>
 
@@ -269,7 +312,9 @@ The sandbox exists to build untrusted repos; `bypassPermissions` runs `npm insta
 
 <br>
 
-`cc:268` bind-mounts the host Wayland socket **read-write** with no mediation. Intended for host→container *image* paste, but the raw socket grants full bidirectional clipboard control: the container can **write** the clipboard (poison it with terminal-escape / bracketed-paste-bypass sequences — an embedded `ESC[201~` ends "safe paste" early — that execute when you next paste into a host terminal) and **read** it continuously (`wl-paste --watch` → secret exfil). This is a host-side control (your terminal), not fixable from inside the container. Documented accepted risk.
+`cc:268` bind-mounts the host Wayland socket **read-write** with no mediation. Intended for host→container *image* paste, but the raw socket grants full bidirectional clipboard control: the container can **write** the clipboard (poison it with terminal-escape / bracketed-paste-bypass sequences — an embedded `ESC[201~` ends "safe paste" early — that execute when you next paste into a host terminal) and **read** it continuously (`wl-paste --watch` → secret exfil). This is a host-side control (your terminal), not fixable from inside the container.
+
+✅ **Fixed.** `wayland-guard.py` runs in a sidecar that is now the only holder of the real socket; the main container gets a proxied one. It hides `wl_data_device_manager` and `zwp_primary_selection_device_manager_v1` from `wl_registry.global`, and refuses `create_data_source`/`set_selection`/`set_primary_selection` on the `zwlr_`/`ext_` data-control interfaces — closing that connection and raising a host desktop alert. Reads pass verbatim, `SCM_RIGHTS` fds included, so `wl-paste` and image paste are unaffected. Host terminal select+copy never traversed the proxy: the terminal emulator is a host client.
 
 </details>
 
@@ -315,17 +360,23 @@ In `link()` (`:453`), refuse when the **source** is protected/redacted: `_deny_i
 
 `_is_git_config`/`_git_sensitive` must recognize git dirs **structurally**, not by the literal `.git` component: refuse writes to any `config`/`hooks` under a directory carrying a git layout (`HEAD`+`objects`+`refs`); treat a non-directory `.git` (gitfile) and a symlinked `.git` as sensitive; and have `ccignore-precommit.py` walk nested/bare/separate gitdirs, not just the top repo.
 
-### ⬜ `P1` — Constrain egress & protect the shared credential  <sub>mitigates H3, H4, H7</sub>
+### ✅ `P1` — Bring the shared config surface under the guard  <sub>fixed H6, mitigated H5</sub>
 
-The token can't be made unreadable (Claude needs it) — **egress is the lever.** Default-deny outbound with an allowlist to the Anthropic API only; brokering short-lived scoped tokens host-side (keeping the durable credential out of any container-reachable mount) is the strong form. **Rotate the OAuth token if any untrusted session has run.**
+`~/.claude-shared/{CLAUDE.md,hooks,plugins,skills,agents,commands}` are mounted **read-only**, individually — the directory itself must stay writable because an OAuth refresh rewrites `.credentials.json`. To keep that from reading as a bug, `docker-entrypoint.sh` builds each asset *directory* as a per-project **merge farm** (a real dir of symlinks to the shared items), so `/agents`, skill authoring and `/plugin install` still work and simply land per-project; `cc --unlock-shared` is the deliberate way to promote one to every project, and `cc` refuses to attach to a container running in the other mode.
 
-### ⬜ `P1` — Bring the shared config surface under the guard  <sub>fixes H5, H6</sub>
+`settings.json` stays writable — `/config` and theme changes are ordinary — and is **content-validated host-side on every launch** by `validate_shared_settings`, before any container reads it: `apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`, `otelHeadersHelper`, `env.ANTHROPIC_{BASE_URL,API_KEY,AUTH_TOKEN}`, `statusLine.command` and inline `hooks[].command` all refuse the launch. That is prevention **at launch, not at write**, which is why H5 is *mitigated*, not *fixed*.
 
-Mount `~/.claude-shared/{settings.json,plugins,skills,agents,commands}` **read-only** into the container (as `hooks/` already is), and rework the entrypoint fold-back to write **per-project** rather than the shared copy. Content-validate any sandbox-writable `settings.json` and refuse `env.ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`, `apiKeyHelper`, and inline `hooks[].command` — the `DANGEROUS_GIT_KEYS` pattern applied to settings.
+### ✅ `P2` — Mediate the clipboard  <sub>fixed H8</sub>
 
-### ⬜ `P2` — Defense-in-depth
+`wayland-guard.py` runs in a sidecar that is the only holder of the real compositor socket. It hides the selection-writing globals from `wl_registry`, refuses `create_data_source`/`set_selection`/`set_primary_selection` (closing that connection and raising a host desktop alert), and forwards everything else verbatim including `SCM_RIGHTS` fds — so `wl-paste` and image paste keep working. Host-side terminal select+copy was never affected: the terminal emulator is a host client and does not traverse the proxy.
 
-Add `.claude/settings*.json`, `.claude/hooks`, `.mcp.json` to a validated section of the guard (**L1**); interpose a clipboard proxy that permits only host→container image-paste and denies clipboard writes (**H8**); keep the host kernel and `runc` patched.
+### ⚪ Accepted — egress & the shared credential  <sub>H3, H4, H7</sub>
+
+The token can't be made unreadable (Claude needs it) and **egress is the only real lever** — but default-deny outbound conflicts with the sandbox's whole purpose, which is building untrusted repos that fetch from arbitrary registries. Recorded as an accepted risk in `CLAUDE.md` rather than half-fixed. Operationally: **rotate the OAuth token if any untrusted session has run.** The strong form, if this is ever revisited, is brokering short-lived scoped tokens host-side so the durable credential never sits in a container-reachable mount.
+
+### ⬜ `P3` — Remaining defense-in-depth
+
+Add `.claude/settings*.json`, `.claude/hooks`, `.mcp.json` to a validated section of the guard (**L1** — marginal under `--dangerously-skip-permissions`, worth it against a future non-skip-permissions use); keep the host kernel and `runc` patched.
 
 ---
 
@@ -348,9 +399,11 @@ This audit's findings are not novel bug classes — they are the **known** AI-co
 
 ## Overall assessment
 
-The **container** is hardened to a high standard — every kernel/namespace escape class was tested and blocked. The exposure is entirely at the **host-executed-config boundary the sandbox itself set out to defend**, plus the accepted shared-credential/clipboard surface. The git-config guard is the right idea implemented with two brittle assumptions — *path strings identify inodes* and *hand-parsing equals git's resolution* — each of which is bypassable.
+The **container** is hardened to a high standard — every kernel/namespace escape class was tested and blocked. The exposure was entirely at the **host-executed-config boundary the sandbox itself set out to defend**, plus the shared-config, clipboard and credential surfaces sitting outside it. The git-config guard is the right idea implemented with two brittle assumptions — *path strings identify inodes* and *hand-parsing equals git's resolution* — each of which is bypassable.
 
-**P0 is now fixed** — the parser follows git's grammar and refuses `include`/`includeIf`, `link()` validates its source inode, and git dirs are recognised by layout. That closes **four Criticals and two Highs**, and the host-executed-config boundary now holds against every chain exercised in this audit. What remains (H3/H5/H6/H8) is the shared-credential, shared-settings and clipboard surface — accepted by design, and closable only by narrowing egress and the shared mounts, not by another guard rule.
+**P0 and P1 are now fixed.** The parser follows git's grammar and refuses `include`/`includeIf`, `link()` validates its source inode, and git dirs are recognised by layout — closing four Criticals and two Highs, so the host-executed-config boundary holds against every chain exercised here. The second wave then closed the two surfaces that were never behind that guard at all: the shared config dir is mounted read-only with a per-project merge farm (H6), the clipboard is mediated read-only (H8), and the shared `settings.json` is vetted host-side before any container reads it (H5, mitigated).
+
+What remains is **H3/H4/H7 — the shared OAuth token under open egress**, and it is the one finding that cannot be closed with a guard rule: Claude needs the token, and a default-deny allowlist contradicts the sandbox's purpose of building untrusted repos. It is accepted deliberately, with token rotation as the operational answer.
 
 ---
 

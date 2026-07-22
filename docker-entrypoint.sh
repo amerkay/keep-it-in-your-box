@@ -90,9 +90,14 @@ CLAUDE_SESSION_DIR="${CLAUDE_CONFIG_DIR:-}"
 CLAUDE_SHARED_DIR="${CLAUDE_SECURESTORAGE_CONFIG_DIR:-}"
 
 if [ -n "$CLAUDE_SESSION_DIR" ] && [ -d "$CLAUDE_SHARED_DIR" ]; then
-	mkdir -p "$CLAUDE_SESSION_DIR" "$CLAUDE_SHARED_DIR/plugins/marketplaces" 2>/dev/null || true
+	mkdir -p "$CLAUDE_SESSION_DIR" 2>/dev/null || true
+	# Skipped when cc has mounted plugins/ read-only, which is the default.
+	if [ -w "$CLAUDE_SHARED_DIR/plugins" ]; then
+		mkdir -p "$CLAUDE_SHARED_DIR/plugins/marketplaces" 2>/dev/null || true
+	fi
 
-	for entry in plugins skills agents commands hooks settings.json keybindings.json CLAUDE.md; do
+	# Whole-file assets: one symlink each, as before.
+	for entry in settings.json keybindings.json CLAUDE.md hooks; do
 		src="$CLAUDE_SHARED_DIR/$entry"
 		dst="$CLAUDE_SESSION_DIR/$entry"
 		[ -e "$src" ] || continue
@@ -102,12 +107,60 @@ if [ -n "$CLAUDE_SESSION_DIR" ] && [ -d "$CLAUDE_SHARED_DIR" ]; then
 		# really is newer, or we'd revert a change another project made through the
 		# shared file meanwhile. (`find -newer`, not `-nt`: this runs under dash.)
 		if [ -f "$dst" ] && [ ! -L "$dst" ]; then
+			# A read-only shared copy (cc's default) means this asset is deliberately
+			# not project-writable: keep the local file as this project's override
+			# rather than deleting an edit we cannot fold back.
+			[ -w "$src" ] || continue
 			if [ -n "$(find "$dst" -newer "$src" 2>/dev/null)" ]; then
 				cp -p "$dst" "$src" 2>/dev/null || true
 			fi
 			rm -f "$dst" 2>/dev/null || true
 		fi
 		ln -sfn "$src" "$dst" 2>/dev/null || true
+	done
+
+	# Asset *directories*: a real per-project dir holding one symlink per shared item,
+	# instead of one symlink to the shared dir. cc mounts these read-only (a write there
+	# would auto-run in every other project's next session), and a plain symlink would
+	# make `/agents`, skill authoring and `/plugin install` fail outright. This way shared
+	# items still load, and anything created in-session lands in this project's own dir
+	# and works immediately — it simply doesn't follow you to other projects.
+	#
+	# State *files* need no special case: a JSON writer does temp-file + rename, and the
+	# rename replaces our symlink with a real local file, which this dir permits.
+	farm_dir() {   # $1 = shared source dir, $2 = per-project dir
+		[ -d "$1" ] || return 0
+		[ -L "$2" ] && rm -f "$2"               # upgrade a farm built by an older cc
+		mkdir -p "$2" 2>/dev/null || true
+
+		# Drop our own links first, so an item deleted from the shared dir since the last
+		# launch doesn't linger as a dangling link. Only links *into* the shared dir are
+		# ours; real files and dirs are this project's and are never touched.
+		for link in "$2"/* "$2"/.*; do
+			[ -L "$link" ] || continue
+			case "$(readlink "$link" 2>/dev/null)" in
+				"$CLAUDE_SHARED_DIR"/*) rm -f "$link" ;;
+			esac
+		done
+
+		for item in "$1"/*; do
+			[ -e "$item" ] || continue          # unmatched glob
+			name="${item##*/}"
+			[ -e "$2/$name" ] && continue       # a local item of the same name wins
+			ln -sfn "$item" "$2/$name" 2>/dev/null || true
+		done
+	}
+
+	for entry in plugins skills agents commands; do
+		farm_dir "$CLAUDE_SHARED_DIR/$entry" "$CLAUDE_SESSION_DIR/$entry"
+	done
+
+	# One level deeper for the plugin installer's working dirs. Without this a per-project
+	# `/plugin install` fails: the state JSONs update fine (rename replaces their symlink),
+	# but cloning a marketplace or unpacking a plugin needs to mkdir *inside* these, and a
+	# symlink to the read-only shared dir refuses that.
+	for entry in marketplaces cache data; do
+		farm_dir "$CLAUDE_SHARED_DIR/plugins/$entry" "$CLAUDE_SESSION_DIR/plugins/$entry"
 	done
 
 	# The session dir belongs to one project, so no other container is walking it and this

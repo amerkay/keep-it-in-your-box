@@ -102,6 +102,93 @@ sync_shared_claude_md() {
     } > "$md.cc.tmp" && mv "$md.cc.tmp" "$md"
 }
 
+# ── Shared settings.json: refuse host-reaching keys ───────────────
+# ~/.claude-shared/settings.json is symlinked into EVERY project and the entrypoint folds
+# in-session edits back into it, so one poisoned session reaches every other project's next
+# session (audit H5). The file has to stay writable — /config and theme changes are normal
+# — so the control lives here instead: cc runs on the host, before any container reads it,
+# on both the create and the attach path.
+#
+# Refused are the key classes whose value is a command the agent runs, or which redirect
+# auth traffic. Inline hooks[].command is the one that matters most: it is exactly how a
+# poisoned settings.json bypasses the read-only hooks/ directory, the same way
+# core.hooksPath bypassed a read-only .git/hooks.
+#
+# Prevention at launch, not at write: a poisoned file is caught before the *next* session
+# loads it, which is the propagation step. Broken JSON warns rather than refuses (Claude
+# ignores an unparseable settings file anyway); an unreadable one fails closed.
+validate_shared_settings() {
+    local f="$CLAUDE_SHARED/settings.json"
+    [ -e "$f" ] || return 0
+    command -v python3 >/dev/null 2>&1 || {
+        warn "python3 not found on the host — cannot validate the shared settings.json."
+        return 0
+    }
+    local bad
+    bad="$(python3 - "$f" <<'PY'
+import json, sys
+
+# key path -> why it is refused
+COMMAND_KEYS = ("apiKeyHelper", "awsAuthRefresh", "awsCredentialExport",
+                "otelHeadersHelper")
+ENV_KEYS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+
+try:
+    with open(sys.argv[1]) as fh:
+        cfg = json.load(fh)
+except ValueError:
+    sys.exit(3)                      # not JSON — warn, don't block
+except OSError:
+    sys.exit(4)                      # unreadable — fail closed
+if not isinstance(cfg, dict):
+    sys.exit(3)
+
+bad = []
+for k in COMMAND_KEYS:
+    if cfg.get(k):
+        bad.append("%s = %s" % (k, cfg[k]))
+env = cfg.get("env")
+if isinstance(env, dict):
+    for k in ENV_KEYS:
+        if env.get(k):
+            bad.append("env.%s = %s" % (k, env[k]))
+sl = cfg.get("statusLine")
+if isinstance(sl, dict) and sl.get("command"):
+    bad.append("statusLine.command = %s" % sl["command"])
+# hooks: {"PreToolUse": [{"hooks": [{"command": "..."}]}]} — an inline command here runs
+# without ever touching the read-only hooks/ directory.
+hooks = cfg.get("hooks")
+if isinstance(hooks, dict):
+    for event, matchers in hooks.items():
+        for m in matchers if isinstance(matchers, list) else []:
+            for h in (m.get("hooks") or []) if isinstance(m, dict) else []:
+                if isinstance(h, dict) and h.get("command"):
+                    bad.append("hooks.%s[].command = %s" % (event, h["command"]))
+print("\n".join(bad))
+sys.exit(1 if bad else 0)
+PY
+)" && return 0
+
+    case "$?" in
+        3) warn "~/.claude-shared/settings.json is not valid JSON — skipping validation." \
+                "Claude ignores an unparseable settings file, so this is not fatal."
+           return 0 ;;
+        4) die "cannot read ~/.claude-shared/settings.json. Refusing to launch:" \
+               "an unreadable shared settings file cannot be checked for keys that" \
+               "run commands on your behalf." ;;
+    esac
+
+    printf '\n' >&2
+    die "~/.claude-shared/settings.json contains a key that runs a command or" \
+        "redirects your credentials:" \
+        "" \
+        "$(printf '%s\n' "$bad" | sed 's/^/    /')" \
+        "" \
+        "A sandboxed session can write this file, and it loads in EVERY project." \
+        "Remove the key, then relaunch:" \
+        "    \$EDITOR ~/.claude-shared/settings.json"
+}
+
 # ── Global-config pins (.claude.json) ────────────────────────────
 # Keys Claude reads from its *global config* rather than settings.json. That file is
 # per-project here, and claude-json.seed only lands on a project's FIRST run — so a pin
@@ -335,6 +422,117 @@ notify() {
     [ "$urgency" = critical ] && icon=dialog-error
     command -v notify-send >/dev/null 2>&1 || return 0
     notify-send -u "$urgency" -i "$icon" "$title" "$body" 2>/dev/null || true
+}
+
+# ── Clipboard: mediate Wayland instead of handing over the socket ─
+# The host compositor socket used to be bind-mounted into the main container read-write and
+# unmediated. It is there for one job — pasting an image *from* the host clipboard — but the
+# raw socket also grants clipboard *writes*, and a write is host code execution at your next
+# terminal paste (an embedded ESC[201~ ends bracketed paste early, so the remainder is
+# interpreted as typed input). Audit H8.
+#
+# So the main container never sees the real socket. A sidecar runs wayland-guard.py, which
+# relays the protocol, forwards reads verbatim, and refuses every selection-setting request.
+# Host-side terminal select+copy is unaffected: your terminal emulator is a host client and
+# never comes through here.
+#
+# Fail-soft, unlike the FUSE sidecar: no Wayland, or a proxy that won't start, means no
+# socket is mounted at all. Absent Wayland is not a security hole (you lose image paste), so
+# aborting the launch would be wrong — falling back to the raw socket would be.
+WL_HOST_SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/${WAYLAND_DISPLAY:-wayland-0}"
+
+host_has_wayland() { [ -S "$WL_HOST_SOCK" ]; }
+
+# Mount args for the main container — only the *proxied* socket, never the real one. Always
+# exposed as wayland-0 inside, whatever the host display is called.
+add_wayland_args() {
+    [ -S "$WL_ROOT/wayland-0" ] || return 0
+    ARGS+=(
+        -e XDG_RUNTIME_DIR="/run/user/$(id -u)"
+        -e WAYLAND_DISPLAY=wayland-0
+        -v "$WL_ROOT/wayland-0:/run/user/$(id -u)/wayland-0"
+    )
+}
+
+# Turn a denial logged by the proxy into a desktop notification. The sidecar has no desktop
+# session, so the alert has to be raised here. setsid + the pid file so teardown can kill the
+# whole pipeline by process group (a plain kill would leave `docker logs -f` running).
+# Rate-limited to one per 30s: a loop calling wl-copy must not be able to spam the desktop.
+#
+# 200>&- 201>&- is LOAD-BEARING, exactly as it is for sleep-guard.sh: this follower outlives
+# the cc that started it (it runs for the container's whole life). Inheriting the project's
+# shared lock on fd 200 means the last terminal out can never take that lock *exclusively*,
+# so teardown_container never runs and the container — with its sidecars — is stranded until
+# a manual `docker rm -f`. Shipped that way once; it left containers running for every
+# project whose sessions had all been closed.
+start_wayland_notifier() {
+    command -v notify-send >/dev/null 2>&1 || return 0
+    setsid sh -c '
+        last=0
+        docker logs -f "$1" 2>&1 | while IFS= read -r line; do
+            case "$line" in WLGUARD-DENY*) ;; *) continue ;; esac
+            now=$(date +%s)
+            [ $((now - last)) -lt 30 ] && continue
+            last=$now
+            notify-send -u critical -i dialog-error "cc · clipboard write blocked" "$2" || true
+        done' _ "$WL_CNAME" \
+        "The sandbox tried to write your clipboard. Blocked — your next paste is safe. Project: $(basename "$PWD")" \
+        >/dev/null 2>&1 200>&- 201>&- &
+    echo $! > "$WL_ROOT/notify.pid"
+}
+
+start_wayland_guard() {
+    if ! host_has_wayland; then
+        echo "ℹ️  clipboard: no Wayland socket on this host — image paste unavailable." >&2
+        return 0
+    fi
+    mkdir -p "$WL_ROOT"
+    chmod 755 "$WL_ROOT"          # the main container traverses this as root before gosu
+
+    # The real socket is mounted read-only: that does not stop a connect() (see the Varlink
+    # note below), which is exactly what the proxy needs and all it gets. --network none
+    # because the proxy speaks only AF_UNIX.
+    if ! docker run -d --name "$WL_CNAME" \
+        --cap-drop=ALL --security-opt no-new-privileges --network none \
+        --user "$(id -u):$(id -g)" --userns=host --entrypoint python3 \
+        -v "$WL_HOST_SOCK:/run/host-wayland.sock:ro" \
+        -v "$WL_ROOT:$WL_ROOT" \
+        -v /etc/passwd:/etc/passwd:ro \
+        -v /etc/group:/etc/group:ro \
+        -v "$SCRIPT_DIR/wayland-guard.py:/usr/local/bin/wayland-guard.py:ro" \
+        "$IMAGE_NAME" \
+        /usr/local/bin/wayland-guard.py \
+            --upstream /run/host-wayland.sock \
+            --listen "$WL_ROOT/wayland-0" >/dev/null 2>&1
+    then
+        warn "could not start the clipboard proxy — image paste is unavailable this session."
+        rm -rf "$WL_ROOT" 2>/dev/null || true
+        return 0
+    fi
+
+    local _
+    for _ in $(seq 1 100); do                       # ≤5s for the proxy to bind
+        [ -S "$WL_ROOT/wayland-0" ] && break
+        sleep 0.05
+    done
+    if [ ! -S "$WL_ROOT/wayland-0" ]; then
+        warn "the clipboard proxy never came up; image paste is unavailable. Logs:" \
+             "$(docker logs "$WL_CNAME" 2>&1 | tail -5)"
+        docker rm -f "$WL_CNAME" >/dev/null 2>&1 || true
+        rm -rf "$WL_ROOT" 2>/dev/null || true
+        return 0
+    fi
+    start_wayland_notifier
+    echo "📋 clipboard: mediated (read-only from the sandbox; sidecar: $WL_CNAME)" >&2
+}
+
+stop_wayland_guard() {
+    local pid
+    pid="$(cat "$WL_ROOT/notify.pid" 2>/dev/null || true)"
+    # Negative pid: the notifier is a setsid'd pipeline, so kill the whole process group.
+    [ -n "$pid" ] && kill -TERM "-$pid" 2>/dev/null || true
+    docker rm -f "$WL_CNAME" >/dev/null 2>&1 || true
+    rm -rf "$WL_ROOT" 2>/dev/null || true
 }
 
 # ── DNS: follow the host's live resolver, without editing the host ───
