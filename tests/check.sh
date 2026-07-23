@@ -8,9 +8,10 @@
 #      exercised on this one machine.
 #
 # Exit non-zero if anything fails. This does NOT build an image or start a container — the
-# container-side behaviour is security-test.sh's job, run inside a sandbox.
+# container-side behaviour is tests/security-test.sh's job, run inside a sandbox.
 set -uo pipefail
-cd "$(dirname "$0")"
+# This suite lives in tests/; the scripts it checks live in the repo root. Work from there.
+cd "$(dirname "$0")/.."
 
 if [ -t 1 ]; then
     G=$'\033[32m'; R=$'\033[31m'; Y=$'\033[33m'; B=$'\033[1m'; D=$'\033[2m'; N=$'\033[0m'
@@ -24,13 +25,13 @@ warn() { printf '  %s!%s %s\n' "$Y" "$N" "$1"; [ -n "${2:-}" ] && printf '      
 sec()  { printf '\n%s%s%s\n' "$B" "$1" "$N"; }
 
 # Host-side (run on the user's Mac/Linux): must obey the portability contract.
-HOST_BASH=(cc cc-lib.sh cc-portable.sh sleep-guard.sh build-bg.sh migrate-sessions.sh check.sh)
+HOST_BASH=(cc cc-lib.sh cc-portable.sh sleep-guard.sh build-bg.sh migrate-sessions.sh tests/check.sh)
 # Host-side POSIX sh.
 HOST_SH=(clipboard-bridge.sh)
 # Container-side (always Linux): linted for syntax only, exempt from the portability contract.
 CONT_SH=(docker-entrypoint.sh entrypoint-fuse.sh resolv-sync.sh)
-CONT_BASH=(security-test.sh)
-PY=(ccignore-fuse.py wayland-guard.py ccignore-precommit.py)
+CONT_BASH=(tests/security-test.sh)
+PY=(ccignore-fuse.py wayland-guard.py ccignore-precommit.py cc-broker.py tests/broker-test.py)
 
 # ── 1. syntax + shellcheck ───────────────────────────────────────
 sec "Syntax (bash -n / sh -n)"
@@ -80,7 +81,7 @@ for f in "${HOST_BASH[@]}" "${HOST_SH[@]}"; do
     [ -f "$f" ] || continue
     # cc-portable.sh is the shim home; check.sh is a Linux-only dev harness that uses raw
     # flock to *test* lock_fd — both are exempt from the contract by design.
-    case "$f" in cc-portable.sh | check.sh) ok "$f (shim home / dev tool — exempt)"; continue ;; esac
+    case "$f" in cc-portable.sh | tests/check.sh) ok "$f (shim home / dev tool — exempt)"; continue ;; esac
     code="$(sed 's/#.*$//' "$f")"
     hits="$(printf '%s\n' "$code" | grep -nE "$FATAL_RE" || true)"
     if [ -n "$hits" ]; then
@@ -168,6 +169,126 @@ t_hash8
 t_lockfd
 t_detach
 t_busiest
+
+# ── 4. broker logic tests (cc-broker.py relay/inject/stream/mint) ─
+# Pure-stdlib, no docker: a fake upstream + an in-process broker prove the placeholder is
+# stripped, the real secret is injected upstream, the response streams, and minting is faithful.
+sec "Broker logic tests (cc-broker.py)"
+if out="$(python3 tests/broker-test.py 2>&1)"; then
+    ok "tests/broker-test.py — injects real secret, strips placeholder, streams, mints"
+else
+    bad "tests/broker-test.py" "$(printf '%s\n' "$out" | grep -E '^FAIL|Error|Traceback' | head -6)"
+fi
+
+# ── 4b. broker bash wiring (cc / cc-lib.sh) ──────────────────────
+# The Python broker is covered above; these guard the SHELL glue that only ever ran manually.
+sec "Broker bash wiring (cc / cc-lib.sh)"
+
+# --host-config is the single source of truth add_broker_env_args reads. If any key it needs
+# disappears (a rename, a dropped line), the launch aborts — so assert all five are present.
+# CCB_PLACEHOLDER_TOKEN was folded in to collapse two python3 spawns into one; keep it here.
+hc="$(python3 cc-broker.py --host-config claude 2>/dev/null)"
+missing=""
+for k in CCB_BASE_URL_ENV CCB_TOKEN_ENV CCB_PLACEHOLDER_TOKEN CCB_LISTEN_PORT CCB_PLACEHOLDER_CONTAINER_PATH; do
+    printf '%s\n' "$hc" | grep -q "^$k=." || missing="$missing $k"
+done
+[ -z "$missing" ] \
+    && ok "--host-config claude emits every key add_broker_env_args needs" \
+    || bad "--host-config claude is missing keys:$missing" "add_broker_env_args would abort the launch"
+
+# The injected placeholder token must be a fake_value_ sentinel — never a real credential
+# shape leaking through host-config into CLAUDE_CODE_OAUTH_TOKEN.
+case "$(printf '%s\n' "$hc" | sed -n 's/^CCB_PLACEHOLDER_TOKEN=//p')" in
+    *fake_value_*) ok "--host-config placeholder token is a fake_value_ sentinel" ;;
+    *)             bad "--host-config placeholder token is not a sentinel" "may inject a real token shape" ;;
+esac
+
+# broker_login's exit-status contract (regression: an inconclusive probe must NOT fail a
+# successful store). Eval the real one-line helper out of cc-lib.sh and assert its truth table.
+eval "$(sed -n '/^_login_ok_after_probe()/p' cc-lib.sh)"
+if declare -f _login_ok_after_probe >/dev/null; then
+    _login_ok_after_probe 0 && a=0 || a=1        # accepted  → login ok
+    _login_ok_after_probe 2 && b=0 || b=1        # inconclusive → login ok
+    _login_ok_after_probe 1 && c=0 || c=1        # rejected   → login FAILS
+    [ "$a" = 0 ] && [ "$b" = 0 ] && [ "$c" = 1 ] \
+        && ok "broker_login: store succeeds unless the probe definitively rejects (0/2 ok, 1 fails)" \
+        || bad "broker_login exit-status contract wrong" "accepted=$a inconclusive=$b rejected=$c (want 0 0 1)"
+else
+    bad "_login_ok_after_probe not found in cc-lib.sh" "the Fix-2 helper was removed or renamed"
+fi
+
+# Fix-1 regression: the sensitive-dir guard must NOT reject the broker token subcommands, so
+# they work from $HOME (the natural place to manage a host-global credential). Run one from a
+# blocked dir with a throwaway KIB_CONFIG (no token → prints status, exits 1, touches no docker)
+# and assert it reached broker-status rather than the launch refusal.
+REPO_ROOT="$PWD"
+guard_out="$(cd "$HOME" 2>/dev/null && KIB_CONFIG="$(mktemp -u)" bash "$REPO_ROOT/cc" --broker-status 2>&1)"
+case "$guard_out" in
+    *"refuses to launch"*) bad "cc --broker-status blocked from \$HOME by the dir guard" "Fix-1 regressed" ;;
+    *"credential broker"*) ok "broker subcommands bypass the sensitive-dir guard (run from \$HOME)" ;;
+    *)                     bad "cc --broker-status from \$HOME produced unexpected output" "$(printf '%s' "$guard_out" | head -1)" ;;
+esac
+
+# ── 5. regression guards for recent fixes ────────────────────────
+sec "Regression guards"
+
+# THE logout regression. The broker must never be handed the live credentials file: Anthropic
+# refresh tokens are single-use and rotate, so a broker that reads (let alone refreshes) it
+# invalidates the token family for the host CLI and every other project's sidecar. Its secret
+# is the static ~/.keep-it-in-your-box/claude-token, mounted READ-ONLY. Guard the mount line
+# in cc-lib.sh; tests/broker-test.py guards the Python side. See cc-broker.py's docstring.
+# No `sed | grep -q` here: under `set -o pipefail`, grep -q exits on the first match and
+# SIGPIPEs the upstream sed, so the pipeline reports 141 and a MATCH reads as a failure.
+# Anchoring on `-v "` makes the comment-stripping pass unnecessary anyway.
+if grep -qE '^[[:space:]]*-v ".*\.credentials\.json:' cc-lib.sh; then
+    bad "cc-lib.sh bind-mounts .credentials.json into the broker" \
+        "that is the logout bug — broker the static token file instead (cc --broker-login)"
+else
+    ok "broker never mounts the live .credentials.json (static token only)"
+fi
+if grep -qE '^[[:space:]]*-v "\$BROKER_TOKEN_FILE:[^"]*:ro"' cc-lib.sh; then
+    ok "broker's token mount is read-only (no write path to a credential)"
+else
+    bad "broker token mount is not read-only" "expected -v \$BROKER_TOKEN_FILE:...:ro"
+fi
+
+# Screen clearing (removed): cc must not `tput reset` — it wiped a short command's output
+# (`-p`, `bash -lc`) and clobbered scrollback when interactive Claude quit. Claude Code's TUI
+# manages its own screen, so cc leaves the terminal alone.
+if sed 's/#.*$//' cc | grep -qE '\btput[[:space:]]+reset\b'; then
+    bad "cc calls 'tput reset'" "removed on purpose — it wiped command output + scrollback"
+else
+    ok "cc leaves the terminal to Claude's TUI (no 'tput reset')"
+fi
+
+# DNS (broker): resolv-sync must PRESERVE Docker's embedded resolver (127.0.0.11) as the first
+# nameserver. When the container joins the broker's user-defined network its resolv.conf becomes
+# `nameserver 127.0.0.11`; if the sync overwrites that with the host upstreams, the `cc-broker`
+# alias stops resolving mid-session (the ENOTFOUND bug). Runs the REAL script against temp files.
+t_resolv_embedded() {
+    local dir; dir="$(mktemp -d)"
+    # broker on: DST has the embedded resolver; host SRC has an upstream + the loopback stub.
+    printf 'search .\nnameserver 127.0.0.11\noptions ndots:0\n' > "$dir/dst"
+    printf '# host\nnameserver 192.168.18.250\nnameserver 127.0.0.53\nsearch lan\n' > "$dir/src"
+    CC_RESOLV_DST="$dir/dst" CC_RESOLV_SYNC_INTERVAL=1 sh resolv-sync.sh "$dir/src" 2>/dev/null &
+    local pid=$!; sleep 0.5; kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+    local first; first="$(grep -m1 '^[[:space:]]*nameserver' "$dir/dst" 2>/dev/null | awk '{print $2}')"
+    [ "$first" = 127.0.0.11 ] \
+        && ok "resolv-sync: embedded DNS (127.0.0.11) kept FIRST — broker alias survives the sync" \
+        || bad "resolv-sync embedded DNS" "first nameserver '$first', want 127.0.0.11"
+    { grep -q '192.168.18.250' "$dir/dst" && ! grep -q '127.0.0.53' "$dir/dst"; } \
+        && ok "resolv-sync: keeps the host upstream, strips the loopback stub" \
+        || bad "resolv-sync upstream/stub handling"
+    # broker off: DST has no embedded resolver → output is upstreams only (unchanged behaviour).
+    printf 'nameserver 10.0.0.1\n' > "$dir/dst2"
+    CC_RESOLV_DST="$dir/dst2" sh resolv-sync.sh "$dir/src" 2>/dev/null & pid=$!
+    sleep 0.5; kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+    grep -q '127.0.0.11' "$dir/dst2" \
+        && bad "resolv-sync broker-off" "injected 127.0.0.11 where DST had none" \
+        || ok "resolv-sync: no embedded DNS present → upstreams only (broker off, unchanged)"
+    rm -rf "$dir"
+}
+t_resolv_embedded
 
 # ── report ───────────────────────────────────────────────────────
 printf '\n%s────────────────────────────────────────%s\n' "$D" "$N"

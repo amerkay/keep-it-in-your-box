@@ -7,7 +7,13 @@ set -euo pipefail
 
 # ── Guard: forbid launching from sensitive host directories ──
 # Exactly $HOME, ~/Desktop, ~/Documents, ~/Downloads; subdirectories are fine. Runs
-# before any trap or `tput reset`, so the error stays on screen after exit.
+# before any trap is installed, so the error stays on screen after exit.
+#
+# The broker token subcommands are exempt: they manage a HOST-GLOBAL credential, never
+# touch the project dir, and $HOME is the natural place to run them from — the guard
+# below would otherwise reject `cc --broker-login` there. (They are dispatched further
+# down, after sourcing, since they need cc-lib.sh.)
+case "${1:-}" in --broker-login|--broker-logout|--broker-status) _skip_dir_guard=1 ;; *) _skip_dir_guard=0 ;; esac
 _pwd="$(realpath "$PWD" 2>/dev/null || echo "$PWD")"
 _home="$(realpath "$HOME" 2>/dev/null || echo "$HOME")"
 _blocked=""
@@ -18,7 +24,7 @@ else
         [ "$_pwd" = "$_home/$_dir" ] && { _blocked="~/$_dir"; break; }
     done
 fi
-if [ -n "$_blocked" ]; then
+if [ -n "$_blocked" ] && [ "$_skip_dir_guard" = 0 ]; then
     echo "" >&2
     echo "❌ cc refuses to launch from $_blocked ($PWD)." >&2
     echo "   These directories are on the permanent forbidden list:" >&2
@@ -27,7 +33,7 @@ if [ -n "$_blocked" ]; then
     echo "" >&2
     exit 1
 fi
-unset _pwd _home _blocked _dir
+unset _pwd _home _blocked _dir _skip_dir_guard
 
 IMAGE_NAME="keep-it-in-your-box"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,6 +59,21 @@ fi
     echo "❌ cc: cannot load $SCRIPT_DIR/cc-lib.sh — the install is incomplete." >&2
     exit 1
 }
+
+# ── Broker token lifecycle: mint / remove / check, then exit ─────
+# Handled AFTER sourcing (they need cc-lib.sh) but BEFORE preflight/build/identity: managing
+# the token must work when the image is missing, the container is broken, or the project dir
+# is irrelevant. Each subcommand exits with its own status — `cc --broker-status` returning
+# non-zero is a usable exit code for a script.
+# The `&& exit 0 || exit $?` form is deliberate: a function called bare would trip `set -e`
+# the moment it returns non-zero (a rejected or absent token), skipping its own reporting.
+# In an && / || list errexit is suspended, so the function always runs to completion and cc
+# controls the exit status.
+case "${1:-}" in
+    --broker-login)  shift; broker_login  && exit 0 || exit $? ;;
+    --broker-logout) shift; broker_logout && exit 0 || exit $? ;;
+    --broker-status) shift; broker_status && exit 0 || exit $? ;;
+esac
 
 preflight_platform          # darwin: engine/perl/bind-mount checks; linux: no-op
 build_image_if_missing
@@ -179,7 +200,17 @@ WL_ROOT="/tmp/cc-wl.${PROJ_HASH}${SCRATCH_SUFFIX}"
 # final by here, so an ephemeral session gets its own files and can't disturb the real one.
 PATTERNS_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.patterns"
 CLIP_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.clip"
-FUSE_FAILED=0
+
+# Credential broker (see cc-lib.sh "Credential broker"). Globals are always defined so the
+# teardown/attach helpers can reference them unconditionally; the broker only actually runs
+# when opted in. The network name derives from the project hash (docker network names allow
+# [a-zA-Z0-9_.-]); an ephemeral suffix's dots are mapped to dashes to stay in the charset.
+BROKER_CNAME="${CNAME}-broker"
+BROKER_NET="ccbnet-${PROJ_HASH}$(printf '%s' "$SCRATCH_SUFFIX" | tr '.' '-')"
+BROKER_DIR="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.broker"
+BROKER_OUT="$BROKER_DIR/out"
+BROKER_HASH="$BROKER_DIR/hash"
+BROKER_ENABLED=0
 # The redaction interface (see cc-lib.sh) fills these: sidecar mode sets a mount
 # SRC/OPTS for $PWD; single mode leaves SRC empty (the entrypoint mounts the view
 # in-container) and appends its own `docker run` flags to REDACTION_ARGS.
@@ -189,6 +220,7 @@ REDACTION_ARGS=()
 
 container_running() { [ -n "$(docker ps -q -f "name=^${CNAME}$" 2>/dev/null)" ]; }
 sidecar_running()   { [ -n "$(docker ps -q -f "name=^${FUSE_CNAME}$" 2>/dev/null)" ]; }
+broker_running()    { [ -n "$(docker ps -q -f "name=^${BROKER_CNAME}$" 2>/dev/null)" ]; }
 
 # Was the running container created with --unlock-shared? Read it off the mounts, which are
 # the ground truth — no state file to go stale. CLAUDE.md is the probe because it is the one
@@ -251,6 +283,11 @@ teardown_container() {
     stop_wayland_guard
     stop_clipboard_bridge
 
+    # Credential broker sidecar + its user-defined network. After the main container is
+    # stopped above, so the network has no endpoint and `docker network rm` succeeds. No-op
+    # when the broker never ran.
+    stop_broker
+
     # The resolv.conf watcher is an in-container process (a detached `docker exec`), so it is
     # killed when the container is removed — nothing to tear down here.
 }
@@ -267,6 +304,12 @@ start_container() {
     else
         start_wayland_guard
     fi
+
+    # Credential broker: hold the real OAuth token host-side and hand the agent only a
+    # placeholder + ANTHROPIC_BASE_URL pointed at the broker. Must precede the ARGS below,
+    # which add that base-URL env and the placeholder shadow (add_broker_env_args). No-op
+    # unless opted in; fail-hard if opted in and it can't start (it is the agent's auth).
+    start_broker
 
     # --init: PID 1 is `sleep infinity`, which would never reap the zombies left behind by
     # exec'd sessions. Docker's init does.
@@ -384,10 +427,20 @@ start_container() {
         done
     fi
 
+    # Broker wiring: -e ANTHROPIC_BASE_URL + the placeholder credential that SHADOWS the real
+    # .credentials.json. Appended after the shared mounts above so it overlays the file inside
+    # them (Docker applies mounts parent-first). No-op unless the broker came up.
+    add_broker_env_args
+
     # The container just idles; the real work runs in `docker exec` sessions, so it
     # survives any one terminal closing.
     docker run "${ARGS[@]}" "$IMAGE_NAME" sleep infinity >/dev/null \
         || die "failed to start the project container."
+
+    # Dual-home onto the broker net AFTER the run (a second --network at run time would
+    # replace the default bridge; connecting keeps both + enables embedded DNS for the
+    # `cc-broker` alias). host-gateway + default-bridge/LAN reachability are preserved.
+    connect_broker_network
 }
 
 # ── Bring the container up, or attach to the running one ─────
@@ -402,6 +455,9 @@ if container_running; then
     # the redaction layer is missing or the .ccignore it enforces has since changed.
     # Both modes (sidecar/single) are checked through the same interface.
     verify_redaction_attach
+    # Same hazard for the credential broker: a container running without it (or under a
+    # since-changed broker config) must not be attached to as if the token were brokered.
+    verify_broker_attach
     # The read-only mounts over ~/.claude-shared are fixed at container creation, and the
     # container outlives any one terminal — so a second terminal must never silently get the
     # other mode. Same hazard, same shape of refusal, as the stale-.ccignore check above.
@@ -470,11 +526,12 @@ cleanup() {
         exec 202>&-
     fi
 
-    # `|| true`: tput exits 10 when stdout isn't a tty, and the EXIT trap's last status
-    # becomes the shell's — that would mask the session's real exit code.
-    if [ "$FUSE_FAILED" != 1 ]; then
-        tput reset 2>/dev/null || true
-    fi
+    # No `tput reset` here (nor before the exec below). A full reset wipes the terminal AND its
+    # scrollback: it erased a short command's output (`-p`, `bash -lc`) the instant it exited,
+    # and clobbered your scrollback when interactive Claude quit. Claude Code's TUI manages its
+    # own screen — exactly as it does run directly on the host — so cc leaves the terminal alone.
+    # cc's startup diagnostics and any error message therefore stay on screen and readable.
+    :
 }
 trap cleanup EXIT
 # Closing the terminal window sends SIGHUP; `kill` sends SIGTERM. Bash treats both as
@@ -495,10 +552,10 @@ else
     CMD=("$@")
 fi
 
-# Clean screen for Claude's TUI. `|| true` because tput exits 10 with no tty — under
-# `set -e` that would kill a redirected run (`cc claude -p '…' > out.txt`) before the
-# session ever started.
-tput reset 2>/dev/null || true
+# No screen clear before handing off: Claude Code's TUI sets up its own screen (exactly as it
+# does when run on the host), so a reset here would only wipe cc's startup diagnostics
+# (broker / FUSE / DNS status) before you could read them — and for `-p` / `bash -lc` runs
+# there is no TUI at all, so it would just eat their output.
 
 # Single-container FUSE mode: the container is created with SYS_ADMIN (needed to mount),
 # and `docker exec` gives EVERY session the container's full cap set — it does NOT inherit

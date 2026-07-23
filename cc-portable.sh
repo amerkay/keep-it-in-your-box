@@ -2,7 +2,7 @@
 # Sourced by cc, cc-lib.sh and build-bg.sh before anything platform-specific runs.
 # The ONE file that branches on OS: everywhere else calls the shims defined here.
 #
-# ── Portability contract (enforced by check.sh) ───────────────────
+# ── Portability contract (enforced by tests/check.sh) ─────────────
 # Host-side cc scripts must run unmodified on stock macOS (bash 3.2 + BSD userland
 # + system perl) AND on Linux. GNU-only tools (flock, setsid, sha256sum, grep -P,
 # findmnt, notify-send) and bash-4isms (declare -A, ${var,,}, readarray/mapfile)
@@ -10,7 +10,7 @@
 #
 # Shims are DETERMINISTIC per OS — darwin always takes the perl/BSD path, linux
 # always the GNU path. No native-first fallback: exactly two code paths, and
-# check.sh forces the perl paths on Linux so both are always exercised.
+# tests/check.sh forces the perl paths on Linux so both are always exercised.
 
 # Idempotent — cc sources this, then cc-lib.sh; tests may re-source.
 [ -n "${CC_PORTABLE_SOURCED:-}" ] && return 0
@@ -25,7 +25,7 @@ is_macos() { [ "$CC_OS" = darwin ]; }
 
 # Redaction topology: the verified cap-drop=ALL sidecar on Linux, single-container
 # FUSE on macOS (no shared-mount propagation there). CC_SINGLE_CONTAINER=1 forces
-# the macOS path on Linux — the test vehicle exercised by check.sh/security-test.
+# the macOS path on Linux — the test vehicle exercised by tests/check.sh + security-test.
 # (CC_FUSE_MODE is read across the source boundary in cc/cc-lib.sh.)
 # shellcheck disable=SC2034
 if is_macos || [ "${CC_SINGLE_CONTAINER:-0}" = 1 ]; then
@@ -170,3 +170,57 @@ preflight_platform() {
         fi
     fi
 }
+
+# ── ~/.keep-it-in-your-box/config (host-only user prefs) ──────────────────────
+# HOST-ONLY, never bind-mounted into the sandbox: the thing that governs the agent's
+# credentials/egress must live where the agent cannot read or rewrite it. Simple
+# `key = value` (no shell eval; bash-3.2 + BSD clean). Unknown keys are ignored.
+#
+# Keys (all optional; safe defaults preserve today's behaviour):
+#   broker              = off | on    — start the credential broker (default off until the
+#                                       OAuth-refresh contract is VERIFIED on hardware).
+#   egress              = open | restricted  — restricted activates the future E1 proxy.
+#   allow_host_services = false | true  — under restricted egress, reach host.docker.internal
+#                                         (e.g. a Nuxt dev server on :3000).
+#   allow_lan           = false | true  — under restricted egress, reach RFC1918 LAN HTTP(S).
+#   lan_cidrs           = 10.0.0.0/8, 192.168.0.0/16   — optional narrowing for allow_lan.
+# Link-local / cloud metadata (169.254.0.0/16) is always denied under restricted egress.
+# These are read across the source boundary by cc/cc-lib.sh.
+# shellcheck disable=SC2034
+KIB_CONFIG="${KIB_CONFIG:-$HOME/.keep-it-in-your-box/config}"
+KIB_BROKER=off
+KIB_EGRESS=open
+KIB_ALLOW_HOST=false
+KIB_ALLOW_LAN=false
+KIB_LAN_CIDRS=""
+
+# Endpoint the agent uses to reach the broker. Gate D (Portmaster, container→container on a
+# user bridge) PASSED, so "bridge" is the default; "hostgw" (broker publishes a host-loopback
+# port, agent reaches it via host.docker.internal) is a swappable fallback for a host firewall
+# that ever blocks the bridge hop.
+# shellcheck disable=SC2034
+CC_BROKER_ENDPOINT_MODE="${CC_BROKER_ENDPOINT_MODE:-bridge}"
+
+read_kib_config() {
+    [ -f "$KIB_CONFIG" ] || return 0
+    local line key val
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%%#*}"                          # strip comment
+        line="${line#"${line%%[![:space:]]*}"}"     # ltrim
+        line="${line%"${line##*[![:space:]]}"}"     # rtrim
+        [ -z "$line" ] && continue
+        case "$line" in *=*) ;; *) continue ;; esac
+        key="${line%%=*}"; val="${line#*=}"
+        key="${key%"${key##*[![:space:]]}"}"        # rtrim key
+        val="${val#"${val%%[![:space:]]*}"}"        # ltrim val
+        val="${val%"${val##*[![:space:]]}"}"        # rtrim val
+        case "$key" in
+            broker)              KIB_BROKER="$(printf '%s' "$val" | tr 'A-Z' 'a-z')" ;;
+            egress)              KIB_EGRESS="$(printf '%s' "$val" | tr 'A-Z' 'a-z')" ;;
+            allow_host_services) KIB_ALLOW_HOST="$(printf '%s' "$val" | tr 'A-Z' 'a-z')" ;;
+            allow_lan)           KIB_ALLOW_LAN="$(printf '%s' "$val" | tr 'A-Z' 'a-z')" ;;
+            lan_cidrs)           KIB_LAN_CIDRS="$val" ;;
+        esac
+    done < "$KIB_CONFIG"
+}
+read_kib_config

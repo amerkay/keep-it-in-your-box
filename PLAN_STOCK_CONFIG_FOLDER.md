@@ -233,7 +233,7 @@ pasteable host block:
 cd /home/kay/keep-it-in-your-box
 bash -n cc cc-lib.sh docker-entrypoint.sh reverse-migrate.sh
 python3 -m py_compile claude-config-scope.py
-./check.sh                      # portability contract (proves macOS paths on Linux)
+./tests/check.sh                # portability contract (proves macOS paths on Linux)
 
 # 2. Rebuild image (entrypoint change is baked, needs a rebuild)
 docker build -t keep-it-in-your-box .
@@ -243,8 +243,8 @@ docker build -t keep-it-in-your-box .
 CLAUDE_CONFIG_DIR=$HOME/.claude claude --resume   # the same session must be listed
 
 # 4. Isolation regressions, BOTH modes
-./cc ./security-test.sh -k "cross-project"
-CC_SINGLE_CONTAINER=1 ./cc ./security-test.sh -k "cross-project"
+./cc ./tests/security-test.sh -k "cross-project"
+CC_SINGLE_CONTAINER=1 ./cc ./tests/security-test.sh -k "cross-project"
 
 # 5. .claude.json round-trip: add an MCP server in the sandbox, confirm it lands in ~/.claude.json
 #    (and that other projects' entries in ~/.claude.json are byte-unchanged)

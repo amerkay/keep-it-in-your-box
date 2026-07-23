@@ -119,6 +119,29 @@ The image builds automatically on first run. Then `cd` into any project and run 
 - A Wayland session for host clipboard / image paste on Linux (optional — absent Wayland just disables paste).
 - `git`, `bash`, `perl` (system perl is fine on macOS — no Homebrew dependencies).
 
+### Tests
+
+All test suites live in [`tests/`](tests/). The host-side ones need no image or container:
+
+```bash
+./tests/check.sh          # syntax, shellcheck, the bash-3.2/BSD portability contract,
+                          #   the cc-portable shim unit tests, and the broker logic tests
+./tests/broker-test.py    # credential-broker relay / injection / streaming / placeholder (pure stdlib)
+```
+
+[`tests/security-test.sh`](tests/security-test.sh) is the **in-sandbox** regression suite — one
+check per control the [audit](docs/SECURITY_AUDIT.md) established. Run it **inside** the box, once
+normally and once under `CC_SINGLE_CONTAINER=1` (the macOS topology):
+
+```bash
+kib bash -lc ./tests/security-test.sh          # everything
+kib bash -lc './tests/security-test.sh --list' # what it covers, run nothing
+```
+
+Each check re-attempts a real attack and asserts the refusal, *and* re-attempts the legitimate
+operation the guard must not break — a guard that blocks the attack by breaking the workflow has
+failed too.
+
 <h2 id="accepted-risks">Accepted risks</h2>
 
 <details>
@@ -126,7 +149,16 @@ The image builds automatically on first run. Then `cd` into any project and run 
 
 <br>
 
-- **Open egress + a shared credential.** The account OAuth token is readable inside the box and egress is unrestricted — an injected session could exfiltrate it with no host trigger. Locking egress with a default-deny allowlist conflicts with the sandbox's whole purpose (building untrusted repos that fetch from arbitrary registries), and the token can't be made unreadable because Claude needs it. **Rotate the token if an untrusted session has run.** (This is the row where `sbx` and sandbox-runtime lead — credential brokering is the fix worth stealing.)
+- **Open egress + a shared credential — unless you turn the broker on.** By default the account OAuth token is readable inside the box and egress is unrestricted, so an injected session could exfiltrate it with no host trigger. **Rotate the token if an untrusted session has run.** The opt-in credential broker closes exactly this: it holds a long-lived token host-side and gives the sandbox a placeholder plus an `ANTHROPIC_BASE_URL` pointed at a `cap-drop=ALL` sidecar, which strips the placeholder and injects the real token on the way out — the win holds even with egress wide open.
+
+  ```bash
+  cc --broker-login          # mint + store a token (wraps `claude setup-token`); host-only, mode 600
+  cc --broker-status         # is it still accepted? never prints the token
+  cc --broker-logout         # remove it
+  echo 'broker = on' >> ~/.keep-it-in-your-box/config
+  ```
+
+  The brokered credential is deliberately a **static** long-lived token, never `~/.claude-shared/.credentials.json` — Anthropic's subscription refresh tokens are single-use and rotate, so a second process refreshing them logs you out of every other session. Egress itself is still open: a default-deny allowlist conflicts with the sandbox's whole purpose (building untrusted repos that fetch from arbitrary registries).
 - **`host.docker.internal` is routable** to the host network stack.
 - **The project directory is writable**, by design — the agent's job is to edit your code.
 

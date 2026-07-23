@@ -6,10 +6,10 @@
 # the guard still permits it — a control that blocks the attack by breaking the workflow
 # has failed too, so the regression half is not optional.
 #
-#   ./security-test.sh              # everything
-#   ./security-test.sh --list       # what it covers, run nothing
-#   ./security-test.sh -k git       # only sections matching "git"
-#   ./security-test.sh --no-clipboard   # skip the clipboard probe (it alerts the desktop)
+#   ./tests/security-test.sh              # everything
+#   ./tests/security-test.sh --list       # what it covers, run nothing
+#   ./tests/security-test.sh -k git       # only sections matching "git"
+#   ./tests/security-test.sh --no-clipboard   # skip the clipboard probe (it alerts the desktop)
 #
 # NON-DESTRUCTIVE by construction: an exploit is proven dead by showing the write is
 # refused and the value resolves to nothing — never by executing a payload, and never by
@@ -267,11 +267,21 @@ for d in skills agents commands plugins hooks; do
 done
 deny "shared CLAUDE.md is read-only" bash -c "echo x >> '$SHARED/CLAUDE.md'"
 
-# Deliberately still writable — locking either would break the product.
+# settings.json is deliberately still writable — locking it would break /config.
 is "settings.json stays writable (/config must work)" "writable" \
    "$([ -w "$SHARED/settings.json" ] && echo writable || echo 'read-only ***')"
-is ".credentials.json stays writable (OAuth refresh)" "writable" \
-   "$([ ! -e "$SHARED/.credentials.json" ] || [ -w "$SHARED/.credentials.json" ] && echo writable || echo 'read-only ***')"
+# .credentials.json depends on the broker. Broker OFF (default): the real token is mounted
+# writable so in-sandbox Claude can refresh it. Broker ON: the real token is gone — a read-only
+# SYNTHETIC placeholder shadows it, and the agent authenticates via a placeholder
+# CLAUDE_CODE_OAUTH_TOKEN instead, so read-only is the correct, desired state (never re-mount
+# the real token writable, and never make this writable to "let refresh work" — under the
+# broker nothing refreshes, by design). Detect the broker via ANTHROPIC_BASE_URL.
+_cred_state="$([ ! -e "$SHARED/.credentials.json" ] || [ -w "$SHARED/.credentials.json" ] && echo writable || echo read-only)"
+if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+    is ".credentials.json is a read-only synthetic placeholder (broker holds a static token)" "read-only" "$_cred_state"
+else
+    is ".credentials.json stays writable (in-sandbox OAuth refresh, broker off)" "writable" "$_cred_state"
+fi
 
 # The lock must not cost in-session authoring: that is what the merge farm buys.
 CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude-session}"
@@ -344,6 +354,54 @@ if [ -d /run/host-resolve ]; then
     allow "regression: resolv.conf is readable" test -r /run/host-resolve/resolv.conf
 else
     skip "host resolver sockets shadowed" "no live-DNS mount in this container"
+fi
+
+# ═════════════════════════════════════════════════════════════════
+section "Credential broker (H3/H4 — real OAuth token kept out of the sandbox)"
+
+# Broker-active is detectable in-session: cc sets ANTHROPIC_BASE_URL on the container and
+# every `docker exec` inherits it. When it is unset the broker is off (the default) and the
+# section is a no-op. NON-DESTRUCTIVE: the credential the sandbox can see is a *placeholder*
+# (fake_value_…), so asserting on it reads no real secret.
+if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+    _cred=/home/hostuser/.claude-shared/.credentials.json
+    is "the credential in the sandbox is a placeholder, not the real token" fake \
+        "$(python3 -c 'import json,sys
+try:
+    print("fake" if json.load(open(sys.argv[1]))["claudeAiOauth"]["accessToken"].startswith("fake_value_") else "REAL")
+except Exception:
+    print("ERR")' "$_cred" 2>/dev/null)"
+
+    case "$ANTHROPIC_BASE_URL" in
+        *cc-broker*|*host.docker.internal*) pass "ANTHROPIC_BASE_URL routes through the broker ($ANTHROPIC_BASE_URL)" ;;
+        *) fail "ANTHROPIC_BASE_URL routes through the broker" "is: $ANTHROPIC_BASE_URL" ;;
+    esac
+
+    # CLAUDE_CODE_OAUTH_TOKEN takes precedence over the credentials file, so it is the value
+    # the agent actually authenticates with — it MUST be the sentinel, never a real token.
+    case "${CLAUDE_CODE_OAUTH_TOKEN:-}" in
+        *fake_value_*) pass "CLAUDE_CODE_OAUTH_TOKEN is a placeholder (fake_value_…)" ;;
+        "")            fail "CLAUDE_CODE_OAUTH_TOKEN is set to a placeholder" "it is unset" ;;
+        *)             fail "CLAUDE_CODE_OAUTH_TOKEN is a placeholder" "it is NOT a fake_value_ sentinel — a real token may be in the sandbox" ;;
+    esac
+
+    # The broker's real credential + config live in the broker container only — never here.
+    deny "the broker's /run/broker is absent from the agent container" test -e /run/broker
+
+    # Regression: brokering must not break the agent reaching the broker, nor host/LAN.
+    allow "regression: the broker alias 'cc-broker' resolves" \
+        python3 -c "import socket; socket.gethostbyname('cc-broker')"
+    allow "regression: host.docker.internal still resolves (host/LAN reach preserved)" \
+        python3 -c "import socket; socket.gethostbyname('host.docker.internal')"
+    # Root-cause guard for the ENOTFOUND bug: resolv-sync must keep Docker's embedded resolver
+    # (127.0.0.11) in resolv.conf, or `cc-broker` stops resolving a few seconds into the session.
+    if grep -q '127\.0\.0\.11' /etc/resolv.conf 2>/dev/null; then
+        pass "embedded DNS 127.0.0.11 kept in resolv.conf (survives resolv-sync — no mid-session ENOTFOUND)"
+    else
+        fail "embedded DNS 127.0.0.11 kept in resolv.conf" "resolv-sync dropped it — cc-broker will ENOTFOUND"
+    fi
+else
+    skip "credential broker" "not enabled in this container (set 'broker = on' or CC_BROKER=1)"
 fi
 
 # ═════════════════════════════════════════════════════════════════

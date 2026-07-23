@@ -8,7 +8,7 @@
 #
 # Runs in cc's shell, so it shares cc's `set -euo pipefail` and its globals:
 #   SCRIPT_DIR IMAGE_NAME PWD CLAUDE_SHARED
-#   FUSE_CNAME FUSE_ROOT FUSE_FAILED
+#   FUSE_CNAME FUSE_ROOT
 #   PROJECT_MOUNT_SRC PROJECT_MOUNT_OPTS ARGS
 #
 # Several of those are *written* here and *read* back in cc, which shellcheck can't see
@@ -434,7 +434,6 @@ _prepare_redaction_sidecar() {
     # downgrade a redaction the user is relying on.
     local prop; prop="$(findmnt -no PROPAGATION --target /tmp 2>/dev/null || true)"
     if [[ "$prop" != *shared* ]]; then
-        FUSE_FAILED=1   # keep the EXIT trap's `tput reset` from wiping this message
         die "cc needs /tmp to be a shared mount for .ccignore redaction and the" \
             "host-config guard, but it is '${prop:-unknown}'. Fix it with:" \
             "  sudo mount --make-shared /tmp" \
@@ -475,7 +474,6 @@ _prepare_redaction_sidecar() {
             --patterns-file "$FUSE_ROOT/patterns" \
             --guard-file /usr/local/share/global.ccignore >/dev/null; then
         rm -rf "$FUSE_ROOT"
-        FUSE_FAILED=1
         echo "❌ .ccignore: could not start FUSE sidecar. Aborting." >&2
         exit 1
     fi
@@ -490,7 +488,6 @@ _prepare_redaction_sidecar() {
         docker logs "$FUSE_CNAME" 2>&1 | sed 's/^/   /' >&2 || true
         docker rm -f "$FUSE_CNAME" >/dev/null 2>&1 || true
         rm -rf "$FUSE_ROOT"
-        FUSE_FAILED=1
         # Never fall through to the leaky fallback: that would silently downgrade the
         # redaction the user asked for.
         echo "   Refusing to launch unprotected: without the sidecar neither .ccignore" >&2
@@ -719,6 +716,388 @@ stop_clipboard_bridge() {
     [ -n "$pid" ] && kill -TERM "-$pid" 2>/dev/null || true
     rm -f "${CLIP_STATE}.pid" 2>/dev/null || true
     rm -rf "$CLIP_STATE" 2>/dev/null || true
+}
+
+# ── Credential broker: keep the real token OUT of the sandbox ─────
+# The agent used to get ~/.claude-shared/.credentials.json mounted read-write, so a
+# compromised session could exfiltrate the account OAuth token under open egress (audit
+# H3/H4 — the single widest hole). Instead: a host-side broker sidecar holds the real
+# token; the agent gets a base-URL env var (ANTHROPIC_BASE_URL) pointed at the broker, a
+# PLACEHOLDER in CLAUDE_CODE_OAUTH_TOKEN, and a synthetic .credentials.json shadowing the
+# real one. The broker terminates the agent's plain HTTP, strips the placeholder, injects
+# the real token, and re-originates its own TLS to api.anthropic.com — no TLS MITM, no CA
+# in the container. See docs/FUTURE_TASKS.md G1/C1 and cc-broker.py. A fully compromised
+# agent can *use* the API through the broker but cannot read the token; the win holds even
+# with egress wide open.
+#
+# ── THE BROKERED CREDENTIAL IS STATIC ─────────────────────────────────────────
+# It is a long-lived token minted by `cc --broker-login` (which wraps `claude setup-token`)
+# and stored HOST-ONLY at ~/.keep-it-in-your-box/claude-token, mounted READ-ONLY into the
+# broker. It is NOT ~/.claude-shared/.credentials.json, and the broker never writes any
+# credential. Brokering the live credentials file logged the account out: Anthropic's
+# subscription refresh tokens are single-use and rotate, so the broker's refresh loop
+# invalidated the token family for the host CLI and every other project's sidecar, and the
+# in-place write to a single-file bind mount could tear it. See cc-broker.py's docstring
+# for the full post-mortem. Do not reintroduce a refresh path.
+#
+# The broker sits on a dedicated user-defined bridge (cc-broker alias). The MAIN container
+# stays multi-homed: it keeps the default bridge + host-gateway (so a host dev server on
+# :3000 and the LAN stay reachable) and is ALSO connected to the broker net (Gate D verified
+# container→container works under Portmaster). Net-new infra — nothing else here uses a
+# user-defined network.
+#
+# OPT-IN, off by default: enable with `broker = on` in ~/.keep-it-in-your-box/config, or
+# CC_BROKER=1; CC_BROKER=0 forces it off. When off, nothing changes — the real credential is
+# mounted exactly as before.
+broker_wanted() {
+    case "${CC_BROKER:-}" in 1) return 0 ;; 0) return 1 ;; esac
+    [ "${KIB_BROKER:-off}" = on ]
+}
+
+# Host-only token store, alongside ~/.keep-it-in-your-box/config and never bind-mounted into
+# the agent — the thing that governs the agent's credentials must live where the agent
+# cannot read it. Derived from KIB_CONFIG so there is one definition of "the kib dir".
+KIB_DIR="$(dirname "$KIB_CONFIG")"
+BROKER_TOKEN_FILE="$KIB_DIR/claude-token"
+
+# -s, not -f: an empty file is not a token. This is the single predicate for "is the broker
+# usable", used by the launch path, the attach check and --broker-status alike.
+broker_has_token() { [ -s "$BROKER_TOKEN_FILE" ]; }
+
+# The enabled provider set. Claude when its host token file exists; the ready-but-unstarted
+# rows (codex/gemini) light up when their own token file is dropped in $KIB_DIR — no code
+# change, exactly as documented. (Only claude is wired+served today.)
+broker_enabled_providers() {
+    local ids=""
+    broker_has_token && ids="claude"
+    printf '%s' "$ids"
+}
+
+# Fixed at container creation, like the .ccignore rules and the unlock-shared mode: a second
+# terminal must never attach under a broker config that changed since the container started.
+broker_config_hash() { hash8 "$(broker_enabled_providers)|$CC_BROKER_ENDPOINT_MODE"; }
+
+# Read the host-facing facts for one provider out of cc-broker.py — the single source of
+# truth, so the bash side never duplicates the PROVIDERS table. Sets CCB_* in the CALLER's
+# scope; returns non-zero if python3 is missing or the table can't be read.
+_broker_host_config() {
+    command -v python3 >/dev/null 2>&1 || return 1
+    local out
+    out="$(python3 "$SCRIPT_DIR/cc-broker.py" --host-config "${1:-claude}" 2>/dev/null)" || return 1
+    [ -n "$out" ] || return 1
+    eval "$out"
+}
+
+# config.json the broker reads. Host-only (in $STATE_DIR, never mounted into the AGENT); it
+# lists the enabled providers and each token's IN-BROKER path.
+_write_broker_config() {
+    mkdir -p "$BROKER_OUT" && chmod 700 "$BROKER_DIR" "$BROKER_OUT"
+    # Derive `enabled` + `token_paths` from the SAME source as broker_config_hash
+    # (broker_enabled_providers), so the config the broker reads and the attach-hash can never
+    # disagree. bash-3.2 clean (no associative arrays).
+    local id enabled_json="" token_json="" sep=""
+    for id in $(broker_enabled_providers); do
+        enabled_json="${enabled_json}${sep}\"$id\""
+        token_json="${token_json}${sep}\"$id\": \"/run/broker/token/$id\""
+        sep=", "
+    done
+    printf '{"enabled": [%s], "out_dir": "/run/broker/out", "token_paths": {%s}}\n' \
+        "$enabled_json" "$token_json" > "$BROKER_DIR/config.json"
+    chmod 600 "$BROKER_DIR/config.json"
+}
+
+# Fail-HARD: brokering IS the agent's core auth, and a placeholder is shadowed
+# unconditionally (so a dead broker leaks nothing — it just can't authenticate). Abort the
+# launch cleanly, BEFORE the TUI clears the screen, rather than surface a confusing auth
+# error deep in the session. Tear down anything already started (FUSE/clipboard sidecars,
+# the half-started broker) so nothing is stranded.
+_broker_abort() {
+    teardown_container              # stops main (if up) + all sidecars incl. stop_broker
+    die "$1" \
+        "" \
+        "This is a broker STARTUP failure, not an auth problem. The sandbox will not run" \
+        "without brokering the credential — the real token must never enter the container." \
+        "Fix the cause above and relaunch, or set CC_BROKER=0 to launch WITHOUT the broker" \
+        "(the pre-broker behaviour: the token is mounted into the container)."
+}
+
+# Turn a mid-session broker problem into a desktop alert. Startup problems already abort
+# loudly; this covers the running container. Linux-only and raw setsid/notify-send by design,
+# exactly like the Wayland notifier (the sanctioned exception in the portability contract).
+# 200>&- 201>&- is LOAD-BEARING: this follower outlives the cc that starts it, and inheriting
+# the project's shared lock (fd 200) would stop the last terminal out from ever tearing the
+# container down.
+#
+# The alert budget is deliberately small and self-limiting. The refresh loop that used to
+# exist paged once every 30s indefinitely — 30 popups in 15 minutes, which trains you to
+# dismiss the one that matters. After 3 alerts it backs off to one per 15 minutes; the log
+# line is always written either way.
+start_broker_notifier() {
+    is_macos && return 0
+    command -v notify-send >/dev/null 2>&1 || return 0
+    setsid sh -c '
+        last=0; count=0
+        docker logs -f "$1" 2>&1 | while IFS= read -r line; do
+            case "$line" in BROKER-FATAL*|BROKER-ERR*) ;; *) continue ;; esac
+            gap=30; [ "$count" -ge 3 ] && gap=900
+            now=$(date +%s)
+            [ $((now - last)) -lt $gap ] && continue
+            last=$now; count=$((count + 1))
+            notify-send -u critical -i dialog-error "cc · credential broker" "$2" || true
+        done' _ "$BROKER_CNAME" \
+        "The credential broker could not reach the API or use its token. Check: cc --broker-status. Project: $(basename "$PWD")" \
+        >/dev/null 2>&1 200>&- 201>&- &
+    echo $! > "$BROKER_DIR/notify.pid"
+}
+
+# Bring up the broker sidecar on its own bridge, wait for it to mint the placeholder and bind
+# its port, then mark it enabled. Called on the CREATE path only, under the boot lock, before
+# the main container's docker run (which reads the placeholder + base-URL via
+# add_broker_env_args). No-op when the broker isn't wanted.
+start_broker() {
+    broker_wanted || return 0
+    if ! broker_has_token; then
+        # Fail hard rather than silently falling back: "carry on without the broker" means
+        # mounting the real credential into the container, which is the exact exposure the
+        # user opted out of. Refusing is the safe direction, and the fix is one command.
+        die "the credential broker is enabled, but there is no token at" \
+            "  $BROKER_TOKEN_FILE" \
+            "" \
+            "Mint one on the host (it never enters the sandbox):" \
+            "  cc --broker-login" \
+            "" \
+            "Or set CC_BROKER=0 for this launch to run WITHOUT the broker (the pre-broker" \
+            "behaviour: the real token is mounted into the container)."
+    fi
+    _write_broker_config                       # creates $BROKER_OUT / $BROKER_DIR (chmod 700)
+    rm -f "$BROKER_OUT/ready" 2>/dev/null || true
+
+    if ! docker network inspect "$BROKER_NET" >/dev/null 2>&1; then
+        docker network create "$BROKER_NET" >/dev/null 2>&1 \
+            || _broker_abort "could not create the broker network ($BROKER_NET)."
+    fi
+
+    # cap-drop=ALL, no devices — strictly less privileged than the FUSE sidecar. The token is
+    # mounted HERE ONLY and READ-ONLY: the broker has no write path to any credential, by
+    # construction rather than by discipline. The placeholder + ready marker land in
+    # $BROKER_OUT, which cc reads host-side.
+    if ! docker run -d --name "$BROKER_CNAME" \
+        --cap-drop=ALL --security-opt no-new-privileges \
+        --user "$(id -u):$(id -g)" --userns=host --entrypoint python3 \
+        --network "$BROKER_NET" --network-alias cc-broker \
+        -v "$BROKER_TOKEN_FILE:/run/broker/token/claude:ro" \
+        -v "$BROKER_OUT:/run/broker/out" \
+        -v "$BROKER_DIR/config.json:/run/broker/config.json:ro" \
+        -v /etc/passwd:/etc/passwd:ro \
+        -v /etc/group:/etc/group:ro \
+        -v "$SCRIPT_DIR/cc-broker.py:/usr/local/bin/cc-broker.py:ro" \
+        "$IMAGE_NAME" \
+        /usr/local/bin/cc-broker.py --serve --config /run/broker/config.json >/dev/null 2>&1
+    then
+        _broker_abort "could not start the credential broker sidecar."
+    fi
+
+    local _
+    for _ in $(seq 1 100); do                       # ≤5s to mint the placeholder + bind
+        [ -f "$BROKER_OUT/ready" ] && break
+        broker_running || break                     # died early — fall through to the log dump
+        sleep 0.05
+    done
+    if [ ! -f "$BROKER_OUT/ready" ]; then
+        echo "❌ broker: sidecar never became ready; logs:" >&2
+        docker logs "$BROKER_CNAME" 2>&1 | tail -10 | sed 's/^/   /' >&2 || true
+        _broker_abort "the credential broker did not come up."
+    fi
+
+    broker_config_hash > "$BROKER_HASH"
+    start_broker_notifier
+    BROKER_ENABLED=1
+    echo "🔐 credential broker: active — the real token is NOT in the sandbox (sidecar: $BROKER_CNAME)." >&2
+}
+
+# Agent-facing wiring, appended to the main container's ARGS. Reads the base-URL env name,
+# token env name, port and placeholder path from cc-broker.py (single source of truth — no
+# duplicated table). Three things go in, and all three are needed:
+#   1. the base URL, so the SDK talks to the broker instead of api.anthropic.com;
+#   2. a PLACEHOLDER token in CLAUDE_CODE_OAUTH_TOKEN, which takes precedence over the
+#      credentials file, so the agent authenticates through the broker;
+#   3. a synthetic .credentials.json shadowing the real one. (2) alone would leave the real
+#      file readable inside $CLAUDE_SHARED, which is the whole exposure. It lands AFTER the
+#      $CLAUDE_SHARED mount so it overlays the file inside it (Docker applies mounts
+#      parent-first by destination depth).
+add_broker_env_args() {
+    [ "$BROKER_ENABLED" = 1 ] || return 0
+    # One python3 spawn: --host-config emits the base-URL/token env names, the listen port,
+    # the placeholder container path AND a fresh placeholder token (CCB_PLACEHOLDER_TOKEN).
+    local CCB_BASE_URL_ENV="" CCB_TOKEN_ENV="" CCB_PLACEHOLDER_TOKEN="" \
+          CCB_LISTEN_PORT="" CCB_PLACEHOLDER_CONTAINER_PATH=""
+    _broker_host_config claude \
+        || _broker_abort "could not read the broker's host-config for the agent."
+    [ -n "$CCB_BASE_URL_ENV" ] && [ -n "$CCB_TOKEN_ENV" ] && [ -n "$CCB_PLACEHOLDER_TOKEN" ] \
+        && [ -n "$CCB_LISTEN_PORT" ] && [ -n "$CCB_PLACEHOLDER_CONTAINER_PATH" ] \
+        || _broker_abort "the broker's host-config is incomplete."
+    ARGS+=(
+        -e "$CCB_BASE_URL_ENV=http://cc-broker:$CCB_LISTEN_PORT"
+        -e "$CCB_TOKEN_ENV=$CCB_PLACEHOLDER_TOKEN"
+        -v "$BROKER_OUT/claude.cred.json:$CCB_PLACEHOLDER_CONTAINER_PATH:ro"
+    )
+}
+
+# Dual-home the main container onto the broker net AFTER its docker run (a container's single
+# --network at run time would replace the default bridge; connecting a second net keeps both,
+# and gives the container Docker's embedded resolver so `cc-broker` resolves). Fail-hard: no
+# broker route means no auth.
+connect_broker_network() {
+    [ "$BROKER_ENABLED" = 1 ] || return 0
+    docker network connect "$BROKER_NET" "$CNAME" >/dev/null 2>&1 \
+        || _broker_abort "could not attach the container to the broker network ($BROKER_NET)."
+}
+
+# Attach-path refusal: a second terminal must not attach to a container running WITHOUT the
+# broker (its real token would be mounted) or under a since-changed broker config. Same shape
+# as verify_redaction_attach and the unlock-shared stale check.
+verify_broker_attach() {
+    broker_wanted || return 0
+    broker_has_token || return 0
+    if ! broker_running; then
+        die "the credential broker is requested, but this project's container is running" \
+            "WITHOUT it — so the real token is mounted, defeating the broker. Refusing to" \
+            "attach. Close all cc sessions for this project and relaunch. (A container" \
+            "created before the broker existed, or with CC_BROKER=0, always lands here.)"
+    fi
+    if [ "$(cat "$BROKER_HASH" 2>/dev/null || true)" != "$(broker_config_hash)" ]; then
+        die "the credential-broker configuration changed since this project's container" \
+            "started. Refusing to attach under stale broker settings — close all cc" \
+            "sessions for this project and relaunch."
+    fi
+}
+
+stop_broker() {
+    local pid
+    pid="$(cat "$BROKER_DIR/notify.pid" 2>/dev/null || true)"
+    case "$pid" in ''|*[!0-9]*) pid="" ;; esac
+    # Negative pid: the notifier is a setsid'd pipeline — kill the whole process group.
+    [ -n "$pid" ] && kill -TERM "-$pid" 2>/dev/null || true
+    docker rm -f "$BROKER_CNAME" >/dev/null 2>&1 || true
+    # The main container must be gone first (teardown_container stops it before calling this),
+    # or the network still has an endpoint and rm fails — harmless, it's retried next teardown.
+    docker network rm "$BROKER_NET" >/dev/null 2>&1 || true
+    rm -rf "$BROKER_DIR" 2>/dev/null || true
+}
+
+# ── Token lifecycle: cc --broker-login / --broker-logout / --broker-status ─────
+# All three run HOST-SIDE and exit before any container work, so they are usable while the
+# sandbox is broken or has never been built. None of them ever prints the token.
+
+_broker_need_python() {
+    command -v python3 >/dev/null 2>&1 && return 0
+    die "python3 is required host-side to manage the broker token, and it is not on PATH." \
+        "On macOS: xcode-select --install"
+}
+
+# Mint (or replace) the brokered token. Deliberately a two-step dance rather than capturing
+# `claude setup-token`'s stdout: that command is interactive (it opens a browser and draws a
+# TUI), so capturing its output fights it for the terminal and breaks in ways that are hard
+# to diagnose. Showing it, then reading a paste, is boring and works everywhere.
+broker_login() {
+    _broker_need_python
+    [ -t 0 ] || die "cc --broker-login needs an interactive terminal."
+    mkdir -p "$KIB_DIR" && chmod 700 "$KIB_DIR"
+
+    echo "🔐 cc --broker-login — mint a long-lived token for the credential broker."
+    echo
+    echo "   This token is stored HOST-ONLY at:"
+    echo "     $BROKER_TOKEN_FILE"
+    echo "   and is mounted read-only into the broker sidecar. It never enters the sandbox,"
+    echo "   and cc never writes to ~/.claude-shared/.credentials.json."
+    echo
+    if command -v claude >/dev/null 2>&1; then
+        echo "   Running \`claude setup-token\` now. Complete the browser flow, then copy the"
+        echo "   token it prints (it starts with sk-ant-oat01-)."
+        echo
+        claude setup-token || echo "   ⚠️  claude setup-token exited non-zero — paste a token anyway, or Ctrl-C." >&2
+    else
+        echo "   \`claude\` is not on this host's PATH, so run this yourself and copy the token:"
+        echo "     claude setup-token"
+    fi
+    echo
+    local token=""
+    printf '   Paste the token (input hidden), then Enter: '
+    read -rs token || true
+    echo
+    case "$token" in
+        "")            die "no token entered — nothing was written." ;;
+        *[!\ -~]*)     die "that does not look like a token (it contains control characters)." ;;
+        sk-ant-oat01-*|sk-ant-api*) ;;
+        *) echo "   ⚠️  that does not start with sk-ant-oat01- or sk-ant-api — storing it anyway;" >&2
+           echo "      the probe below is what actually decides whether it works." >&2 ;;
+    esac
+
+    # Write via a private temp file + rename: atomic, and the token is never briefly
+    # world-readable. umask covers the window before chmod on filesystems that ignore it.
+    local tmp="$BROKER_TOKEN_FILE.tmp.$$"
+    ( umask 077; printf '%s\n' "$token" > "$tmp" ) || die "could not write $tmp"
+    chmod 600 "$tmp" && mv -f "$tmp" "$BROKER_TOKEN_FILE" \
+        || { rm -f "$tmp"; die "could not install the token at $BROKER_TOKEN_FILE"; }
+    unset token
+    echo "   ✅ stored (mode 600)."
+    echo
+
+    # The probe is advisory: its output tells you whether the token works, but login's job
+    # was to STORE the token and it did. Only a definitive rejection (exit 1) is a login
+    # failure worth propagating — an inconclusive probe (exit 2: rate-limit / upstream blip /
+    # offline) must not report the successful store as failed to a wrapping script. Kept as a
+    # single `A || B` expression so errexit (active inside the function) can't abort on the
+    # probe's non-zero return before the decision is made.
+    broker_probe || _login_ok_after_probe "$?"
+}
+
+# Map a broker_probe exit status to broker_login's: a successful store is a successful login
+# UNLESS the probe definitively rejected the token (1). 0 (accepted) and 2 (inconclusive) both
+# keep login successful. Factored out so tests/check.sh can assert the truth table directly.
+_login_ok_after_probe() { [ "$1" != 1 ]; }
+
+# Remove the brokered token. The sandbox's own credential is untouched — this only clears
+# what the broker injects, so the blast radius of getting it wrong is "the broker stops
+# working", never "you are logged out".
+broker_logout() {
+    if [ ! -e "$BROKER_TOKEN_FILE" ]; then
+        echo "🔐 no brokered token at $BROKER_TOKEN_FILE — nothing to remove."
+        return 0
+    fi
+    rm -f "$BROKER_TOKEN_FILE" || die "could not remove $BROKER_TOKEN_FILE"
+    echo "🔐 removed $BROKER_TOKEN_FILE"
+    echo "   Revoke it at https://console.anthropic.com/settings/keys if it may have leaked."
+    echo "   Mint a fresh one with: cc --broker-login"
+    if broker_wanted; then
+        echo "   The broker is ENABLED, so cc will refuse to launch until you do."
+    fi
+}
+
+# Ask the upstream whether the stored token is still accepted. Exit status mirrors
+# cc-broker.py --probe: 0 accepted, 1 rejected, 2 inconclusive.
+broker_probe() {
+    _broker_need_python
+    broker_has_token || { echo "🔐 no brokered token at $BROKER_TOKEN_FILE (cc --broker-login)"; return 1; }
+    echo "   probing api.anthropic.com with the stored token…"
+    python3 "$SCRIPT_DIR/cc-broker.py" --probe "$BROKER_TOKEN_FILE" claude
+}
+
+broker_status() {
+    echo "🔐 credential broker"
+    echo "   enabled:    $(broker_wanted && echo yes || echo "no  (set 'broker = on' in $KIB_CONFIG, or CC_BROKER=1)")"
+    echo "   token file: $BROKER_TOKEN_FILE"
+    if broker_has_token; then
+        # Size and mode only — never the contents, and never a prefix of them.
+        local mode size
+        mode="$(ls -l "$BROKER_TOKEN_FILE" 2>/dev/null | cut -c1-10)"
+        size="$(wc -c < "$BROKER_TOKEN_FILE" 2>/dev/null | tr -d ' ')"
+        echo "   stored:     yes ($size bytes, $mode)"
+        broker_probe
+    else
+        echo "   stored:     NO — mint one with: cc --broker-login"
+        return 1
+    fi
 }
 
 # ── DNS: follow the host's live resolver, without editing the host ───

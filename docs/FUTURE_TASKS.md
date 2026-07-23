@@ -55,7 +55,29 @@ never held. That makes the single largest accepted risk fixable without touching
 without the Portmaster question (Gate D) that has already broken one design. It is host-side and
 capless, so it satisfies every gate trivially.
 
-### C1 · Credential broker, base-URL variant ★★★★★ — **PICK**
+### C1 · Credential broker, base-URL variant ★★★★★ — **PICK · BUILT (opt-in) 2026-07-23**
+
+> **Status.** Implemented as `cc-broker.py` + the `start_broker`/`add_broker_env_args`/
+> `connect_broker_network`/`verify_broker_attach`/`stop_broker` subsystem in `cc-lib.sh`/`cc`.
+> **Gate A PASSED** (Claude honours `ANTHROPIC_BASE_URL` for OAuth `/v1/messages`) and **Gate D
+> PASSED** (container→container on a user bridge under Portmaster), so this is the base-URL variant
+> on an internal bridge — no C2/CA, no host-loopback fallback. **Opt-in, off by default** (`broker =
+> on` in `~/.keep-it-in-your-box/config`, or `CC_BROKER=1`). Generic across agents: Claude wired now;
+> Codex/Gemini are ready-but-unstarted rows in the `PROVIDERS` table; a header-authed MCP (C3) is the
+> same shape. Fail-hard on create (broker is core auth); fail-safe on mid-session crash (never
+> re-mount the real token).
+>
+> **REVISED 2026-07-23 — the brokered credential is STATIC.** The first cut brokered the live
+> `~/.claude-shared/.credentials.json` and owned OAuth refresh on a 30 s timer. Shipped, it logged
+> the account out and paged every 30 s: Anthropic's subscription refresh tokens are single-use and
+> rotate, so the broker invalidated the token family for the host CLI and every other project's
+> sidecar; the write-back to a single-file bind mount could not use `rename(2)` (EBUSY) so it
+> truncated in place; and `threading.Lock` does not serialise across the one-broker-per-project
+> containers. VERIFY #1 (the refresh contract) is therefore **withdrawn, not deferred** — there is
+> no refresh path to verify. The broker now injects a long-lived token from
+> `~/.keep-it-in-your-box/claude-token` (`cc --broker-login`, mode 600, mounted `:ro`), the
+> placeholder is **synthetic** rather than cloned from the real credential, and the broker has no
+> write path to any credential at all. Same conclusion yoloAI reached independently.
 
 A host-side broker process holds the real token. The agent gets `ANTHROPIC_BASE_URL` pointed at the
 broker plus a **structurally valid placeholder** credential. The broker terminates the agent's
@@ -577,7 +599,9 @@ Settled decisions are recorded at the top (the four gates). Remaining:
 - [ ] **C3 transport** — does the MCP `http` client accept a plain-HTTP `url` to the broker on the internal bridge, or require `https`? (VERIFY; if TLS-required, terminate at the broker with a cert trusted only inside the container.)
 - [ ] **C3 streaming** — confirm SSE / streamable-HTTP passthrough through the reverse proxy is unbuffered and survives long-lived connections.
 - [ ] **C4 heuristic** — entropy / base64 false-positive rate on real MCP configs; tune before enabling so it never cries wolf on a `${VAR}` reference.
-- [ ] **Gate A** — if Claude Code ignores `ANTHROPIC_BASE_URL` for OAuth, commit to C2 (sentinel + CA).
-- [ ] **Gate D** — does Portmaster permit container→container:proxy, or does E1 need a different path?
+- [x] **Gate A** — RESOLVED 2026-07-23: Claude Code **honours** `ANTHROPIC_BASE_URL` for OAuth (`HIT POST /v1/messages?beta=true`). C1 (base-URL, no CA) is the path; C2 shelved.
+- [x] **Gate D** — RESOLVED 2026-07-23: Portmaster **permits** container→container on a user bridge (`C2C 200`). E1/broker use the internal bridge; no host-loopback fallback needed.
+- [x] **`validate_shared_settings` carve-out** — RESOLVED: no code change. `cc` sets `ANTHROPIC_BASE_URL` via a container `-e` flag (host-controlled channel); the validator keeps refusing `env.ANTHROPIC_BASE_URL` in the shared *settings.json* (the agent-writable, cross-project channel). Two different channels.
+- [ ] **Broker VERIFY #1 (refresh contract)** — confirm the Anthropic OAuth token endpoint + public client_id + response shape before flipping the broker to default-on. The refresh loop is built and fail-safe (never refreshes when `client_id` is unset; overridable via `/run/broker/oauth/claude.json`).
+- [ ] **Broker VERIFY (env precedence)** — does a container `-e ANTHROPIC_BASE_URL` win over a per-project (agent-writable) `settings.json` `env` entry? If the file wins, re-pin in `docker-entrypoint.sh`.
 - [ ] `WebFetch` — server-side (survives an allowlist) or client-side (breaks under E1)?
-- [ ] `validate_shared_settings` carve-out — how to distinguish "cc set `ANTHROPIC_BASE_URL`" from "a repo set it"?

@@ -30,8 +30,22 @@ PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
 SRC="${1:-/run/host-resolve/resolv.conf}"
-DST=/etc/resolv.conf
+# DST is overridable ONLY so tests/check.sh can point it at a temp file (see t_resolv_embedded).
+# The agent can't influence it: this runs as a detached `docker exec -u 0` whose env is set by
+# cc, never by the sandboxed session. Defaults to the real resolver in production.
+DST="${CC_RESOLV_DST:-/etc/resolv.conf}"
 INTERVAL="${CC_RESOLV_SYNC_INTERVAL:-3}"
+
+# Docker's embedded DNS (127.0.0.11) is what resolves user-defined-network aliases — the
+# credential broker's `cc-broker` alias depends on it. It lives ONLY in the container's
+# resolv.conf (Docker writes it there when the container joins a user network), never in the
+# host's. Capture it ONCE, before the loop below first overwrites DST, and keep it as the
+# PRIMARY nameserver in every write. Order is load-bearing: glibc returns the first
+# nameserver's NXDOMAIN without trying the rest, so if a host upstream came first it would
+# answer NXDOMAIN for `cc-broker` and the broker would be unreachable — the exact ENOTFOUND
+# bug this guards against. When the container is on the default bridge only (broker off), DST
+# has no 127.0.0.11 and this is empty, so behaviour is unchanged.
+EMBEDDED="$(grep '^[[:space:]]*nameserver[[:space:]]\{1,\}127\.0\.0\.11' "$DST" 2>/dev/null | head -1 || true)"
 
 last=""
 while :; do
@@ -42,7 +56,14 @@ while :; do
         # Only sync when the content changed AND at least one real nameserver survives.
         if [ "$cur" != "$last" ] \
             && printf '%s\n' "$cur" | grep -q '^[[:space:]]*nameserver[[:space:]]'; then
-            if printf '%s\n' "$cur" >"$DST" 2>/dev/null; then
+            # Prepend the embedded resolver (if any) so container-alias resolution survives
+            # the sync while external lookups still follow the host's live upstreams.
+            if [ -n "$EMBEDDED" ]; then
+                out="$(printf '%s\n%s' "$EMBEDDED" "$cur")"
+            else
+                out="$cur"
+            fi
+            if printf '%s\n' "$out" >"$DST" 2>/dev/null; then
                 last="$cur"
             fi
         fi
