@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Rebuild the claude-code-sandbox image on the host.
+# Rebuild the keep-it-in-your-box image on the host.
 # Use after editing baked-in files (Dockerfile, ccignore-fuse.py,
 # docker-entrypoint.sh). Layer caching keeps it fast unless an early
 # layer changed. Any extra args are passed through to `docker build`.
 set -euo pipefail
 
-IMAGE_NAME="claude-code-sandbox"
+IMAGE_NAME="keep-it-in-your-box"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Pin the latest Claude Code release so the rebuild doesn't drift.

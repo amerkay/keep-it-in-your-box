@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="430" viewBox="0 0 1200 430"
+     role="img" aria-labelledby="btitle bdesc">
+  <title id="btitle">What crosses the box boundary</title>
+  <desc id="bdesc">At the box boundary: .env and .ccignore are stubbed on read and writes refused; .git/config is validated and host-executed keys refused; clipboard writes are refused while reads pass; the OAuth token is readable so rotate after untrusted runs; your project code is read-write.</desc>
+
+  <style>
+    .mono { font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace; }
+  </style>
+
+  <rect x="16" y="16" width="1168" height="398" rx="20" fill="#0b0f14"/>
+  <rect x="16" y="16" width="1168" height="398" rx="20" fill="none" stroke="#30363d" stroke-width="1.5"/>
+
+  <!-- header -->
+  <g class="mono">
+    <text x="56" y="66" font-size="23" fill="#3fb950">$</text>
+    <text x="80" y="66" font-size="23" fill="#e6edf3">at the box boundary</text>
+  </g>
+
+  <!-- column headers -->
+  <g class="mono" font-size="16" letter-spacing="2" fill="#8b949e">
+    <text x="556" y="104" text-anchor="end">AGENT ASKS FOR</text>
+    <text x="644" y="104">THE BOX ANSWERS</text>
+  </g>
+
+  <!-- boundary divider -->
+  <line x1="600" y1="120" x2="600" y2="388" stroke="#3fb950" stroke-width="2" stroke-dasharray="4 6" opacity="0.7"/>
+
+  <g class="mono">
+    <!-- Row 1 -->
+    <text x="556" y="156" text-anchor="end" font-size="21" fill="#e6edf3">.env &#183; .ccignore</text>
+    <circle cx="600" cy="150" r="14" fill="#f85149"/>
+    <text x="600" y="156" text-anchor="middle" font-size="17" font-weight="700" fill="#0b0f14">&#215;</text>
+    <text x="644" y="156" font-size="20" fill="#c9d1d9">stub on read, writes refused</text>
+
+    <!-- Row 2 -->
+    <text x="556" y="208" text-anchor="end" font-size="21" fill="#e6edf3">.git/config</text>
+    <circle cx="600" cy="202" r="14" fill="#e3b341"/>
+    <text x="600" y="208" text-anchor="middle" font-size="17" font-weight="700" fill="#0b0f14">!</text>
+    <text x="644" y="208" font-size="20" fill="#c9d1d9">validated &#8212; hooks / alias / ssh keys refused</text>
+
+    <!-- Row 3 -->
+    <text x="556" y="260" text-anchor="end" font-size="21" fill="#e6edf3">clipboard write</text>
+    <circle cx="600" cy="254" r="14" fill="#f85149"/>
+    <text x="600" y="260" text-anchor="middle" font-size="17" font-weight="700" fill="#0b0f14">&#215;</text>
+    <text x="644" y="260" font-size="20" fill="#c9d1d9">refused &#8212; reads still pass</text>
+
+    <!-- Row 4 -->
+    <text x="556" y="312" text-anchor="end" font-size="21" fill="#e6edf3">OAuth token</text>
+    <circle cx="600" cy="306" r="14" fill="#e3b341"/>
+    <text x="600" y="312" text-anchor="middle" font-size="17" font-weight="700" fill="#0b0f14">!</text>
+    <text x="644" y="312" font-size="20" fill="#c9d1d9">readable &#8212; rotate after untrusted runs</text>
+
+    <!-- Row 5 -->
+    <text x="556" y="364" text-anchor="end" font-size="21" fill="#e6edf3">your project code</text>
+    <circle cx="600" cy="358" r="14" fill="#3fb950"/>
+    <text x="600" y="364" text-anchor="middle" font-size="17" font-weight="700" fill="#0b0f14">&#10003;</text>
+    <text x="644" y="364" font-size="20" fill="#c9d1d9">read + write</text>
+  </g>
+</svg>

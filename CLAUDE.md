@@ -8,7 +8,7 @@ Docker-based sandbox for running Claude Code in an isolated container. The `cc` 
 
 ## Working on this repo (read first)
 
-Claude works on `claude-docker` **from inside the sandbox this repo builds**. So:
+Claude works on **Keep It in Your Box** (this repo, `keep-it-in-your-box`) **from inside the sandbox it builds**. So:
 
 - **No `docker` binary, no Docker socket.** You cannot build the image, run `cc`, or test a container end to end. Hand those commands to the user as a **fenced block they can paste into a host terminal** — pasteable as-is, no `!` prefix (that runs *in this container*, not on the host), no `$` prompts, no placeholders left to fill in. This matters: a `! findmnt --target /tmp` during the sandbox-escape review reported the *container's* tmpfs as `private`, and the wrong answer nearly drove a redesign until the same command run host-side returned `shared`.
 - **`~/.claude-shared/` and `$CLAUDE_CONFIG_DIR` are LIVE host state**, bind-mounted in. Never aim destructive or migration logic at them to "try it". Build a fake `$HOME` under the scratchpad and test against that: `migrate-sessions.sh` keys everything off `$HOME`, and `CC_MIGRATE_TEST=1` disables its safety checks for exactly this purpose.
@@ -214,7 +214,7 @@ Neither is sufficient alone: a read-only `hooks/` is bypassable by whatever *cho
 ./migrate-sessions.sh --apply  # commit; deletes ~/.claude and ~/.claude.json
 
 # Build image (happens automatically on first run)
-docker build -t claude-code-sandbox .
+docker build -t keep-it-in-your-box .
 
 # Run from any project directory
 /path/to/cc                    # default: launches claude
@@ -223,8 +223,25 @@ docker build -t claude-code-sandbox .
 CC_FORCE_NEW_SESSION=1 /path/to/cc   # clean-slate throwaway session
 
 # Rebuild with custom packages
-docker build --build-arg CUSTOM_PACKAGES="golang ruby" -t claude-code-sandbox .
+docker build --build-arg CUSTOM_PACKAGES="golang ruby" -t keep-it-in-your-box .
 
 # Force reinstall a specific Claude Code version (Docker caches by version)
-docker build --build-arg CLAUDE_VERSION=2.1.71 -t claude-code-sandbox .
+docker build --build-arg CLAUDE_VERSION=2.1.71 -t keep-it-in-your-box .
+```
+
+## Aliases: `cc` and `kib`
+
+Both point at the **same** `cc` script — the name is only a mnemonic. `cc` reads as "Claude
+Code" and launches `claude` by default; `kib` ("Keep It in your Box") reads as "run this *in the
+box*" for the non-Claude commands. Neither collides with a known CLI. Set both up host-side:
+
+```bash
+alias cc='/path/to/keep-it-in-your-box/cc'
+alias kib='/path/to/keep-it-in-your-box/cc'
+```
+
+```bash
+cc                     # launch Claude Code in the sandbox
+kib bash               # shell in the sandbox
+kib python app.py      # run anything else in the sandbox
 ```

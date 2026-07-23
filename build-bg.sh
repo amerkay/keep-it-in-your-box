@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-IMAGE_NAME="claude-code-sandbox"
+IMAGE_NAME="keep-it-in-your-box"
 BUILD_LOCK="$SCRIPT_DIR/build.lock"
 BUILD_LOG="$SCRIPT_DIR/build.log"
 BUILD_PID="$SCRIPT_DIR/build.pid"

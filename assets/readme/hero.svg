@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="330" viewBox="0 0 1200 330"
+     role="img" aria-labelledby="title desc">
+  <title id="title">Keep It in Your Box</title>
+  <desc id="desc">A Docker sandbox for AI coding agents. Run Claude Code in YOLO mode without the YOLO. The box redacts .env, validates .git/config, and keeps the clipboard read-only.</desc>
+
+  <style>
+    .mono { font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace; }
+  </style>
+
+  <!-- the box itself is the motif -->
+  <rect x="16" y="16" width="1168" height="298" rx="22" fill="#0b0f14"/>
+  <rect x="16" y="16" width="1168" height="298" rx="22" fill="none" stroke="#3fb950" stroke-width="2"/>
+
+  <!-- prompt eyebrow -->
+  <g class="mono">
+    <text x="56" y="74" font-size="21" fill="#3fb950">$</text>
+    <text x="80" y="74" font-size="21" fill="#8b949e" letter-spacing="1">docker sandbox for AI coding agents</text>
+  </g>
+
+  <!-- wordmark -->
+  <g class="mono" font-weight="700">
+    <text x="54" y="162" font-size="66" fill="#e6edf3">KEEP IT IN YOUR </text>
+    <text x="690" y="162" font-size="66" fill="#3fb950">BOX</text>
+    <rect x="826" y="126" width="26" height="44" fill="#3fb950"/>
+  </g>
+
+  <!-- tagline -->
+  <text x="56" y="214" class="mono" font-size="25" fill="#c9d1d9">Run Claude Code in YOLO mode &#8212; without the YOLO.</text>
+
+  <!-- guarantee chips -->
+  <g class="mono" font-size="19">
+    <!-- .env redacted -->
+    <rect x="56" y="248" width="228" height="42" rx="10" fill="#161b22" stroke="#30363d"/>
+    <circle cx="80" cy="269" r="6" fill="#f85149"/>
+    <text x="96" y="275" fill="#e6edf3">.env <tspan fill="#8b949e">&#8594;</tspan> redacted</text>
+
+    <!-- .git/config validated -->
+    <rect x="300" y="248" width="330" height="42" rx="10" fill="#161b22" stroke="#30363d"/>
+    <circle cx="324" cy="269" r="6" fill="#e3b341"/>
+    <text x="340" y="275" fill="#e6edf3">.git/config <tspan fill="#8b949e">&#8594;</tspan> validated</text>
+
+    <!-- clipboard read-only -->
+    <rect x="646" y="248" width="298" height="42" rx="10" fill="#161b22" stroke="#30363d"/>
+    <circle cx="670" cy="269" r="6" fill="#3fb950"/>
+    <text x="686" y="275" fill="#e6edf3">clipboard <tspan fill="#8b949e">&#8594;</tspan> read-only</text>
+  </g>
+</svg>
