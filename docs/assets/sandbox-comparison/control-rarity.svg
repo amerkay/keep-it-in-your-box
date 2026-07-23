@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 520" width="1200" height="520" role="img" aria-labelledby="t d">
+  <title id="t">How rare is each containment control across 30 surveyed agent sandboxes</title>
+  <desc id="d">Bar chart of how many of 30 surveyed projects implement each control, with whether cc has it. Clipboard mediation 0 of 30, cc yes. In-project secret redaction 3, cc yes. Host-executed config guard 4, cc yes. Credential brokering 5, cc no. VM-class boundary 6, cc no. Default-deny egress 10, cc no. Security regression suite 13, cc yes.</desc>
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0d1424"/>
+      <stop offset="1" stop-color="#0a0e17"/>
+    </linearGradient>
+    <pattern id="grid2" width="34" height="34" patternUnits="userSpaceOnUse">
+      <path d="M34 0H0V34" fill="none" stroke="#8b949e" stroke-opacity="0.06" stroke-width="1"/>
+    </pattern>
+    <style>
+      .mono { font-family: ui-monospace, "SFMono-Regular", "Cascadia Code", Menlo, Consolas, monospace; }
+      .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="520" fill="url(#bg2)"/>
+  <rect width="1200" height="520" fill="url(#grid2)"/>
+
+  <text x="64" y="72" class="mono" font-size="15" letter-spacing="3.2" fill="#58a6ff">ADOPTION ACROSS THE FIELD</text>
+  <text x="62" y="118" class="sans" font-size="34" font-weight="800" fill="#e6edf3" letter-spacing="-0.5">How rare is each control?</text>
+
+  <!-- axis -->
+  <g class="mono" font-size="15" fill="#6e7681" text-anchor="middle">
+    <text x="430" y="158">0</text>
+    <text x="616" y="158">10</text>
+    <text x="802" y="158">20</text>
+    <text x="988" y="158">30</text>
+  </g>
+  <g stroke="#8b949e" stroke-opacity="0.10" stroke-width="1">
+    <path d="M430 168 V478"/><path d="M616 168 V478"/><path d="M802 168 V478"/><path d="M988 168 V478"/>
+  </g>
+
+  <!-- rows: label | track | bar | count | cc verdict -->
+  <g class="sans" font-size="20" fill="#adbac7" text-anchor="end">
+    <text x="402" y="203">Clipboard mediation</text>
+    <text x="402" y="247">In-project secret redaction</text>
+    <text x="402" y="291">Host-executed config guard</text>
+    <text x="402" y="335">Credential brokering</text>
+    <text x="402" y="379">VM-class boundary</text>
+    <text x="402" y="423">Default-deny egress</text>
+    <text x="402" y="467">Security regression suite</text>
+  </g>
+
+  <g fill="#161b22">
+    <rect x="430" y="185" width="558" height="22" rx="11"/>
+    <rect x="430" y="229" width="558" height="22" rx="11"/>
+    <rect x="430" y="273" width="558" height="22" rx="11"/>
+    <rect x="430" y="317" width="558" height="22" rx="11"/>
+    <rect x="430" y="361" width="558" height="22" rx="11"/>
+    <rect x="430" y="405" width="558" height="22" rx="11"/>
+    <rect x="430" y="449" width="558" height="22" rx="11"/>
+  </g>
+
+  <g fill="#1f6feb">
+    <rect x="430" y="229" width="56" height="22" rx="11"/>
+    <rect x="430" y="273" width="74" height="22" rx="11"/>
+    <rect x="430" y="317" width="93" height="22" rx="11"/>
+    <rect x="430" y="361" width="112" height="22" rx="11"/>
+    <rect x="430" y="405" width="186" height="22" rx="11"/>
+    <rect x="430" y="449" width="242" height="22" rx="11"/>
+  </g>
+
+  <g class="mono" font-size="19" font-weight="700" fill="#e6edf3" text-anchor="end">
+    <text x="1046" y="203">0</text>
+    <text x="1046" y="247">3</text>
+    <text x="1046" y="291">4</text>
+    <text x="1046" y="335">5</text>
+    <text x="1046" y="379">6</text>
+    <text x="1046" y="423">10</text>
+    <text x="1046" y="467">13</text>
+  </g>
+
+  <!-- cc verdict chips -->
+  <g class="mono" font-size="16" font-weight="700" text-anchor="middle">
+    <g>
+      <rect x="1058" y="183" width="78" height="26" rx="13" fill="#0f2417" stroke="#238636" stroke-width="1.4"/>
+      <text x="1097" y="201" fill="#56d364">cc &#10003;</text>
+    </g>
+    <g>
+      <rect x="1058" y="227" width="78" height="26" rx="13" fill="#0f2417" stroke="#238636" stroke-width="1.4"/>
+      <text x="1097" y="245" fill="#56d364">cc &#10003;</text>
+    </g>
+    <g>
+      <rect x="1058" y="271" width="78" height="26" rx="13" fill="#0f2417" stroke="#238636" stroke-width="1.4"/>
+      <text x="1097" y="289" fill="#56d364">cc &#10003;</text>
+    </g>
+    <g>
+      <rect x="1058" y="315" width="78" height="26" rx="13" fill="#2d1214" stroke="#da3633" stroke-width="1.4"/>
+      <text x="1097" y="333" fill="#ff7b72">cc &#10007;</text>
+    </g>
+    <g>
+      <rect x="1058" y="359" width="78" height="26" rx="13" fill="#2d1214" stroke="#da3633" stroke-width="1.4"/>
+      <text x="1097" y="377" fill="#ff7b72">cc &#10007;</text>
+    </g>
+    <g>
+      <rect x="1058" y="403" width="78" height="26" rx="13" fill="#2d1214" stroke="#da3633" stroke-width="1.4"/>
+      <text x="1097" y="421" fill="#ff7b72">cc &#10007;</text>
+    </g>
+    <g>
+      <rect x="1058" y="447" width="78" height="26" rx="13" fill="#0f2417" stroke="#238636" stroke-width="1.4"/>
+      <text x="1097" y="465" fill="#56d364">cc &#10003;</text>
+    </g>
+  </g>
+
+  <text x="64" y="504" class="mono" font-size="16" fill="#6e7681">Counts are what each project documents. Undocumented cases are excluded, not assumed absent.</text>
+</svg>
