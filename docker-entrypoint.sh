@@ -5,6 +5,28 @@ set -e
 HOST_UID="${HOST_UID:-1000}"
 HOST_GID="${HOST_GID:-1000}"
 
+# Fail-closed capability check for single-container FUSE mode (CC_FUSE_INTERNAL=1). That mode
+# CREATES the container with CAP_SYS_ADMIN (needed once, to mount the redaction view) and
+# relies on cc's `setpriv` drop to remove it from every agent session's bounding set before
+# the agent runs. This is the last line of that guarantee: run as the unprivileged agent,
+# just before exec, it REFUSES to start if SYS_ADMIN is still in the bounding set — so a
+# bypassed/edited exec wrapper, a bug, or a manual `docker exec` cannot silently run the
+# agent cap-capable. (SYS_ADMIN in the *bounding* set is already inert for a capless non-root
+# process under no-new-privileges — it cannot be moved into the effective set without first
+# becoming root, which NNP blocks — so this is defence in depth making the invariant explicit
+# and self-enforcing. It is baked into the image, so a sandboxed session cannot edit it.)
+assert_no_sysadmin() {
+	[ "${CC_FUSE_INTERNAL:-0}" = 1 ] || return 0
+	ans_bnd=$(awk '/^CapBnd:/{print $2}' /proc/self/status 2>/dev/null)
+	[ -n "$ans_bnd" ] || return 0
+	if [ $(( 0x$ans_bnd & 0x200000 )) -ne 0 ]; then
+		echo "✗ cc: refusing to run — CAP_SYS_ADMIN is still in this session's bounding set." >&2
+		echo "  Single-container FUSE mode must drop it (setpriv) before the agent runs; it did" >&2
+		echo "  not. Aborting rather than run the agent with mount capability. (CapBnd=$ans_bnd)" >&2
+		exit 1
+	fi
+}
+
 # Ensure Claude is also available at the native per-user location.
 # POSIX sh has no `local`, so the variables are prefixed to avoid clobbering the caller's.
 ensure_user_local_claude() {
@@ -18,6 +40,61 @@ ensure_user_local_claude() {
 	if [ ! -e "$eulc_target" ]; then
 		ln -sf "$eulc_claude" "$eulc_target" 2>/dev/null || true
 	fi
+}
+
+# macOS clipboard bridge (CC_CLIP_BRIDGE=1): install container-side shims that talk to the
+# host pbpaste watcher over the /cc-clip spool. Reads (wl-paste / xclip -o) drop a request
+# and read the response; writes (wl-copy / pbcopy / xclip without -o) leave a deny marker
+# and fail — one-way by construction, mirroring the Wayland guard. Placed in /usr/local/bin
+# (ahead of /usr/bin), so they shadow the real wl-clipboard, which has no socket here anyway.
+install_clipboard_shims() {
+	cat > /usr/local/bin/wl-paste <<'SHIM'
+#!/bin/sh
+# cc clipboard bridge — READ ONLY. Requests a selection from the host over /cc-clip.
+DIR=/cc-clip
+[ -d "$DIR" ] || exit 1
+type=text
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-l | --list-types)      type=list ;;
+		-t | --type) shift; case "${1:-}" in image/*) type=png ;; esac ;;
+		--type=image/*)         type=png ;;
+	esac
+	shift
+done
+id="$$.$(date +%s%N 2>/dev/null || date +%s)"
+printf '%s\n' "$type" > "$DIR/req.$id"
+i=0
+while [ ! -e "$DIR/done.$id" ] && [ "$i" -lt 40 ]; do sleep 0.05; i=$((i + 1)); done
+[ -e "$DIR/resp.$id" ] && cat "$DIR/resp.$id"
+rm -f "$DIR/req.$id" "$DIR/resp.$id" "$DIR/done.$id" 2>/dev/null
+SHIM
+
+	cat > /usr/local/bin/xclip <<'SHIM'
+#!/bin/sh
+# cc clipboard bridge — xclip-compatible. `-o`/`-out` reads via the bridge; anything else
+# is a write and is refused.
+for a in "$@"; do case "$a" in -o | -out) exec /usr/local/bin/wl-paste ;; esac; done
+DIR=/cc-clip
+[ -d "$DIR" ] && : > "$DIR/deny.$$" 2>/dev/null
+echo "cc: clipboard WRITE refused — the sandbox clipboard is read-only." >&2
+exit 1
+SHIM
+
+	for w in wl-copy pbcopy; do
+		cat > "/usr/local/bin/$w" <<'SHIM'
+#!/bin/sh
+# cc clipboard bridge — WRITE refused. A clipboard write is host code execution at the
+# user's next paste, so it is blocked here exactly as the Wayland guard blocks it.
+DIR=/cc-clip
+[ -d "$DIR" ] && : > "$DIR/deny.$$" 2>/dev/null
+echo "cc: clipboard WRITE refused — the sandbox clipboard is read-only." >&2
+exit 1
+SHIM
+	done
+
+	chmod +x /usr/local/bin/wl-paste /usr/local/bin/xclip \
+		/usr/local/bin/wl-copy /usr/local/bin/pbcopy 2>/dev/null || true
 }
 
 # If already running as the target user, just exec
@@ -35,6 +112,7 @@ if [ "$(id -u)" = "$HOST_UID" ]; then
 	export HOME="$USER_HOME"
 	export PATH="$USER_HOME/.local/bin:$PATH"
 	ensure_user_local_claude "$USER_HOME"
+	assert_no_sysadmin
 	exec "$@"
 fi
 
@@ -213,12 +291,29 @@ exec "$real_npx" "$@"
 NPXWRAPPER
 chmod +x /usr/local/bin/npx
 
+# macOS clipboard bridge shims (once, at container creation — `docker exec` sessions take
+# the already-target-user branch above and never reach here).
+if [ "${CC_CLIP_BRIDGE:-0}" = 1 ]; then
+	install_clipboard_shims
+fi
+
+# Single-container FUSE redaction (CC_FUSE_INTERNAL=1): mount the redacted view over the
+# project path and set CC_EXEC_PREFIX to drop CAP_SYS_ADMIN before the agent runs. Sourced
+# while still root/SYS_ADMIN-capable; aborts the container on mount failure.
+CC_EXEC_PREFIX=""
+if [ "${CC_FUSE_INTERNAL:-0}" = 1 ]; then
+	. /usr/local/bin/entrypoint-fuse.sh
+fi
+
 # Set up environment for the target user
 export HOME="$USER_HOME"
 export PATH="$USER_HOME/.local/bin:${CCO_PREPEND_PATH:+$CCO_PREPEND_PATH:}$PATH"
 
-# Switch to host project directory
+# Switch to host project directory (the FUSE view, in single mode)
 cd "${HOST_PWD:-/workspace}"
 
-# exec gosu preserves the TTY properly (unlike su -c which wraps in a subshell)
-exec gosu "$HOST_UID:$HOST_GID" "$@"
+# exec gosu preserves the TTY properly (unlike su -c which wraps in a subshell).
+# $CC_EXEC_PREFIX is the setpriv bounding-set drop in single-container FUSE mode, empty
+# otherwise; it must stay unquoted so its words split into argv.
+# shellcheck disable=SC2086
+exec $CC_EXEC_PREFIX gosu "$HOST_UID:$HOST_GID" "$@"

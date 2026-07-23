@@ -290,7 +290,7 @@ But it is **not a boundary**: any subprocess bypasses it, and aicontainer's own 
 three patched bypasses. Worth adding **on top of R1/R2** as cheap defence-in-depth; worthless as the
 mechanism.
 
-### macOS: the A/H/U decision (OPEN — recommendation: H)
+### macOS: the A/H/U decision (RESOLVED 2026-07-23 → H; implemented)
 
 Docker Desktop cannot honour `cap-drop=ALL` for in-place FUSE (both mechanisms measured-blocked). So the
 two priorities — *fewer dependencies* and *`cap-drop=ALL`* — are **mutually exclusive on macOS**, and one
@@ -456,7 +456,18 @@ docker run --rm --runtime=runsc --cap-add=SYS_ADMIN --device /dev/fuse \
 Settled decisions are recorded at the top (the four gates). Remaining:
 
 - [x] **Gate B (macOS)** — RESOLVED 2026-07-23. Docker Desktop can't do `cap-drop=ALL` in-place FUSE by *either* mechanism (propagation refused; unprivileged userns `uid_map` refused). Colima does the `cap-drop=ALL` sidecar; single-container FUSE + `SYS_ADMIN` works on Docker Desktop.
-- [ ] **macOS plan — A, H, or U?** (the last open architectural decision for G3). Colima-for-`cap-drop=ALL` (A) vs no-Colima-for-a-`SYS_ADMIN`-cap (H/U). **Recommendation: H** — no Colima; Linux keeps the verified sidecar; macOS uses hardened single-container FUSE (agent capless-at-runtime).
+- [x] **macOS plan — A, H, or U?** — RESOLVED → **H**, and implemented. A research pass (engine
+  lock-in, Colima's documented upgrade-breakage history, Docker Desktop's free-tier terms) settled
+  it: A ties macOS to Colima specifically (propagation only works on its shared-root VM) and is
+  mac-only-testable; H works on *any* engine (Docker Desktop, OrbStack, Colima) and the whole macOS
+  topology is developable on Linux via `CC_SINGLE_CONTAINER=1`. Linux keeps the verified
+  `cap-drop=ALL` sidecar unchanged; macOS uses hardened single-container FUSE (`SYS_ADMIN` at
+  creation, mounted by the trusted entrypoint, then dropped from the bounding set with `setpriv`
+  before the capless agent runs). All OS branching lives in `cc-portable.sh`; the two FUSE modes
+  sit behind a 3-function interface (`prepare_redaction`/`verify_redaction_attach`/
+  `teardown_redaction`). See CLAUDE.md § "macOS support (Plan H)". Remaining before flipping the
+  README's "macOS ❌" rows: the on-hardware VERIFY items (clipboard binary choice, virtiofs
+  ownership) — see that section.
 - [ ] **Gate A** — if Claude Code ignores `ANTHROPIC_BASE_URL` for OAuth, commit to C2 (sentinel + CA).
 - [ ] **Gate D** — does Portmaster permit container→container:proxy, or does E1 need a different path?
 - [ ] `WebFetch` — server-side (survives an allowlist) or client-side (breaks under E1)?

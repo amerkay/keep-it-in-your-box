@@ -111,6 +111,13 @@ fixture() {   # fixture <name> [git-init-args...] — echoes its path, creating 
     printf '%s' "$path"
 }
 
+# Single-container FUSE mode (macOS / CC_SINGLE_CONTAINER=1) is detectable in-session:
+# the container's CC_FUSE_INTERNAL=1 env is inherited by every `docker exec`. It changes
+# two expectations vs the sidecar default — the AppArmor profile (the in-container mount
+# needs `apparmor=unconfined`) and the presence of the /cc/real real-project bind.
+SINGLE_FUSE=0
+[ "${CC_FUSE_INTERNAL:-0}" = 1 ] && SINGLE_FUSE=1
+
 # ═════════════════════════════════════════════════════════════════
 section "Container boundary — escape classes (info-tier controls)"
 
@@ -118,7 +125,13 @@ is "all capabilities dropped (CapEff)"  "0000000000000000" "$(awk '/^CapEff:/{pr
 is "CAP_SYS_ADMIN not in the bounding set" "0" "$(( 0x$(awk '/^CapBnd:/{print $2}' /proc/self/status) & 0x200000 ? 1 : 0 ))"
 is "no-new-privileges set"              "1" "$(awk '/^NoNewPrivs:/{print $2}' /proc/self/status)"
 is "seccomp in filter mode"             "2" "$(awk '/^Seccomp:/{print $2}' /proc/self/status)"
-is "AppArmor confined"                  "docker-default (enforce)" "$(cat /proc/self/attr/current 2>/dev/null | tr -d '\0')"
+if [ "$SINGLE_FUSE" = 1 ]; then
+    # Single mode drops apparmor confinement so the in-container FUSE mount is permitted;
+    # SYS_ADMIN is dropped from the bounding set instead (asserted just above + below).
+    is "AppArmor unconfined (single-container FUSE mount needs it)" "unconfined" "$(cat /proc/self/attr/current 2>/dev/null | tr -d '\0')"
+else
+    is "AppArmor confined"              "docker-default (enforce)" "$(cat /proc/self/attr/current 2>/dev/null | tr -d '\0')"
+fi
 is "/proc/sys mounted read-only"        "ro" "$(awk '$5=="/proc/sys"{split($6,o,",");print o[1]}' /proc/self/mountinfo | head -1)"
 is "/sys mounted read-only"             "ro" "$(awk '$5=="/sys"{split($6,o,",");print o[1]}' /proc/self/mountinfo | head -1)"
 is "no docker socket"                   "absent" "$([ -S /var/run/docker.sock ] && echo present || echo absent)"
@@ -134,6 +147,31 @@ print('SUCCEEDED' if rc == 0 else os.strerror(ctypes.get_errno()))" "$1"
 }
 is "mount(2) refused"   "Operation not permitted" "$(syscall_errno mount)"
 is "unshare(2) refused" "Operation not permitted" "$(syscall_errno unshare)"
+
+# ═════════════════════════════════════════════════════════════════
+section "Single-container FUSE mode (Plan H — macOS / CC_SINGLE_CONTAINER=1)"
+
+if [ "$SINGLE_FUSE" = 1 ]; then
+    # The redacted view is served in-container and mounted over the project path itself
+    # (in sidecar mode the same fuse mount arrives by propagation; here it is local).
+    # readlink -f: the entrypoint's HOST_HOME symlink means the mount is recorded under the
+    # resolved path, so compare canonically.
+    fuse_at_pwd() { local p; p="$(readlink -f "$PWD")"; awk -v p="$p" '$2==p && $3 ~ /^fuse/ {print "fuse"; exit}' /proc/self/mounts; }
+    is "redaction is a FUSE mount at the project root" "fuse" "$(fuse_at_pwd)"
+    # The real project is exposed to root at /cc/real under a 700 parent; the capless agent
+    # must not be able to reach it — every access has to go through the redacting view.
+    deny "agent cannot reach the real project at /cc/real"  ls /cc/real
+    deny "agent cannot traverse the /cc parent"             ls /cc
+    # The headline Plan-H property: SYS_ADMIN existed only to mount, and setpriv dropped it
+    # from the bounding set before the agent ran. (Re-asserted from the boundary section so
+    # a single-mode regression is unmissable here.)
+    is "CAP_SYS_ADMIN dropped from the bounding set (setpriv)" "0" \
+       "$(( 0x$(awk '/^CapBnd:/{print $2}' /proc/self/status) & 0x200000 ? 1 : 0 ))"
+    is "CAP_SETPCAP dropped from the bounding set too" "0" \
+       "$(( 0x$(awk '/^CapBnd:/{print $2}' /proc/self/status) & 0x100 ? 1 : 0 ))"
+else
+    skip "single-container FUSE checks" "sidecar mode — relaunch with CC_SINGLE_CONTAINER=1"
+fi
 
 # ═════════════════════════════════════════════════════════════════
 section "Host-executed config guard — git (C1–C4, H1, H2)"

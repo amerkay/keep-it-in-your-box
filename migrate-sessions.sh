@@ -50,6 +50,32 @@ CLAUDE_JSON="$HOME/.claude.json"
 SHARED_DIR="$HOME/.claude-shared"
 SANDBOX_DIR="$HOME/.claude-sandbox"
 
+# Fresh install (no legacy ~/.claude to split — the common case on a new Mac): there is
+# nothing to migrate, but cc still refuses to launch until ~/.claude-shared/.migrated
+# exists. So create the shared skeleton directly. cc fills in CLAUDE.md (the sandbox
+# policy) and settings on first launch; .credentials.json is written at first login.
+bootstrap_fresh() {
+	echo "▶ Fresh install — no legacy ~/.claude found; nothing to migrate."
+	echo "  Creating the shared skeleton so cc can run per-project isolated sessions:"
+	local d
+	for d in skills agents commands plugins plugins/marketplaces hooks; do
+		echo "    MKDIR  $SHARED_DIR/$d"
+	done
+	echo "    WRITE  $SHARED_DIR/claude-json.seed   (template for new projects)"
+	echo "    WRITE  $SHARED_DIR/.migrated"
+	if [ "$APPLY" = 1 ]; then
+		for d in skills agents commands plugins plugins/marketplaces hooks; do
+			mkdir -p "$SHARED_DIR/$d"
+		done
+		mkdir -p "$SANDBOX_DIR"
+		printf '{\n  "projects": {}\n}\n' > "$SHARED_DIR/claude-json.seed"
+		printf '{"version": 1, "bootstrap": true}\n' > "$SHARED_DIR/.migrated"
+		echo "  ✅ Bootstrapped. Launch cc from any project directory."
+	else
+		echo "  DRY RUN — nothing changed. Re-run with --apply to create it."
+	fi
+}
+
 # ── Preflight ────────────────────────────────────────────────
 if ! command -v python3 >/dev/null 2>&1; then
 	echo "❌ python3 is required (JSON surgery on .claude.json)." >&2
@@ -63,8 +89,15 @@ if [ -f "$SHARED_DIR/.migrated" ] && [ "$FORCE" != 1 ]; then
 	exit 0
 fi
 
+# Neither legacy path present → fresh install: bootstrap and stop. Exactly one present →
+# a torn legacy state that migration can't reason about safely.
+if [ ! -d "$CLAUDE_DIR" ] && [ ! -f "$CLAUDE_JSON" ]; then
+	bootstrap_fresh
+	exit 0
+fi
 if [ ! -d "$CLAUDE_DIR" ] || [ ! -f "$CLAUDE_JSON" ]; then
-	echo "❌ Nothing to migrate: expected $CLAUDE_DIR/ and $CLAUDE_JSON." >&2
+	echo "❌ Partial legacy state: found one of $CLAUDE_DIR/ or $CLAUDE_JSON, not both." >&2
+	echo "   Migration needs both (to split) or neither (fresh install). Resolve by hand." >&2
 	exit 1
 fi
 

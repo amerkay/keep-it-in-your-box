@@ -44,7 +44,7 @@ check_for_updates() {
     # it would let the next build lock a fresh one — two concurrent builds, both
     # truncating build.log and racing on `docker tag`. Test it in place instead;
     # flock creates the file if it is absent.
-    if ! flock -n "$BUILD_LOCK" true 2>/dev/null; then
+    if ! lock_fd -n "$BUILD_LOCK" true 2>/dev/null; then
         local running; running="$(cat "$BUILD_PID" 2>/dev/null || true)"
         echo "🔨 Background image rebuild in progress... (log: $BUILD_LOG)" >&2
         [ -n "$running" ] && echo "   To cancel: kill -TERM -$running" >&2
@@ -53,9 +53,9 @@ check_for_updates() {
 
     echo "🔍 Checking for Claude Code updates..." >&2
     local installed latest
-    installed="$(docker run --rm --entrypoint="" "$IMAGE_NAME" cat /etc/claude-code-version 2>/dev/null | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+    installed="$(docker run --rm --entrypoint="" "$IMAGE_NAME" cat /etc/claude-code-version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
     # Old images predate /etc/claude-code-version.
-    [ -n "$installed" ] || installed="$(docker run --rm --entrypoint="" "$IMAGE_NAME" claude --version 2>/dev/null | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+    [ -n "$installed" ] || installed="$(docker run --rm --entrypoint="" "$IMAGE_NAME" claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
     latest="$(latest_claude_version)"
     echo "   Installed: ${installed:-unknown}" >&2
     echo "   Latest:    ${latest:-unknown}" >&2
@@ -71,8 +71,8 @@ check_for_updates() {
     local answer=""
     read -rp "Rebuild image in background? [y/N] " answer || answer=""
     [[ "$answer" =~ ^[Yy]$ ]] || return 0
-    # setsid: its own process group, so `kill -TERM -PGID` kills the whole build tree.
-    setsid "$SCRIPT_DIR/build-bg.sh" &
+    # Its own process group, so `kill -TERM -PGID` kills the whole build tree.
+    detach_pgrp "$SCRIPT_DIR/build-bg.sh"
     echo $! > "$BUILD_PID"
     disown
     echo "🔨 Starting background rebuild... (log: $BUILD_LOG)" >&2
@@ -323,14 +323,103 @@ unmount_fuse() {
     ! fuse_mounted "$m"
 }
 
-# ── .ccignore redaction + host-config guard: FUSE sidecar ────────
+# ── .ccignore redaction + host-config guard: the mode interface ──
+# The redacting passthrough (ccignore-fuse.py) is served two ways, chosen once by
+# CC_FUSE_MODE (see cc-portable.sh). Both share the *same* Python server, matcher,
+# guard file and stale-rules refusal — only the topology differs:
+#
+#   sidecar (Linux): the server runs in its own cap-drop=ALL container and reaches
+#     the main container through shared-mount propagation. Strongest isolation.
+#   single (macOS / CC_SINGLE_CONTAINER=1): no propagation is available, so the
+#     server runs inside the one project container. It is started by the trusted
+#     entrypoint (entrypoint-fuse.sh) which mounts the view, drops SYS_ADMIN from
+#     the bounding set, then gosu's to the capless agent. See "macOS (Plan H)".
+#
+# cc calls only the three interface functions; each dispatches on CC_FUSE_MODE.
+prepare_redaction() {
+    if [ "$CC_FUSE_MODE" = single ]; then _prepare_redaction_single; else _prepare_redaction_sidecar; fi
+}
+verify_redaction_attach() {
+    if [ "$CC_FUSE_MODE" = single ]; then _verify_redaction_attach_single; else _verify_redaction_attach_sidecar; fi
+}
+teardown_redaction() {
+    if [ "$CC_FUSE_MODE" = single ]; then _teardown_redaction_single; else _teardown_redaction_sidecar; fi
+}
+
+# ── single-container mode ─────────────────────────────────────────
+# No sidecar, no host-side mount, no propagation. cc only stages the rules and adds
+# the flags the entrypoint needs; entrypoint-fuse.sh does the mount in-container.
+_prepare_redaction_single() {
+    mkdir -p "$STATE_DIR" && chmod 700 "$STATE_DIR"
+    # The rule set the entrypoint mounts read-only at /cc/patterns. Kept in $STATE_DIR
+    # (host-only) so the sandbox can't edit what redaction is validated against, and so
+    # the attach-time staleness check has a stable copy to compare against — exactly the
+    # role $FUSE_ROOT/patterns plays for the sidecar.
+    if [ -f "$PWD/.ccignore" ]; then cp "$PWD/.ccignore" "$PATTERNS_STATE"; else : > "$PATTERNS_STATE"; fi
+    chmod 644 "$PATTERNS_STATE"
+
+    # NO -v for $PWD: the entrypoint mounts the redacted view there. The real project is
+    # exposed at /cc/real (under a root-700 parent the agent can't traverse), the server
+    # and guard read-only. SYS_ADMIN + /dev/fuse exist only until the mount is up; SETPCAP
+    # lets the entrypoint then drop SYS_ADMIN (and itself) from the bounding set before the
+    # agent runs, so the agent tree is provably not SYS_ADMIN-capable. apparmor is
+    # unconfined for the mount (docker-default denies it) — preflight proved the engine
+    # accepts the flag.
+    REDACTION_ARGS=(
+        -v "$PWD:/cc/real"
+        -v "$PATTERNS_STATE:/cc/patterns:ro"
+        -v "$SCRIPT_DIR/ccignore-fuse.py:/usr/local/bin/ccignore-fuse.py:ro"
+        -v "$SCRIPT_DIR/global.ccignore:/usr/local/share/global.ccignore:ro"
+        --cap-add=SYS_ADMIN
+        --cap-add=SETPCAP
+        --device /dev/fuse
+        --security-opt apparmor=unconfined
+        -e CC_FUSE_INTERNAL=1
+        -e CC_FUSE_MNT="$PWD"
+    )
+    PROJECT_MOUNT_SRC=""     # signal start_container to add no $PWD bind
+    echo "🛡️  .ccignore: single-container FUSE redaction (mounted in-container at $PWD)" >&2
+}
+
+# Mount alive (a fuse fs at $PWD in the container) + rules unchanged since creation.
+# The mountpoint is compared after readlink -f *inside* the container: the entrypoint's
+# HOST_HOME symlink (e.g. /Users/kay → /home/hostuser) means the kernel records the mount
+# under its resolved path, so a raw string compare against $PWD would spuriously fail.
+_verify_redaction_attach_single() {
+    if ! docker exec "$CNAME" sh -c '
+        p=$(readlink -f "$1" 2>/dev/null || echo "$1")
+        while read -r _dev _mp _fstype _rest; do
+            [ "$_mp" = "$p" ] || continue
+            case "$_fstype" in fuse*) exit 0 ;; esac
+        done < /proc/self/mounts
+        exit 1
+    ' _ "$PWD" 2>/dev/null; then
+        die "this project's container has no redaction mount at $PWD, so neither" \
+            ".ccignore nor the host-config guard is being enforced in it." \
+            "Refusing to attach — close all cc sessions for this project and relaunch." \
+            "(A container created by an older cc will always land here.)"
+    fi
+    if ! cmp -s "$PWD/.ccignore" "$PATTERNS_STATE" 2>/dev/null \
+       && ! { [ ! -f "$PWD/.ccignore" ] && [ ! -s "$PATTERNS_STATE" ]; }; then
+        die ".ccignore changed since this project's container started." \
+            "The running redaction layer still enforces the OLD rules. Refusing to" \
+            "attach — close all cc sessions for this project and relaunch."
+    fi
+}
+
+# The mount died with the container; only the host state file remains.
+_teardown_redaction_single() {
+    rm -f "$PATTERNS_STATE" 2>/dev/null || true
+}
+
+# ── sidecar mode ─────────────────────────────────────────────────
 # A redacting passthrough (ccignore-fuse.py) runs in its own container and is exposed to
 # the main one through shared-mount propagation. Matched paths refuse writes — including
 # files created *after* launch, which no bind mount can cover, and which is precisely
 # what a nested `git init` or a mid-session clone relies on. Redacted paths also read as
 # a stub. Only the sidecar gets SYS_ADMIN + /dev/fuse; the main container keeps
 # cap-drop=ALL.
-start_fuse_sidecar() {
+_prepare_redaction_sidecar() {
     # Always on, even with no .ccignore: the sidecar also enforces global.ccignore,
     # the guard against writing files the *host* later executes (.git/config,
     # .git/hooks, .vscode/…). Gating it on .ccignore is what left every project
@@ -414,17 +503,51 @@ start_fuse_sidecar() {
     echo "🛡️  .ccignore: FUSE redacting mount active (sidecar: $FUSE_CNAME)" >&2
 }
 
+# The sidecar is unconditional, so its absence is always an error (that is also what a
+# container created by an older cc looks like) — without it there is no host-config guard
+# either. Only the project's .ccignore can go stale; global.ccignore is mounted read-only
+# from $SCRIPT_DIR, so the sidecar and this process read the very same file.
+_verify_redaction_attach_sidecar() {
+    if ! sidecar_running; then
+        die "this project's container was started without the redaction sidecar, so" \
+            "neither .ccignore nor the host-config guard is being enforced in it." \
+            "Refusing to attach — close all cc sessions for this project and relaunch." \
+            "(A container created by an older cc will always land here.)"
+    fi
+    if ! cmp -s "${PWD}/.ccignore" "$FUSE_ROOT/patterns" 2>/dev/null \
+       && ! { [ ! -f "$PWD/.ccignore" ] && [ ! -s "$FUSE_ROOT/patterns" ]; }; then
+        die ".ccignore changed since this project's container started." \
+            "The running redaction layer still enforces the OLD rules. Refusing to" \
+            "attach — close all cc sessions for this project and relaunch."
+    fi
+}
+
+# Unmount BEFORE removing the sidecar. The other order kills the FUSE server first,
+# leaving a mounted-but-ENOTCONN mount that `mountpoint -q` reports as "not a mountpoint"
+# — so the unmount is skipped, the mount is orphaned on *every* exit, and the next launch
+# of this project dies on the rm below.
+_teardown_redaction_sidecar() {
+    if ! unmount_fuse "$FUSE_ROOT/mnt"; then
+        die "a .ccignore redaction mount is still mounted at" \
+            "  $FUSE_ROOT/mnt" \
+            "and could not be unmounted. Refusing to delete it: that path is a" \
+            "passthrough view of your project, so removing it while mounted would" \
+            "delete the real files. Clear it by hand, then relaunch:" \
+            "  fusermount3 -u '$FUSE_ROOT/mnt' || sudo umount -l '$FUSE_ROOT/mnt'"
+    fi
+    docker rm -f "$FUSE_CNAME" >/dev/null 2>&1 || true
+    # `|| true`: never let a failed cleanup kill cc under `set -e` — least of all from the
+    # EXIT trap, where it would also overwrite the session's exit code.
+    rm -rf "$FUSE_ROOT" 2>/dev/null || true
+}
+
 # Desktop alert — the one launch channel that survives claude's TUI clearing the screen a
 # few milliseconds after cc prints to stderr. Reserved for *problems*: a launch that works
 # notifies nothing, so any popup means something needs the user. Best-effort: with no
-# notify-send, or no desktop session (ssh, `cc … -p`), it's a silent no-op.
-# urgency: normal (degraded) | critical (sticky).
-notify() {
-    local urgency="$1" title="$2" body="$3" icon=dialog-information
-    [ "$urgency" = critical ] && icon=dialog-error
-    command -v notify-send >/dev/null 2>&1 || return 0
-    notify-send -u "$urgency" -i "$icon" "$title" "$body" 2>/dev/null || true
-}
+# notifier, or no desktop session (ssh, `cc … -p`), it's a silent no-op.
+# urgency: normal (degraded) | critical (sticky). notify_desktop (cc-portable.sh) maps
+# urgency→icon on Linux and routes to osascript on macOS.
+notify() { notify_desktop "$1" "$2" "$3"; }
 
 # ── Clipboard: mediate Wayland instead of handing over the socket ─
 # The host compositor socket used to be bind-mounted into the main container read-write and
@@ -535,6 +658,67 @@ stop_wayland_guard() {
     [ -n "$pid" ] && kill -TERM "-$pid" 2>/dev/null || true
     docker rm -f "$WL_CNAME" >/dev/null 2>&1 || true
     rm -rf "$WL_ROOT" 2>/dev/null || true
+}
+
+# ── Clipboard on macOS: a one-way pbpaste bridge, no socket ───────
+# macOS has no Wayland socket to proxy, and no equivalent to bind in. So instead of a
+# protocol proxy, cc runs a host-side watcher (clipboard-bridge.sh) over a spool dir that
+# is bind-mounted into the container at /cc/clip. The container-side shims (installed by
+# the entrypoint) drop a request file and read back the response; the host answers reads
+# with pbpaste / an osascript PNG extraction, and NEVER calls pbcopy. Writes are refused
+# at the shim, so — exactly like the Wayland guard — reads pass and writes cannot happen.
+# A write attempt leaves a deny marker the bridge turns into a desktop alert.
+start_clipboard_bridge() {
+    is_macos || return 0
+    command -v pbpaste >/dev/null 2>&1 || {
+        echo "ℹ️  clipboard: pbpaste not found — paste from the host is unavailable." >&2
+        return 0
+    }
+    mkdir -p "$CLIP_STATE"
+    chmod 755 "$CLIP_STATE"         # the container traverses this as root before gosu
+    # 200>&- 201>&- is LOAD-BEARING, exactly as for the Wayland notifier and sleep-guard:
+    # the bridge outlives the cc that starts it (it runs for the container's whole life),
+    # and inheriting the project's shared lock on fd 200 would stop the last terminal out
+    # from ever tearing the container down. detach_pgrp backgrounds it in its own group.
+    detach_pgrp "$SCRIPT_DIR/clipboard-bridge.sh" "$CLIP_STATE" "$(basename "$PWD")" 200>&- 201>&-
+    # The pid is a SIBLING of the spool, not inside it: $CLIP_STATE is bind-mounted rw into
+    # the container, so a file there is sandbox-writable. On teardown the host reads this pid
+    # and `kill -TERM -<pid>`s it — a sandbox that could overwrite it (e.g. with 1) would turn
+    # teardown into a host process-group kill. ${CLIP_STATE}.pid lives in the 700 $STATE_DIR,
+    # which is never mounted in.
+    echo $! > "${CLIP_STATE}.pid"
+    disown 2>/dev/null || true
+    echo "📋 clipboard: pbpaste bridge active (read-only from the sandbox)" >&2
+}
+
+add_clipboard_bridge_args() {
+    [ -d "$CLIP_STATE" ] || return 0
+    # /cc-clip, NOT under /cc: entrypoint-fuse.sh does `chmod 700 /cc` to fence the real
+    # project, which would also lock the agent out of the clipboard spool it must reach.
+    ARGS+=(
+        -v "$CLIP_STATE:/cc-clip"
+        -e CC_CLIP_BRIDGE=1
+        # VERIFY (Mac): which reader Claude Code invokes for image paste in a Linux
+        # container. WAYLAND_DISPLAY makes it choose the wl-paste path (shimmed to the
+        # bridge). If the Mac test shows it uses xclip/DISPLAY instead, flip this one line
+        # to `-e DISPLAY=:0`; both shims are installed, so only the trigger changes.
+        -e WAYLAND_DISPLAY=cc-clip
+        -e XDG_RUNTIME_DIR="/run/user/$(id -u)"
+    )
+}
+
+stop_clipboard_bridge() {
+    is_macos || return 0
+    local pid
+    pid="$(cat "${CLIP_STATE}.pid" 2>/dev/null || true)"
+    # Numeric-only, even though the pid file is host-only ($STATE_DIR, never mounted in):
+    # `kill -TERM -<pid>` signals a whole process group, so a non-numeric or empty value
+    # must never reach it.
+    case "$pid" in ''|*[!0-9]*) pid="" ;; esac
+    # Negative pid: the bridge runs in its own process group (detach_pgrp).
+    [ -n "$pid" ] && kill -TERM "-$pid" 2>/dev/null || true
+    rm -f "${CLIP_STATE}.pid" 2>/dev/null || true
+    rm -rf "$CLIP_STATE" 2>/dev/null || true
 }
 
 # ── DNS: follow the host's live resolver, without editing the host ───

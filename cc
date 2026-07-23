@@ -42,12 +42,19 @@ if [ "${1:-}" = "--unlock-shared" ]; then
     shift
 fi
 
+# cc-portable.sh first: it owns all OS branching (CC_OS, the lock/hash/notify
+# shims, preflight) and cc-lib.sh's helpers build on it. shellcheck source=cc-portable.sh
+. "$SCRIPT_DIR/cc-portable.sh" || {
+    echo "❌ cc: cannot load $SCRIPT_DIR/cc-portable.sh — the install is incomplete." >&2
+    exit 1
+}
 # shellcheck source=cc-lib.sh
 . "$SCRIPT_DIR/cc-lib.sh" || {
     echo "❌ cc: cannot load $SCRIPT_DIR/cc-lib.sh — the install is incomplete." >&2
     exit 1
 }
 
+preflight_platform          # darwin: engine/perl/bind-mount checks; linux: no-op
 build_image_if_missing
 check_for_updates
 
@@ -61,7 +68,7 @@ check_for_updates
 #
 # The name must therefore be stable per project. Hash $PWD so two projects with the same
 # basename don't collide.
-PROJ_HASH="$(printf '%s' "$PWD" | sha256sum | cut -c1-8)"
+PROJ_HASH="$(hash8 "$PWD")"
 CNAME="cc-$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | cut -c1-40)-$PROJ_HASH"
 
 # ── Per-project Claude session isolation ─────────────────────
@@ -84,6 +91,14 @@ EPHEMERAL=0
 LOCK_DIR="$CLAUDE_SANDBOX/.locks"
 LOCK_FILE="$LOCK_DIR/$SLUG.lock"
 BOOT_LOCK="$LOCK_DIR/$SLUG.boot.lock"
+
+# Host-only state for the single-container FUSE mode and the macOS clipboard
+# bridge. Kept OUT of $SESSION_DIR (which is bind-mounted rw into the container)
+# for the same reason as the locks: a sandboxed Claude must not be able to edit
+# the patterns the redaction layer is validated against, nor the bridge's spool.
+# The per-container file paths are derived below, next to FUSE_ROOT, so they pick
+# up SCRATCH_SUFFIX (an ephemeral session must not share the real one's state).
+STATE_DIR="$CLAUDE_SANDBOX/.state"
 
 # Suffix for this session's scratch dirs. Empty for the project's shared container; set
 # for an ephemeral one so it can never touch the real one's (see CC_FORCE_NEW_SESSION).
@@ -144,7 +159,7 @@ else
     # while a departing session holds the lock *exclusively* to tear the container down,
     # so we can never attach to a dying container. Never unlinked (see build.lock).
     exec 200>"$LOCK_FILE"
-    flock -w 60 -s 200 || die "timed out waiting for the project lock ($LOCK_FILE)."
+    lock_fd -w 60 -s 200 || die "timed out waiting for the project lock ($LOCK_FILE)."
 fi
 
 # Every launch, not just the first: the seed covers only a brand-new session dir.
@@ -160,9 +175,17 @@ FUSE_CNAME="${CNAME}-fuse"
 FUSE_ROOT="/tmp/cc-fuse.${PROJ_HASH}${SCRATCH_SUFFIX}"
 WL_CNAME="${CNAME}-wl"
 WL_ROOT="/tmp/cc-wl.${PROJ_HASH}${SCRATCH_SUFFIX}"
+# Single-container FUSE + clipboard bridge state (see STATE_DIR above). SCRATCH_SUFFIX is
+# final by here, so an ephemeral session gets its own files and can't disturb the real one.
+PATTERNS_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.patterns"
+CLIP_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.clip"
 FUSE_FAILED=0
+# The redaction interface (see cc-lib.sh) fills these: sidecar mode sets a mount
+# SRC/OPTS for $PWD; single mode leaves SRC empty (the entrypoint mounts the view
+# in-container) and appends its own `docker run` flags to REDACTION_ARGS.
 PROJECT_MOUNT_SRC="$PWD"
 PROJECT_MOUNT_OPTS=""
+REDACTION_ARGS=()
 
 container_running() { [ -n "$(docker ps -q -f "name=^${CNAME}$" 2>/dev/null)" ]; }
 sidecar_running()   { [ -n "$(docker ps -q -f "name=^${FUSE_CNAME}$" 2>/dev/null)" ]; }
@@ -217,46 +240,39 @@ wait_for_container_ready() {
 teardown_container() {
     docker stop -t 5 "$CNAME" >/dev/null 2>&1 || true   # started with --rm; stop removes it
 
-    # Unmount BEFORE removing the sidecar. The other order kills the FUSE server first,
-    # leaving a mounted-but-ENOTCONN mount that `mountpoint -q` reports as "not a
-    # mountpoint" — so the unmount is skipped, the mount is orphaned on *every* exit, and
-    # the next launch of this project dies on the rm below.
-    if ! unmount_fuse "$FUSE_ROOT/mnt"; then
-        die "a .ccignore redaction mount is still mounted at" \
-            "  $FUSE_ROOT/mnt" \
-            "and could not be unmounted. Refusing to delete it: that path is a" \
-            "passthrough view of your project, so removing it while mounted would" \
-            "delete the real files. Clear it by hand, then relaunch:" \
-            "  fusermount3 -u '$FUSE_ROOT/mnt' || sudo umount -l '$FUSE_ROOT/mnt'"
-    fi
-    docker rm -f "$FUSE_CNAME" >/dev/null 2>&1 || true
+    # Redaction teardown is mode-specific (sidecar: unmount + rm the FUSE container +
+    # rm its scratch root, in that order; single: the mount died with the container,
+    # so just drop the host state file). See teardown_redaction in cc-lib.sh.
+    teardown_redaction
 
-    # Clipboard proxy + its host-side notification follower. A plain dir, so none of the
-    # unmount care above applies.
+    # Clipboard mediation + its host-side notification follower. Plain dirs, so none of
+    # the unmount care in the sidecar teardown applies. Both are no-ops in the mode that
+    # didn't start them.
     stop_wayland_guard
+    stop_clipboard_bridge
 
     # The resolv.conf watcher is an in-container process (a detached `docker exec`), so it is
     # killed when the container is removed — nothing to tear down here.
-
-    # `|| true`: never let a failed cleanup kill cc under `set -e` — least of all from the
-    # EXIT trap, where it would also overwrite the session's exit code.
-    rm -rf "$FUSE_ROOT" 2>/dev/null || true
 }
 
 start_container() {
-    start_fuse_sidecar
-    start_wayland_guard   # must precede the mounts below: they bind its socket
+    # Redaction: sidecar (Linux) sets PROJECT_MOUNT_SRC to the redacting mount for
+    # $PWD; single (macOS / CC_SINGLE_CONTAINER=1) leaves it empty and pushes its own
+    # flags onto REDACTION_ARGS — the entrypoint mounts the view in-container.
+    prepare_redaction
+    # Clipboard: a mediated Wayland proxy on Linux, a pbpaste bridge on macOS. Both
+    # must precede the mounts below (they bind the proxy socket / spool dir).
+    if is_macos; then
+        start_clipboard_bridge
+    else
+        start_wayland_guard
+    fi
 
     # --init: PID 1 is `sleep infinity`, which would never reap the zombies left behind by
     # exec'd sessions. Docker's init does.
     ARGS=(
         -d --init --rm
         --name "$CNAME"
-
-        # Project at the same absolute path as on the host, so Claude's path-keyed project
-        # configs resolve. With FUSE active the source is the redacting mount instead, and
-        # rslave propagates its sub-mounts into the container.
-        -v "$PROJECT_MOUNT_SRC:$PWD$PROJECT_MOUNT_OPTS"
 
         # This project's private state: daemon, sessions, jobs, transcripts, history,
         # .claude.json. No other project's container mounts it.
@@ -301,15 +317,31 @@ start_container() {
 
     )
 
-    # Clipboard: the *proxied* Wayland socket only (see add_wayland_args in cc-lib.sh).
-    # Reads pass through, writes are refused — the raw socket would be host code execution
-    # at your next terminal paste.
-    add_wayland_args
+    # Project at the same absolute path as on the host, so Claude's path-keyed project
+    # configs resolve. Sidecar mode points $PWD at the redacting mount (rslave propagates
+    # its sub-mounts in); single mode adds NO bind for $PWD — the in-container entrypoint
+    # mounts the redacted view there itself — and supplies its own flags via REDACTION_ARGS.
+    if [ -n "$PROJECT_MOUNT_SRC" ]; then
+        ARGS+=(-v "$PROJECT_MOUNT_SRC:$PWD$PROJECT_MOUNT_OPTS")
+    fi
+    # `if`, not `[ … ] && ARGS+=`: the codebase's convention for array appends under set -e.
+    if [ "${#REDACTION_ARGS[@]}" -gt 0 ]; then
+        ARGS+=("${REDACTION_ARGS[@]}")
+    fi
+
+    # Clipboard mounts: the mediated Wayland socket on Linux (reads pass, writes refused —
+    # the raw socket would be host code execution at your next terminal paste), or the
+    # pbpaste bridge spool on macOS. Both no-op if their sidecar/bridge didn't come up.
+    if is_macos; then
+        add_clipboard_bridge_args
+    else
+        add_wayland_args
+    fi
 
     # Follow the host's live DNS: mount systemd-resolved's live resolv.conf dir + the watcher
-    # (see add_resolv_sync_args in cc-lib.sh). No-op if the host has no systemd-resolved, in
-    # which case the container keeps Docker's default resolv.conf (frozen), as before.
-    add_resolv_sync_args
+    # (see add_resolv_sync_args in cc-lib.sh). Linux only — on macOS the engine VM already
+    # tracks the host resolver, so there is nothing to sync.
+    is_macos || add_resolv_sync_args
 
     local git_name git_email
     git_name="$(git config --global user.name 2>/dev/null || true)"
@@ -323,12 +355,15 @@ start_container() {
         )
     fi
 
-    # Read-only: both are executed on the *host* later, so a container that could write
-    # them would have host code execution (git hooks at the next commit; Claude hooks in
-    # a future session). The .git/hooks mount is belt-and-braces only — it covers just
-    # this repo's top-level .git, and only if it exists at launch. The FUSE guard is what
-    # actually covers nested repos, submodules, and repos created mid-session.
-    [ -d "$PWD/.git/hooks" ] && ARGS+=(-v "$PWD/.git/hooks:$PWD/.git/hooks:ro")
+    # Read-only: executed on the *host* later, so a container that could write it would
+    # have host code execution (git hooks at the next commit). Belt-and-braces only — it
+    # covers just this repo's top-level .git, and only if it exists at launch; the FUSE
+    # guard is what actually covers nested repos, submodules and mid-session repos.
+    # Sidecar mode only: in single mode $PWD is the in-container FUSE view, so binding the
+    # host .git/hooks over it would shadow the view (and the guard already covers it).
+    if [ "$CC_FUSE_MODE" = sidecar ] && [ -d "$PWD/.git/hooks" ]; then
+        ARGS+=(-v "$PWD/.git/hooks:$PWD/.git/hooks:ro")
+    fi
 
     # Everything here auto-loads in EVERY project's next session, so a write from one
     # sandboxed repo is a cross-project pivot (audit H6). Nested read-only binds over the
@@ -359,26 +394,14 @@ start_container() {
 # The boot lock serialises this section: two terminals launched at the same instant must
 # not both try to `docker run` the same container name.
 exec 201>"$BOOT_LOCK"
-flock -x 201
+lock_fd -x 201
 if container_running; then
-    # Redaction is fixed at container creation: the sidecar reads the rules once. A second
-    # terminal must never silently run under stale — or absent — rules. The sidecar is now
-    # unconditional, so its absence is always an error, whether or not .ccignore exists:
-    # without it there is no host-config guard either.
-    if ! sidecar_running; then
-        die "this project's container was started without the redaction sidecar, so" \
-            "neither .ccignore nor the host-config guard is being enforced in it." \
-            "Refusing to attach — close all cc sessions for this project and relaunch." \
-            "(A container created by an older cc will always land here.)"
-    fi
-    # Only the project's .ccignore can go stale; global.ccignore is mounted read-only
-    # from $SCRIPT_DIR, so the sidecar and this process read the very same file.
-    if ! cmp -s "${PWD}/.ccignore" "$FUSE_ROOT/patterns" 2>/dev/null \
-       && ! { [ ! -f "$PWD/.ccignore" ] && [ ! -s "$FUSE_ROOT/patterns" ]; }; then
-        die ".ccignore changed since this project's container started." \
-            "The running redaction layer still enforces the OLD rules. Refusing to" \
-            "attach — close all cc sessions for this project and relaunch."
-    fi
+    # Redaction is fixed at container creation: the rules are read once, and the
+    # container outlives any one terminal. A second terminal must never silently run
+    # under stale — or absent — rules, so verify_redaction_attach refuses to attach if
+    # the redaction layer is missing or the .ccignore it enforces has since changed.
+    # Both modes (sidecar/single) are checked through the same interface.
+    verify_redaction_attach
     # The read-only mounts over ~/.claude-shared are fixed at container creation, and the
     # container outlives any one terminal — so a second terminal must never silently get the
     # other mode. Same hazard, same shape of refusal, as the stale-.ccignore check above.
@@ -403,9 +426,16 @@ else
     teardown_container    # clear anything a crashed session left behind
     start_container
     wait_for_container_ready
-    start_resolv_sync     # one watcher for the container's lifetime; see cc-lib.sh
+    # One resolv.conf watcher for the container's lifetime (see cc-lib.sh). Linux only:
+    # on macOS the engine VM already tracks the host resolver, so there is nothing to
+    # sync — one info line, and deliberately no desktop notification.
+    if is_macos; then
+        echo "ℹ️  DNS: handled by the Docker engine VM — follows the host resolver." >&2
+    else
+        start_resolv_sync
+    fi
 fi
-flock -u 201
+lock_fd -u 201
 exec 201>&-
 
 # ── Sleep guard (inhibits sleep while Claude is producing output) ──
@@ -433,9 +463,9 @@ cleanup() {
         # container we are about to stop.
         exec 200>&-
         exec 202>"$LOCK_FILE"
-        if flock -n -x 202; then
+        if lock_fd -n -x 202; then
             teardown_container
-            flock -u 202
+            lock_fd -u 202
         fi
         exec 202>&-
     fi
@@ -470,15 +500,30 @@ fi
 # session ever started.
 tput reset 2>/dev/null || true
 
+# Single-container FUSE mode: the container is created with SYS_ADMIN (needed to mount),
+# and `docker exec` gives EVERY session the container's full cap set — it does NOT inherit
+# PID 1's reduced bounding set. So the drop must happen per session, here: enter as root
+# (no --user) and `setpriv` off SYS_ADMIN/SETPCAP (needs CAP_SETPCAP effective, which root
+# has) before `gosu` drops to the agent uid. Sidecar mode's container never had SYS_ADMIN,
+# so it keeps the plain --user entry. USERFLAG is expanded with the set -u / bash-3.2-safe
+# `[@]+` guard because it is empty in single mode.
+INCMD=(/usr/local/bin/docker-entrypoint.sh "${CMD[@]}")
+if [ "$CC_FUSE_MODE" = single ]; then
+    INCMD=(setpriv --bounding-set -sys_admin,-setpcap gosu "$(id -u):$(id -g)" "${INCMD[@]}")
+    USERFLAG=()
+else
+    USERFLAG=(--user "$(id -u):$(id -g)")
+fi
+
 # CC_SESSION_TAG marks every process in this terminal's session: claude, its tools and
 # its subagents all inherit it across fork/exec, so the sleep guard can scope its /proc
 # sample to this session alone. It is set on the *exec*, not the container, so it is
 # per-terminal and works against a container created before this existed.
 docker exec -it \
-    --user "$(id -u):$(id -g)" \
+    ${USERFLAG[@]+"${USERFLAG[@]}"} \
     --workdir "$PWD" \
     -e COLUMNS="$(tput cols 2>/dev/null || echo 120)" \
     -e LINES="$(tput lines 2>/dev/null || echo 40)" \
     -e TERM="${TERM:-xterm-256color}" \
     -e CC_SESSION_TAG="$SESSION_TAG" \
-    "$CNAME" /usr/local/bin/docker-entrypoint.sh "${CMD[@]}"
+    "$CNAME" "${INCMD[@]}"

@@ -28,7 +28,9 @@ RUN apt-get update && apt-get install -y curl \
     # Audio (PulseAudio client for voice mode)
     pulseaudio-utils libpulse0 \
     # System administration
-    gosu procps \
+    # util-linux carries setpriv — the single-container FUSE mode (macOS / Plan H) uses it
+    # to drop CAP_SYS_ADMIN from the bounding set after mounting, before the agent runs.
+    gosu procps util-linux \
     # Clipboard support (Wayland)
     wl-clipboard \
     # Misc utilities
@@ -151,7 +153,12 @@ RUN echo "Installing Claude Code version: ${CLAUDE_VERSION}" && \
 # Copy entrypoint script (after Claude install so edits don't bust the cache)
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY ccignore-fuse.py /usr/local/bin/ccignore-fuse.py
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/ccignore-fuse.py
+# entrypoint-fuse.sh is BAKED (not bind-mounted like the sidecar scripts): it is sourced by
+# the baked docker-entrypoint.sh and runs as root with SYS_ADMIN, so editing it needs a
+# rebuild. Only used by the single-container FUSE mode (macOS / CC_SINGLE_CONTAINER=1).
+COPY entrypoint-fuse.sh /usr/local/bin/entrypoint-fuse.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/ccignore-fuse.py \
+	&& chmod 0644 /usr/local/bin/entrypoint-fuse.sh
 
 ENV SHELL=/bin/bash
 ENV TERM=xterm-256color

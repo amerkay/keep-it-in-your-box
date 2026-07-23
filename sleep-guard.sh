@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Inhibits system sleep while a Claude session in the container is actively producing
-# output; an idle session still lets the machine sleep. When the session goes idle
-# while the lid is already shut, it suspends the machine itself — see the note above
-# suspend_if_lid_shut() for why that has to be proactive.
+# output; an idle session still lets the machine sleep. On Linux, when the session goes
+# idle while the lid is already shut, it also suspends the machine itself — see the note
+# above suspend_if_lid_shut() for why that has to be proactive. On macOS the OS re-evaluates
+# sleep when the inhibiting assertion is released, so no such re-trigger is needed.
 #
 # Activity = the `wchar` counter (bytes written) of the *busiest single process* in this
 # terminal's session, growing. Measured, per 3s poll: idle session 218-374B, mid-turn
@@ -21,7 +22,8 @@
 # aggregation bug, not the choice of signal, also killed an attempt at summing CPU ticks.
 #
 # Only pids present in *both* consecutive samples count: a pid appearing mid-interval has
-# no baseline, so its lifetime total would read as one huge delta.
+# no baseline, so its lifetime total would read as one huge delta. The prev/cur join is an
+# awk pass (not a bash associative array) so this stays bash-3.2/macOS clean.
 #
 # Two non-obvious constraints:
 #   - `docker logs` is useless here: PID 1 is `sleep infinity` and each session runs
@@ -34,8 +36,9 @@
 #   SLEEP_GUARD_GRACE=30        seconds of quiet before releasing the inhibitor
 #   SLEEP_GUARD_MIN_BYTES=1024  bytes per poll, by one process, that count as "active"
 #   SLEEP_GUARD_DEBUG=1         print every sample, to sanity-check the thresholds
-#   SLEEP_GUARD_LID_SUSPEND=1   on going idle with the lid shut, suspend the machine
-#                               (0 disables — e.g. if you run lid-shut on purpose)
+#   SLEEP_GUARD_LID_SUSPEND=1   (LINUX ONLY) on going idle with the lid shut, suspend the
+#                               machine (0 disables — e.g. if you run lid-shut on purpose).
+#                               No-op on macOS, where the OS handles lid-shut sleep itself.
 
 CONTAINER="${1:?Usage: sleep-guard.sh <container-name> <session-tag>}"
 TAG="${2:?Usage: sleep-guard.sh <container-name> <session-tag>}"
@@ -45,9 +48,18 @@ MIN_BYTES="${SLEEP_GUARD_MIN_BYTES:-1024}"
 DEBUG="${SLEEP_GUARD_DEBUG:-0}"
 LID_SUSPEND="${SLEEP_GUARD_LID_SUSPEND:-1}"
 
+# CC_OS / is_macos come from cc-portable.sh (the one place OS branching lives). Fall back to
+# a local probe if it is somehow unavailable, so the guard never hard-fails at startup.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=cc-portable.sh
+. "$SCRIPT_DIR/cc-portable.sh" 2>/dev/null || {
+    case "$(uname -s)" in Darwin) CC_OS=darwin ;; *) CC_OS=linux ;; esac
+    is_macos() { [ "$CC_OS" = darwin ]; }
+}
+
 INHIBIT_PID=""
 LAST_ACTIVE=0
-declare -A PREV_WCHAR=()
+PREV=""             # previous "<pid> <bytes>" sample, one line per pid
 
 release_lock() {
     if [ -n "$INHIBIT_PID" ] && kill -0 "$INHIBIT_PID" 2>/dev/null; then
@@ -57,10 +69,18 @@ release_lock() {
     fi
 }
 
+# Acquire the platform's "don't sleep" assertion. Linux: a systemd-inhibit block held by a
+# background `sleep infinity`. macOS: `caffeinate -is` (inhibit idle + system sleep). Both
+# are released by killing the child (release_lock), and macOS then re-evaluates sleep on its
+# own — which is why macOS needs no proactive-suspend equivalent to the Linux path below.
 acquire_lock() {
     if [ -z "$INHIBIT_PID" ] || ! kill -0 "$INHIBIT_PID" 2>/dev/null; then
-        systemd-inhibit --what=sleep --who="claude-code" \
-            --why="Claude Code is producing output" sleep infinity &
+        if is_macos; then
+            caffeinate -is &
+        else
+            systemd-inhibit --what=sleep --who="claude-code" \
+                --why="Claude Code is producing output" sleep infinity &
+        fi
         INHIBIT_PID=$!
     fi
 }
@@ -78,6 +98,7 @@ acquire_lock() {
 #     last working session on the host has quietened, not while a sibling tab is busy).
 # systemctl suspend still honours any non-cc block inhibitor, and this runs every poll
 # while idle, so a blocked attempt simply retries and succeeds once the blocker clears.
+# LINUX ONLY: on macOS the OS handles lid-shut sleep once caffeinate releases.
 lid_closed() {
     grep -qi 'closed' /proc/acpi/button/lid/*/state 2>/dev/null
 }
@@ -95,6 +116,7 @@ other_cc_working() {   # a different session's guard still holds a claude-code l
     systemd-inhibit --list 2>/dev/null | grep -q 'claude-code'
 }
 suspend_if_lid_shut() {
+    is_macos && return
     [ "$LID_SUSPEND" = 1 ] || return
     lid_closed || return
     external_display && return
@@ -125,12 +147,24 @@ suspend_if_lid_shut() {
 # grep -z makes each NUL-terminated environ entry a line, so ^...$ anchors to a whole
 # entry — an exact match, never a prefix of some other terminal's tag.
 # -H forces the filename prefix even if only one file matches, so the parse can't shift.
+# This runs container-side (GNU grep/sed/xargs) regardless of host OS, via `docker exec`.
 sample_wchar() {
     docker exec --user "$(id -u)" -e CC_GUARD_TAG="$TAG" "$CONTAINER" sh -c '
         grep -lz "^CC_SESSION_TAG=$CC_GUARD_TAG$" /proc/[0-9]*/environ 2>/dev/null \
             | sed "s|/environ$|/io|" \
             | xargs -r grep -H "^wchar:" 2>/dev/null
     ' 2>/dev/null | awk -F'[/:]' '{print $3, $NF + 0}'
+}
+
+# Largest positive wchar delta across pids present in BOTH samples. An awk join over prev
+# (first input) and cur (second) — flat in the number of pids, and no bash-4 associative
+# array, so it runs on stock macOS bash 3.2.
+busiest_delta() {   # $1 = prev sample, $2 = cur sample
+    awk '
+        NR==FNR { if ($1 != "") prev[$1] = $2; next }
+        ($1 in prev) { d = $2 - prev[$1]; if (d > max) max = d }
+        END { print max + 0 }
+    ' <(printf '%s\n' "$1") <(printf '%s\n' "$2")
 }
 
 trap 'release_lock; exit 0' EXIT INT TERM
@@ -144,22 +178,15 @@ docker inspect "$CONTAINER" &>/dev/null || exit 1
 
 while docker inspect "$CONTAINER" &>/dev/null; do
     NOW=$(date +%s)
-    BUSIEST=0
-    declare -A CUR_WCHAR=()
+    CUR="$(sample_wchar)"
+    BUSIEST="$(busiest_delta "$PREV" "$CUR")"
 
-    # A here-string, not a pipe: a pipe would run this loop in a subshell and discard
-    # every array update it makes, so PREV_WCHAR would stay empty forever.
-    while read -r PID BYTES; do
-        [ -z "$PID" ] && continue
-        CUR_WCHAR["$PID"]="$BYTES"
-        PREV="${PREV_WCHAR[$PID]:-}"
-        [ -z "$PREV" ] && continue      # new pid: no baseline, no interval to measure
-        DELTA=$((BYTES - PREV))
-        [ "$DELTA" -gt "$BUSIEST" ] && BUSIEST=$DELTA
-    done <<< "$(sample_wchar)"
-
-    [ "$DEBUG" = 1 ] && \
-        echo "[sleep-guard] busiest process in session +${BUSIEST}B this poll (active if ≥${MIN_BYTES}B, ${#CUR_WCHAR[@]} pids), inhibit=${INHIBIT_PID:-none}" >&2
+    if [ "$DEBUG" = 1 ]; then
+        # awk, not `grep -c . || echo 0`: on an empty sample grep prints 0 AND exits 1, so
+        # the `|| echo 0` fires too and NPIDS becomes a two-line "0\n0".
+        NPIDS="$(printf '%s' "$CUR" | awk 'NF{n++} END{print n+0}')"
+        echo "[sleep-guard] busiest process in session +${BUSIEST}B this poll (active if ≥${MIN_BYTES}B, ${NPIDS} pids), inhibit=${INHIBIT_PID:-none}" >&2
+    fi
 
     # No baseline yet (first poll, or the session has not started) leaves BUSIEST at 0,
     # and LAST_ACTIVE at 0 blocks the release branch — so a fresh guard neither inhibits
@@ -169,15 +196,13 @@ while docker inspect "$CONTAINER" &>/dev/null; do
         LAST_ACTIVE=$NOW
     elif [ "$LAST_ACTIVE" -gt 0 ] && [ $((NOW - LAST_ACTIVE)) -ge "$GRACE" ]; then
         release_lock
-        suspend_if_lid_shut     # honour the lid-close we blocked while the task ran
+        suspend_if_lid_shut     # honour the lid-close we blocked while the task ran (linux)
     fi
 
-    # Replace wholesale, so dead pids age out instead of accumulating forever. An empty
-    # sample (session gone, or docker hiccup) therefore reads as quiet and releases after
-    # GRACE — erring towards letting the machine sleep, never towards pinning it awake.
-    unset PREV_WCHAR; declare -A PREV_WCHAR=()
-    for PID in "${!CUR_WCHAR[@]}"; do PREV_WCHAR["$PID"]="${CUR_WCHAR[$PID]}"; done
-    unset CUR_WCHAR
+    # Carry cur forward as the next baseline. An empty sample (session gone, or docker
+    # hiccup) therefore reads as quiet and releases after GRACE — erring towards letting
+    # the machine sleep, never towards pinning it awake.
+    PREV="$CUR"
 
     sleep "$POLL"
 done
