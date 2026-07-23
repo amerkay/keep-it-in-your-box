@@ -109,6 +109,108 @@ intercepts wherever the request actually goes — so it survives Claude pinning 
 it "**requires TLS termination**" (the proxy must read/rewrite the `Authorization` header), which means
 a CA in the container trust store. Passes all gates; strictly more machinery than C1.
 
+### C3 · Generic authenticating reverse-proxy for third-party MCP servers ★★★★★ — **PICK (header-authed remote MCPs)**
+
+The **same principle as C1's base-URL variant**, applied to remote HTTP MCP servers (DataForSEO is the
+first consumer) rather than the Anthropic token. A quarantined sidecar holds the third-party credential
+and injects it on egress, so the agent container never holds it.
+
+**Mechanism — fixed-upstream reverse proxy, not a forward proxy.** The MCP transport is HTTPS to a
+known endpoint with a static `Authorization` header, so the broker is a reverse proxy hardcoded to
+**one** upstream:
+
+```
+agent container ──http──▶ broker sidecar ──https + Authorization──▶ <one fixed upstream>
+   (no secret)   internal    (holds token)      re-originated TLS
+      bridge
+```
+
+The plugin's `.mcp.json` points `url` at the broker over plain HTTP on an internal bridge **with no auth
+header**; the broker terminates that connection, injects `Authorization`, and makes its own HTTPS call
+upstream. **No TLS MITM, no CA in the container trust store** — C1's property, not C2's cost — available
+here because the credential is a *static header*, not a rotating OAuth token pinned to `api.anthropic.com`.
+
+| Gate | Result |
+|---|---|
+| CAP | ✅ broker is a capless sidecar; agent needs nothing |
+| OS | ✅ plain container→container bridge — Docker Desktop / OrbStack / Colima / Linux identical; no FUSE, no propagation, no Plan-H split |
+| POST / LIVE | n/a (not a filesystem mechanism) |
+
+**Generic, parameterized (decided).** One component, two knobs: `MCP_UPSTREAM` (the fixed upstream
+origin) and `MCP_AUTH` (the header value, read from a host-only file at broker creation). One broker
+instance per authed MCP; DataForSEO sets `MCP_UPSTREAM=https://mcp.dataforseo.com` + a `Basic <token>`
+header. Reusable for any future header-authed remote MCP, which is why it is worth building generic now.
+
+**Where the token lives:**
+
+| Party | Holds the token? |
+|---|---|
+| Agent container (env, files, `/proc`) | **No** — only the broker URL |
+| Broker sidecar (separate namespace) | Yes, in memory/env |
+| Host | Yes, `600` file / keychain, **not** mounted into the agent |
+
+`cc` reads the host-only file and passes it to the **broker's** env at creation, never to the agent
+container. A fully compromised agent can *use* the MCP through the broker but **cannot read the
+credential** — the win holds with egress wide open, same as C1.
+
+**Lifecycle & shape (mirrors existing sidecars).** A bind-mounted `mcp-broker.py` (streaming reverse
+proxy — MCP http transport is streamable/SSE, so **no response buffering**), on a dedicated internal
+bridge joining main + broker, with its own egress to the upstream. Created/torn down with the main
+container under the boot lock, like the Wayland/FUSE sidecars. **Fail-soft** (like the Wayland guard,
+unlike the FUSE sidecar): if the broker can't start, the MCP simply doesn't connect — it is not a
+host-security control, so aborting the launch would be wrong.
+
+**Delivery — the secret-free plugin dissolves the global-vs-secret tension.** With the token out of the
+container, the plugin config is genuinely secret-free (`url` → broker, no header), so it is **safe to
+install shared/global** — there is nothing to propagate. Whether it authenticates in a given project is
+gated by whether `cc` started the broker (opt-in per launch), not by a secret in every container.
+Delivery of that plugin uses the friendly `--unlock-shared` path below.
+
+**Residual risks (named).**
+- **API abuse, not credential theft.** The agent can still *make* upstream calls through the broker
+  (burn quota/spend). Brokering protects the credential, not the account — **use a dedicated,
+  spend-capped key** per upstream.
+- **The broker is trusted code** holding the token — keep it minimal, in-repo, reviewed; same trust
+  class as the other sidecars.
+- **Fixed-upstream is load-bearing.** A forward proxy would be an egress bypass; the reverse proxy only
+  ever reaches its one hardcoded upstream.
+
+### C4 · Secret-in-config detector (host-side, advisory) ★★★☆☆ — **PICK (companion to C3)**
+
+A host-side scan in `cc` at launch — sibling to `validate_shared_settings` — that reads the
+container-visible config about to be mounted and **warns** when a **literal** credential is present,
+recommending migration to the C3 broker. **Advisory, not blocking** (decided): it names the file/field
+and the fix, then continues — consistent with the don't-break-workflows stance, and it is a *detector*
+like the pre-commit git-config audit, not a *preventer* like the FUSE guard.
+
+**Scans (host-side, at launch):** `.mcp.json`, plugin `plugin.json` / `.mcp.json`, `.claude.json`
+`mcpServers` (url/headers/env/args), `settings.json` `env`. **Flags** auth-shaped literals:
+`Authorization: Basic|Bearer <literal>`; `*_API_KEY` / `*_TOKEN` / `*_SECRET` set to a literal value;
+high-entropy / base64 blobs in those fields.
+
+| Gate | Result |
+|---|---|
+| CAP / OS | ✅ host-side scan; no container change, portable across engines |
+| POST / LIVE | n/a |
+
+**Known blind spot (documented, not solved).** A `${VAR}` reference is treated as clean — but
+"reference ≠ safe": it is safe only if it resolves to the **broker**, and it could resolve to an
+in-container forwarded secret (the reverted `CC_FORWARD_ENV` + `${DATAFORSEO_B64}` did exactly that).
+The detector cannot infer resolution from config text alone, so it under-warns on
+`${VAR}`-to-forwarded-secret. Accepted: the loud case — a literal token pasted into config — is the
+common one; the reference case is caught by the reviewer and by C3 being the paved path. **Not a
+boundary** — it complements, not replaces, the agent-level secrets hard-stop and `validate_shared_settings`.
+
+### Shared-plugin install UX — friendly `--unlock-shared` guidance
+
+**Per-project** `/plugin install` already works (lands in `$CLAUDE_CONFIG_DIR` via the farm). The gap is
+the **shared/all-projects** install, which writes to the `:ro` `~/.claude-shared/plugins/` and returns a
+raw `EACCES`. Intercept that specific failure and print the **existing** unlock-shared block (already in
+CLAUDE.md's EACCES message) — "to install a plugin for EVERY project, close every session and relaunch
+with `cc --unlock-shared`" — so the flag is discoverable rather than folklore. No new command surface
+(decided: friendly error, not a `cc plugin add` subcommand); per-project install stays silent and
+working. This is the delivery on-ramp for C3's secret-free broker plugin.
+
 ### Rejected baseline
 
 Mounting the live `.credentials.json` into the agent (today's behaviour) is the H3/H4 risk itself, not
@@ -351,7 +453,10 @@ sake.
 
 1. **C1 — credential broker** *(new work; biggest risk; capless; no Portmaster dependency)*.
    Ship the base-URL broker with host-side login, broker-owned refresh, and a valid-looking placeholder;
-   keep C2 (sentinel + TLS-MITM) ready if Gate A fails.
+   keep C2 (sentinel + TLS-MITM) ready if Gate A fails. **Third-party MCP creds ride the same
+   principle — C3** (generic authenticating reverse-proxy sidecar; DataForSEO first), with **C4**
+   (host-side, advisory secret-in-config detector) nudging config off the in-container-secret
+   anti-pattern and the friendly `--unlock-shared` install path delivering the secret-free plugin.
 2. **R1 — the FUSE sidecar on Linux** *(exists, unchanged)*. **macOS is the open A/H/U decision**
    (recommendation **H**: hardened single-container FUSE, no Colima; Linux keeps the sidecar). Add R7
    hooks on top as cheap defence-in-depth.
@@ -446,7 +551,7 @@ docker rm -f probe-up ; docker network rm cc-probe
 
 # GATE (K2-only) — can gVisor service /dev/fuse? Run only if pursuing gVisor after R1.
 docker run --rm --runtime=runsc --cap-add=SYS_ADMIN --device /dev/fuse \
-  claude-code-sandbox sh -c 'ls -l /dev/fuse && python3 -c "import fuse; print(\"ok\")"'
+  keep-it-in-your-box sh -c 'ls -l /dev/fuse && python3 -c "import fuse; print(\"ok\")"'
 ```
 
 ---
@@ -468,6 +573,10 @@ Settled decisions are recorded at the top (the four gates). Remaining:
   `teardown_redaction`). See CLAUDE.md § "macOS support (Plan H)". Remaining before flipping the
   README's "macOS ❌" rows: the on-hardware VERIFY items (clipboard binary choice, virtiofs
   ownership) — see that section.
+- [x] **C3/C4 shape** — RESOLVED. Generic parameterized reverse-proxy broker (not DFS-specific); C4 detector is host-side-at-launch and advisory (warn + recommend, never blocks); shared-plugin install surfaces a friendly `--unlock-shared` error (no new subcommand).
+- [ ] **C3 transport** — does the MCP `http` client accept a plain-HTTP `url` to the broker on the internal bridge, or require `https`? (VERIFY; if TLS-required, terminate at the broker with a cert trusted only inside the container.)
+- [ ] **C3 streaming** — confirm SSE / streamable-HTTP passthrough through the reverse proxy is unbuffered and survives long-lived connections.
+- [ ] **C4 heuristic** — entropy / base64 false-positive rate on real MCP configs; tune before enabling so it never cries wolf on a `${VAR}` reference.
 - [ ] **Gate A** — if Claude Code ignores `ANTHROPIC_BASE_URL` for OAuth, commit to C2 (sentinel + CA).
 - [ ] **Gate D** — does Portmaster permit container→container:proxy, or does E1 need a different path?
 - [ ] `WebFetch` — server-side (survives an allowlist) or client-side (breaks under E1)?
