@@ -621,6 +621,7 @@ fi
 # its subagents all inherit it across fork/exec, so the sleep guard can scope its /proc
 # sample to this session alone. It is set on the *exec*, not the container, so it is
 # per-terminal and works against a container created before this existed.
+echo >&2   # blank line separating cc's startup diagnostics from the app's own output
 docker exec -it \
     ${USERFLAG[@]+"${USERFLAG[@]}"} \
     --workdir "$PWD" \
