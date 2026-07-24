@@ -5,6 +5,24 @@ that reference this.
 
 `cc-broker.py`, host-side sidecar (`cap-drop=ALL`, no devices) on a user-defined bridge (alias `cc-broker`). The agent gets `ANTHROPIC_BASE_URL` → broker, a **placeholder** `CLAUDE_CODE_OAUTH_TOKEN`, and a **synthetic** `.credentials.json` shadowing the real one (all three needed: the env var is what Claude authenticates with; the shadow stops the real file being read). The broker strips the placeholder, injects the real token, re-originates TLS to `api.anthropic.com` — no MITM, no CA in the agent; the token never enters the sandbox (fixes audit H3/H4 for the brokered path). **Opt-in** (`broker = on` in `~/.keep-it-in-your-box/config`, or `CC_BROKER=1`); off = real credential mounted as before. **Fail-hard on create** (it's the agent's auth), fail-safe mid-session (never re-mounts the real token). Wired via `start_broker`/`add_broker_env_args`/`connect_broker_network`/`verify_broker_attach`/`stop_broker`; bind-mounted, so edits land next launch while the running sidecar keeps old code.
 
+## The "Claude API" banner is transport, not metered billing
+
+Claude Code prints your plan name (`Claude Max`/`Claude Pro`) only when it runs its own `/login`
+flow and reads the plan back from Anthropic. Through the broker the agent just sees
+`ANTHROPIC_BASE_URL` pointed at a raw endpoint, so the startup banner falls back to the generic
+**"Claude API"** descriptor. That is a statement about *how the request leaves*, not about how it's
+billed — a brokered session still says "Claude API" even though nothing changed about your plan.
+
+Billing is decided by the **token** the broker injects, not the label. The Anthropic row mints
+`sk-ant-oat01-…` (from `cc --broker-login`, which wraps `claude setup-token`) and injects
+`Authorization: Bearer …` + `anthropic-beta: oauth-2025-04-20` — that `oat01` + OAuth-beta shape
+*is* subscription (Pro/Max) auth, so usage counts against your plan. Metered per-token billing
+would instead be an `sk-ant-api…` console key sent as `x-api-key` with no OAuth beta header; a
+`setup-token` login never configures that. So: same subscription, just routed through the broker,
+which is why the banner reads "Claude API".
+
+![Claude Code startup banner reading "Opus 4.8 (1M context) with high effort · Claude API" while brokered onto a Pro/Max subscription](../../assets/readme/claude-api-banner.png)
+
 - **The brokered credential is STATIC and the broker has no write path. DO NOT reintroduce a refresh loop, and never broker `.credentials.json`.** The secret is a long-lived token from `cc --broker-login` (wraps `claude setup-token`) at `~/.keep-it-in-your-box/claude-token`, mounted `:ro`. An earlier version brokered the live credentials file on a 30s refresh timer and **logged the account out** with a desktop page every 30s. Structural, not fixable: Anthropic subscription refresh tokens are **single-use and rotating** (first refresher invalidates the family for the host CLI and every other sidecar — upstream issues #56339/#54443/#60503); the rotated token wrote back to a single-file bind mount where `rename(2)` fails EBUSY, so a torn in-place write killed the family permanently; and `threading.Lock` doesn't serialise across per-project broker processes. Guarded three ways: `broker-test.py` asserts no refresh functions, `mint_placeholder` takes no real-credential path + serves with a `0400` token, and `check.sh` asserts `.credentials.json` is never bind-mounted and the token mount carries `:ro`. The rule holds for **every** provider — Codex/Gemini subscription OAuth rotates too; broker a *key*, not the OAuth.
 - **Dual-homing — do not drop `connect_broker_network`.** The main container stays on the default bridge + `host.docker.internal` (host dev servers, LAN) *and* joins the broker net.
 - **Only the LLMs (`claude`/`codex`/`gemini`) are built into `PROVIDERS`; no MCP is hardcoded.** `PROVIDERS` is the single source of truth (bash reads it via `--host-config`/`--list-providers`). Users broker any MCP via partial dicts in `~/.keep-it-in-your-box/providers.d/*.json` (`_finalize_provider` fills defaults, `_merge_user_providers` folds them in via `CC_PROVIDERS_DIR`, mounted `:ro`). LLM built-ins are **not overridable** (a poisoned def can't redirect the Claude token). User ports ≥8100; LLM band 8080–8082. `examples/providers/{dataforseo,gsc}.json` are copy-in examples, not rows.

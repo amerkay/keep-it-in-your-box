@@ -161,6 +161,11 @@ failed too.
 
   The brokered credential is deliberately a **static** long-lived token, never `~/.claude-shared/.credentials.json` — Anthropic's subscription refresh tokens are single-use and rotate, so a second process refreshing them logs you out of every other session. Egress itself is still open: a default-deny allowlist conflicts with the sandbox's whole purpose (building untrusted repos that fetch from arbitrary registries).
 
+  With the broker on, Claude Code's banner reads **"Claude API"** — that's the custom base URL, *not* metered billing. A `setup-token` credential is subscription OAuth, so usage still counts against your Pro/Max plan ([why](docs/design-notes/credential-broker.md#the-claude-api-banner-is-transport-not-metered-billing)).
+
+  <img src="assets/readme/claude-api-banner.png" width="560" alt="Claude Code startup banner reading 'Opus 4.8 (1M context) with high effort · Claude API' while brokered onto a Pro/Max subscription">
+
+
 - **The same broker holds your *other* secrets — a Codex key, and any MCP's token.** The broker isn't limited to a fixed list: it brokers **any** MCP, whether or not we've heard of it. **The easiest path is the one you'd do anyway: take a service's own install line and swap `claude`→`cc`.** A vendor tells you to run `claude mcp add --header "Authorization: Bearer <token>" --transport http foo <url>`; change the first word to `cc` and cc **intercepts it host-side, before anything reaches the box** — peeling the token off, storing it host-only (mode 600), and wiring a header-free broker route. The secret never enters the sandbox; you don't need to learn a new command (this is exactly why `cc` is aliased to `kib claude` — swapping `claude`→`cc` is lossless):
 
   ```bash
