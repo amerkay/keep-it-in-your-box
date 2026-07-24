@@ -404,6 +404,50 @@ else
     skip "credential broker" "not enabled in this container (set 'broker = on' or CC_BROKER=1)"
 fi
 
+section "Brokered MCPs (generic credential broker — no MCP secret in the sandbox)"
+
+# When an MCP is brokered, cc writes a header-free broker URL into this session's .claude.json
+# and marks it "_ccBroker". The credential (e.g. a DataForSEO Basic blob or a GSC service
+# account) lives ONLY in the broker / hosted-MCP sidecar. Assert the in-container invariant:
+# every brokered entry targets the broker net and carries NO auth header, and the host token
+# dir is absent. NON-DESTRUCTIVE — reads config, never a real secret. Skips when none exist.
+# (The host-side preventer that keeps the secret out in the first place — intercept_mcp_add,
+# catching a pasted `cc claude mcp add --header …` before the docker exec — is unit-tested in
+# tests/check.sh; it can't run from inside the sandbox.)
+_cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.claude.json"
+_brokered="$(python3 - "$_cfg" <<'PY' 2>/dev/null
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+for name, e in (d.get("mcpServers") or {}).items():
+    if isinstance(e, dict) and e.get("_ccBroker"):
+        print("%s\t%s\t%s" % (name, e.get("url", ""), "header" if e.get("headers") else "nohdr"))
+PY
+)"
+if [ -n "$_brokered" ]; then
+    while IFS="$(printf '\t')" read -r name url hdr; do
+        [ -n "$name" ] || continue
+        case "$url" in
+            https://*|*dataforseo.com*|*googleapis*|*.com/*|*.io/*|*.ai/*)
+                fail "brokered MCP '$name' must not target a real upstream" "url=$url — the secret would ride the agent's request" ;;
+            http://cc-broker:*|http://*:*)
+                pass "brokered MCP '$name' targets the broker net, not the upstream ($url)" ;;
+            *)  fail "brokered MCP '$name' has an unexpected url" "url=$url" ;;
+        esac
+        is "brokered MCP '$name' carries no inline auth header (broker injects it)" "nohdr" "$hdr"
+    done <<EOF
+$_brokered
+EOF
+    # The host credential store is never bind-mounted into the agent — only the broker sidecar
+    # sees the token. (mount point is $HOME/.keep-it-in-your-box on the host; absent here.)
+    deny "the host credential dir ~/.keep-it-in-your-box is absent from the agent container" \
+        test -e "$HOME/.keep-it-in-your-box"
+else
+    skip "brokered MCPs" "none configured in this container (cc --login <mcp> to add one)"
+fi
+
 # ═════════════════════════════════════════════════════════════════
 printf '\n%s────────────────────────────────────────%s\n' "$D" "$N"
 printf '%s%d passed%s' "$G" "$PASSED" "$N"

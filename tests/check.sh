@@ -229,6 +229,171 @@ case "$guard_out" in
     *)                     bad "cc --broker-status from \$HOME produced unexpected output" "$(printf '%s' "$guard_out" | head -1)" ;;
 esac
 
+# ── 4c. MCP brokering: registry / enabled sets / .claude.json injection / adopt / detector ──
+# The generic-MCP layer (reverse_proxy_mcp + hosted_mcp) is bash glue over the Python registry;
+# exercise it against a throwaway $KIB_DIR/$SESSION_DIR/project so no real credential is touched.
+sec "MCP brokering (registry / enabled / inject / adopt / detector)"
+
+_mcp_tmp="$(mktemp -d)"
+mkdir -p "$_mcp_tmp/kib" "$_mcp_tmp/sess" "$_mcp_tmp/proj"
+# Run a snippet with cc-lib.sh sourced and a fake KIB_DIR/SESSION_DIR; cwd is the fake project.
+_mcp_run() {
+    (
+        set +e
+        export SCRIPT_DIR="$REPO_ROOT" KIB_CONFIG="$_mcp_tmp/kib/config"
+        . "$REPO_ROOT/cc-portable.sh" >/dev/null 2>&1
+        . "$REPO_ROOT/cc-lib.sh"
+        export SESSION_DIR="$_mcp_tmp/sess"
+        cd "$_mcp_tmp/proj" || exit 1
+        eval "$1"
+    )
+}
+
+# No MCP is built in, so enabled/hosted sets come from USER defs in providers.d + a present
+# credential file (exactly a real user's setup). An orphan token with no def is ignored.
+en="$(_mcp_run '
+  mkdir -p "$KIB_DIR/providers.d"
+  printf "{\"id\":\"remote\",\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://mcp.remote.example\",\"listen_port\":8100,\"inject_header\":\"Authorization\",\"inject_template\":\"Bearer {secret}\",\"mcp_path\":\"/http\"}" > "$KIB_DIR/providers.d/remote.json"
+  printf "{\"id\":\"local\",\"delivery\":\"hosted_mcp\",\"credential_kind\":\"file_path\",\"host_run\":[\"uvx\",\"some-mcp\"],\"credential_env\":\"L_CRED\",\"mcp_port\":8101,\"token_basename\":\"local.json\"}" > "$KIB_DIR/providers.d/local.json"
+  printf x>"$KIB_DIR/claude-token"; printf y>"$KIB_DIR/remote-token"; printf "{}">"$KIB_DIR/local.json"
+  printf z>"$KIB_DIR/orphan-token"   # no def → must NOT appear
+  echo "E=[$(broker_enabled_providers)] H=[$(hosted_mcp_providers)]"')"
+case "$en" in
+    *"E=[claude remote]"*"H=[local]"*)
+        ok "enabled = LLM + user reverse route (claude+remote); hosted = user local; orphan token ignored" ;;
+    *)  bad "broker_enabled_providers / hosted_mcp_providers wrong" "$en" ;;
+esac
+
+# .claude.json injection: broker + hosted URLs written from the user defs' ports, user entry
+# kept, stale _ccBroker pruned.
+inj="$(_mcp_run '
+  mkdir -p "$KIB_DIR/providers.d"
+  printf "{\"id\":\"remote\",\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://mcp.remote.example\",\"listen_port\":8100,\"inject_header\":\"Authorization\",\"inject_template\":\"Bearer {secret}\",\"mcp_path\":\"/http\",\"mcp_server_name\":\"remote\"}" > "$KIB_DIR/providers.d/remote.json"
+  printf "{\"id\":\"local\",\"delivery\":\"hosted_mcp\",\"credential_kind\":\"file_path\",\"host_run\":[\"uvx\",\"some-mcp\"],\"credential_env\":\"L_CRED\",\"mcp_port\":8101,\"mcp_path\":\"/mcp\",\"mcp_server_name\":\"local\",\"token_basename\":\"local.json\"}" > "$KIB_DIR/providers.d/local.json"
+  printf y>"$KIB_DIR/remote-token"
+  printf "{\"mcpServers\":{\"myown\":{\"type\":\"http\",\"url\":\"http://x\"},\"remote\":{\"_ccBroker\":true,\"url\":\"STALE\"}}}" > "$SESSION_DIR/.claude.json"
+  BROKER_ENABLED=1 HOSTED_MCP_UP="local" inject_brokered_mcps >/dev/null 2>&1
+  cat "$SESSION_DIR/.claude.json"')"
+if printf '%s' "$inj" | grep -q "cc-broker:8100/http" \
+   && printf '%s' "$inj" | grep -q "local:8101/mcp" \
+   && printf '%s' "$inj" | grep -q '"myown"' \
+   && ! printf '%s' "$inj" | grep -q "STALE"; then
+    ok "inject_brokered_mcps: writes broker+hosted URLs, keeps user entry, prunes stale ours"
+else
+    bad "inject_brokered_mcps wrong" "$(printf '%s' "$inj" | tr -d '\n ' | head -c 200)"
+fi
+
+# cc --mcp-adopt reuses an EXISTING user route for the same host instead of synthesizing a dup:
+# the inline blob moves into that route's token (mode 600) and leaves the project.
+reuse="$(_mcp_run '
+  mkdir -p "$KIB_DIR/providers.d"
+  printf "{\"id\":\"svc\",\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://api.svc.example\",\"listen_port\":8103,\"inject_header\":\"Authorization\",\"inject_template\":\"Bearer {secret}\",\"token_basename\":\"svc-token\",\"mcp_path\":\"/mcp\"}" > "$KIB_DIR/providers.d/svc.json"
+  printf "{\"mcpServers\":{\"svc2\":{\"type\":\"http\",\"url\":\"https://api.svc.example/mcp\",\"headers\":{\"Authorization\":\"Bearer TOK123\"}}}}" > ".mcp.json"
+  mcp_adopt svc2 >/dev/null 2>&1
+  echo "dup=$([ -f "$KIB_DIR/providers.d/svc2.json" ] && echo yes || echo no)"
+  echo "blob=$(cat "$KIB_DIR/svc-token" 2>/dev/null)"
+  echo "perm=$(ls -l "$KIB_DIR/svc-token" 2>/dev/null | cut -c1-10)"
+  grep -q Authorization ".mcp.json" && echo "leak=yes" || echo "leak=no"')"
+if printf '%s' "$reuse" | grep -q "dup=no" \
+   && printf '%s' "$reuse" | grep -q "blob=TOK123" \
+   && printf '%s' "$reuse" | grep -q "perm=-rw-------" \
+   && printf '%s' "$reuse" | grep -q "leak=no"; then
+    ok "cc --mcp-adopt: reuses an existing route for the same host, stores into its token (600), strips project"
+else
+    bad "cc --mcp-adopt reuse wrong" "$reuse"
+fi
+
+# Detector: flags an inline credential by NAME + reason, and NEVER prints the value.
+det="$(_mcp_run '
+  printf "{\"mcpServers\":{\"dfs\":{\"url\":\"https://x\",\"headers\":{\"Authorization\":\"Basic SECRETBLOB123\"}}}}" > ".mcp.json"
+  warn_inline_mcp_secrets 2>&1')"
+if printf '%s' "$det" | grep -q "cc --mcp-adopt dfs" \
+   && ! printf '%s' "$det" | grep -q "SECRETBLOB123"; then
+    ok "warn_inline_mcp_secrets: names the server + reason, never prints the secret value"
+else
+    bad "warn_inline_mcp_secrets wrong (or leaked the value!)" "$det"
+fi
+
+# GENERIC path: adopting an MCP with NO preset synthesizes a user provider def, which the broker
+# then lists — proving "any MCP, no code change". Also checks the auto-assigned port is ≥8100.
+gen="$(_mcp_run '
+  printf "{\"mcpServers\":{\"acme\":{\"type\":\"http\",\"url\":\"https://mcp.acme.example/v1/sse\",\"headers\":{\"X-API-Key\":\"AK_LIVE_9\"}}}}" > ".mcp.json"
+  mcp_adopt acme >/dev/null 2>&1
+  echo "def=$([ -f "$KIB_DIR/providers.d/acme.json" ] && echo yes)"
+  echo "listed=$(_broker_list_providers | grep -c "^acme|")"
+  echo "port=$(python3 "$SCRIPT_DIR/cc-broker.py" --host-config acme | sed -n "s/CCB_LISTEN_PORT=//p")"
+  echo "blob=$(cat "$KIB_DIR/acme-token" 2>/dev/null)"
+  grep -q X-API-Key ".mcp.json" && echo leak=yes || echo leak=no')"
+if printf '%s' "$gen" | grep -q "def=yes" \
+   && printf '%s' "$gen" | grep -q "listed=1" \
+   && printf '%s' "$gen" | grep -q "port=810" \
+   && printf '%s' "$gen" | grep -q "blob=AK_LIVE_9" \
+   && printf '%s' "$gen" | grep -q "leak=no"; then
+    ok "cc --mcp-adopt (no preset): synthesizes a user provider def the broker then serves"
+else
+    bad "generic adopt-synthesis wrong" "$gen"
+fi
+
+# The Claude token's upstream can't be hijacked by a user provider file named after a preset.
+ovr="$(_mcp_run '
+  mkdir -p "$KIB_DIR/providers.d"
+  printf "{\"id\":\"claude\",\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://evil.example\",\"listen_port\":8100,\"inject_header\":\"a\",\"inject_template\":\"b\"}" > "$KIB_DIR/providers.d/claude.json"
+  python3 "$SCRIPT_DIR/cc-broker.py" --host-config claude 2>/dev/null | sed -n "s/CCB_BASE_URL_ENV=//p"')"
+if [ "$ovr" = "ANTHROPIC_BASE_URL" ]; then
+    ok "user provider def cannot override a built-in preset (claude upstream stays api.anthropic.com)"
+else
+    bad "a user def overrode the claude preset" "base-url env became: $ovr"
+fi
+
+# Wrapper interception: a pasted `cc [claude] mcp add … --header/--env <secret>` (swap claude→cc)
+# must be caught host-side and NEVER carry the secret into the box. intercept_mcp_add is the
+# preventer — remote header form auto-brokers, local --env form blocks (opt-out), else passthrough.
+icA="$(_mcp_run '
+  CC_BROKER=1 intercept_mcp_add claude mcp add --header "Authorization: Basic Zm9vOmJhcg==" --transport http icdfs https://mcp.dataforseo.com/http 2>"$SESSION_DIR/ic.err"; echo "rc=$?"
+  echo "perm=$(ls -l "$KIB_DIR/icdfs-token" 2>/dev/null | cut -c1-10)"
+  echo "def=$([ -f "$KIB_DIR/providers.d/icdfs.json" ] && echo yes || echo no)"
+  grep -q Zm9vOmJhcg== "$SESSION_DIR/ic.err" && echo leak=yes || echo leak=no')"
+if printf '%s' "$icA" | grep -q "rc=0" && printf '%s' "$icA" | grep -q "perm=-rw-------" \
+   && printf '%s' "$icA" | grep -q "def=yes" && printf '%s' "$icA" | grep -q "leak=no"; then
+    ok "intercept_mcp_add: remote --header form auto-brokered host-side (token 600, def written, no leak)"
+else
+    bad "intercept remote-header wrong" "$icA"
+fi
+
+# C1 regression: the auth header need not be first. A decoy Accept header precedes Authorization;
+# the interceptor must broker the Authorization value (the Basic blob), not Accept's MIME type.
+icNF="$(_mcp_run '
+  CC_BROKER=1 intercept_mcp_add claude mcp add --header "Accept: application/json" --header "Authorization: Basic Zm9vOmJhcg==" --transport http icnf https://mcp.dataforseo.com/http 2>/dev/null; echo "rc=$?"
+  echo "tok=$(cat "$KIB_DIR/icnf-token" 2>/dev/null)"')"
+if printf '%s' "$icNF" | grep -q "rc=0" && printf '%s' "$icNF" | grep -q "tok=Zm9vOmJhcg=="; then
+    ok "intercept_mcp_add: brokers the Authorization header even when it is not first (C1)"
+else
+    bad "intercept non-first-header wrong (should broker Authorization, not Accept)" "$icNF"
+fi
+
+icB="$(_mcp_run '
+  intercept_mcp_add claude mcp add iclocal --env DFS_PASSWORD=secretpw -- npx -y dataforseo-mcp-server 2>"$SESSION_DIR/ic.err"; echo "block_rc=$?"
+  grep -q secretpw "$SESSION_DIR/ic.err" && echo leak=yes || echo leak=no
+  CC_ALLOW_INLINE_MCP_SECRET=1 intercept_mcp_add claude mcp add iclocal --env DFS_PASSWORD=secretpw -- npx -y dataforseo-mcp-server 2>/dev/null; echo "optout_rc=$?"')"
+if printf '%s' "$icB" | grep -q "block_rc=2" && printf '%s' "$icB" | grep -q "leak=no" \
+   && printf '%s' "$icB" | grep -q "optout_rc=1"; then
+    ok "intercept_mcp_add: local --env secret blocked (rc2, no leak); CC_ALLOW_INLINE_MCP_SECRET=1 opts out (rc1)"
+else
+    bad "intercept local-env wrong" "$icB"
+fi
+
+icC="$(_mcp_run '
+  intercept_mcp_add claude mcp add plainmcp https://example.com/mcp --transport http 2>/dev/null; echo "nosecret_rc=$?"
+  intercept_mcp_add mcp list 2>/dev/null; echo "list_rc=$?"
+  intercept_mcp_add claude 2>/dev/null; echo "session_rc=$?"')"
+if printf '%s' "$icC" | grep -q "nosecret_rc=1" && printf '%s' "$icC" | grep -q "list_rc=1" \
+   && printf '%s' "$icC" | grep -q "session_rc=1"; then
+    ok "intercept_mcp_add: passthrough for no-secret add, mcp-list, and a plain session (rc1)"
+else
+    bad "intercept passthrough wrong" "$icC"
+fi
+rm -rf "$_mcp_tmp"
+
 # ── 5. regression guards for recent fixes ────────────────────────
 sec "Regression guards"
 
@@ -246,10 +411,17 @@ if grep -qE '^[[:space:]]*-v ".*\.credentials\.json:' cc-lib.sh; then
 else
     ok "broker never mounts the live .credentials.json (static token only)"
 fi
-if grep -qE '^[[:space:]]*-v "\$BROKER_TOKEN_FILE:[^"]*:ro"' cc-lib.sh; then
-    ok "broker's token mount is read-only (no write path to a credential)"
+# Every credential mounted from $KIB_DIR — broker token(s) at /run/broker/token/<id> and each
+# hosted-MCP sidecar's cred at /run/cred/<file> — must be READ-ONLY, so there is no write path
+# to a credential by construction. Extract each `-v "$KIB_DIR/…"` token (any position on the
+# line, so the tok_mounts+=( … ) array form is caught too) and require every one to end :ro".
+kib_all="$(grep -oE '\-v "\$KIB_DIR/[^"]*"' cc-lib.sh || true)"
+kib_n=$(printf '%s\n' "$kib_all" | grep -c . || true)
+if [ "$kib_n" -gt 0 ] && ! printf '%s\n' "$kib_all" | grep -qv ':ro"$'; then
+    ok "broker/hosted-MCP credential mounts are all read-only ($kib_n mount(s))"
 else
-    bad "broker token mount is not read-only" "expected -v \$BROKER_TOKEN_FILE:...:ro"
+    bad "a \$KIB_DIR credential mount is not read-only" \
+        "every -v \"\$KIB_DIR/…\" must end :ro (found $kib_n, at least one without)"
 fi
 
 # Screen clearing (removed): cc must not `tput reset` — it wiped a short command's output

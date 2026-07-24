@@ -55,6 +55,7 @@ import argparse
 import http.client
 import json
 import os
+import re
 import ssl
 import sys
 import threading
@@ -84,6 +85,7 @@ def _fake(prefix=""):
 PROVIDERS = {
     "claude": {
         "delivery": "base_url_env",
+        "credential_kind": "paste_token",   # a token the user pastes (vs a file path)
         "agent_base_url_env": "ANTHROPIC_BASE_URL",
         # The agent's auth env var, set to a PLACEHOLDER. CLAUDE_CODE_OAUTH_TOKEN takes
         # precedence over .credentials.json, so the agent authenticates through the broker
@@ -137,6 +139,7 @@ PROVIDERS = {
     # ChatGPT/Google OAuth credential — those rotate exactly like Anthropic's.
     "codex": {
         "delivery": "base_url_env",
+        "credential_kind": "paste_token",
         "agent_base_url_env": "OPENAI_BASE_URL",
         "agent_token_env": "OPENAI_API_KEY",
         "token_prefix": "sk-",
@@ -153,6 +156,7 @@ PROVIDERS = {
     },
     "gemini": {
         "delivery": "base_url_env",
+        "credential_kind": "paste_token",
         "agent_base_url_env": "GOOGLE_GEMINI_BASE_URL",
         "agent_token_env": "GEMINI_API_KEY",
         "token_prefix": "",
@@ -167,7 +171,95 @@ PROVIDERS = {
         "placeholder_fake_pointers": [],
         "probe": {"path": "/v1beta/models", "method": "GET", "headers": {}, "body": None},
     },
+
+    # ── No MCP routes are built in ───────────────────────────────────────────────
+    # Only the LLMs Claude Code natively speaks (above) are hardcoded. Every MCP — DataForSEO,
+    # mcp-gsc, or a service we've never heard of — is USER-DEFINED, added without touching this
+    # file (see below). Two worked examples ship in examples/providers/ ready to copy in.
 }
+
+# ── User-defined providers: broker ANY MCP, no code change ───────────────────
+# The only built-ins are the LLM rows above. A user brokers ANY MCP by dropping a
+# provider-definition JSON in ~/.keep-it-in-your-box/providers.d/ — written by `cc --add-mcp`,
+# synthesized by `cc --mcp-adopt` from an inline `claude mcp add --header …`, or copied from
+# examples/providers/{dataforseo,gsc}.json. cc points CC_PROVIDERS_DIR at that dir (host-side,
+# and mounted read-only into the broker sidecar), and _merge_user_providers() folds them onto
+# PROVIDERS so list/host_config/serve/match treat a user route exactly like a built-in. A
+# definition is a partial provider dict; _finalize fills the rest. The LLM built-ins are NOT
+# overridable (a user file named after one is ignored) so a poisoned file can't redirect the
+# Claude token's upstream.
+#
+# Two delivery modes cover every MCP:
+#   reverse_proxy_mcp — a REMOTE MCP with a STATIC auth header to a fixed upstream. Brokered
+#     exactly like an LLM (inject header, re-originate TLS, no CA, secret never in the sandbox).
+#     The agent's .claude.json gets `url: http://cc-broker:<port><mcp_path>` with NO header.
+#     (Example: DataForSEO, Basic auth.)
+#   hosted_mcp — a LOCAL / client-signed MCP (e.g. a Google service-account JSON signed
+#     client-side) that CANNOT be header-brokered. The MCP SERVER runs in its own sidecar
+#     (start_hosted_mcp) holding the credential file; the broker never serves it (serve() skips
+#     hosted_mcp). The agent reaches it over the broker network at the alias. (Example: mcp-gsc.)
+_REQUIRED = {
+    "reverse_proxy_mcp": ("upstream_origin", "listen_port", "inject_header", "inject_template"),
+    "hosted_mcp": ("host_run", "mcp_port"),
+}
+
+
+def _finalize_provider(pid, p):
+    """Fill fields a user file may omit so the rest of the module treats it like a built-in."""
+    p.setdefault("credential_kind", "paste_token")
+    p.setdefault("token_basename", "%s-token" % pid)
+    p.setdefault("mcp_server_name", pid)
+    p.setdefault("mcp_path", "")
+    p.setdefault("mcp_transport", "http")
+    p.setdefault("placeholder_container_path", "")
+    p.setdefault("placeholder_template", None)
+    p.setdefault("placeholder_fake_pointers", [])
+    p.setdefault("probe", None)
+    if p.get("delivery") == "reverse_proxy_mcp":
+        p.setdefault("inject_header", "Authorization")
+        p.setdefault("inject_template", "Bearer {secret}")
+        p.setdefault("strip_incoming", [p["inject_header"].lower()])
+    elif p.get("delivery") == "hosted_mcp":
+        p.setdefault("extra_env", {})
+    return p
+
+
+def _merge_user_providers():
+    d = os.environ.get("CC_PROVIDERS_DIR")
+    if not d or not os.path.isdir(d):
+        return
+    for fn in sorted(os.listdir(d)):
+        if not fn.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(d, fn)) as fh:
+                p = json.load(fh)
+        except (OSError, ValueError) as e:
+            sys.stderr.write("cc-broker: skipping bad provider def %s (%s)\n" % (fn, type(e).__name__))
+            continue
+        pid = p.get("id") or fn[:-5]
+        if pid in PROVIDERS:                       # never override a built-in preset
+            sys.stderr.write("cc-broker: ignoring user def %s — '%s' is a built-in\n" % (fn, pid))
+            continue
+        need = _REQUIRED.get(p.get("delivery"))
+        if not need or not all(p.get(k) not in (None, "", []) for k in need):
+            sys.stderr.write("cc-broker: skipping incomplete provider def %s\n" % fn)
+            continue
+        PROVIDERS[pid] = _finalize_provider(pid, p)
+
+
+# Next free listen port for a NEW user route: at/above 8100, clear of the built-in LLM band
+# (8080–8082), so user MCP routes never collide with a built-in. Read after _merge_user_providers
+# so it also counts ports already claimed by existing user defs.
+def next_free_port():
+    used = [v for p in PROVIDERS.values() for v in (p.get("listen_port"), p.get("mcp_port"))
+            if isinstance(v, int)]
+    return max(used + [8099]) + 1
+
+
+def next_port():
+    print(next_free_port())
+
 
 # Hop-by-hop headers never forwarded (RFC 7230 §6.1); we terminate + re-originate, so these
 # are ours to manage, not the peer's.
@@ -384,6 +476,12 @@ def serve(config_path):
         if provider is None:
             log("BROKER-SKIP unknown provider %s" % pid)
             continue
+        # hosted_mcp routes run the MCP server in their OWN sidecar (start_hosted_mcp) and
+        # hold the credential there; the broker never proxies them. Guard even though cc keeps
+        # them out of `enabled` — a stray row must not KeyError on the reverse-proxy fields.
+        if provider.get("delivery") == "hosted_mcp":
+            log("BROKER-SKIP %s: hosted_mcp is served by its own sidecar" % pid)
+            continue
         token_path = cfg.get("token_paths", {}).get(pid)
         if not token_path or not os.path.exists(token_path):
             log("BROKER-SKIP %s: no token at %s" % (pid, token_path))
@@ -424,6 +522,14 @@ def serve(config_path):
 
 
 # ── host-config (facts for cc; single source of truth) ───────────────────────
+def _emit(key, value):
+    """Emit `KEY='value'` shell-quoted, so `eval` in _broker_host_config is safe even when a
+    value contains spaces (CCB_HOST_RUN='uvx mcp-search-console') — an unquoted space would be
+    read as `VAR=word cmd` and try to run `cmd`."""
+    import shlex
+    print("%s=%s" % (key, shlex.quote(str(value))))
+
+
 def host_config(pid):
     p = PROVIDERS.get(pid)
     if p is None:
@@ -432,13 +538,197 @@ def host_config(pid):
     # A fresh placeholder token is emitted here too so cc gets everything for the agent from
     # ONE python3 spawn on the launch path. It is a fake_value_ sentinel with the provider's
     # prefix — safe to eval (no shell metacharacters), and never a real credential.
-    print("CCB_BASE_URL_ENV=%s" % p.get("agent_base_url_env", ""))
-    print("CCB_TOKEN_ENV=%s" % p.get("agent_token_env", ""))
-    print("CCB_PLACEHOLDER_TOKEN=%s" % _fake(p.get("token_prefix", "")))
-    print("CCB_LISTEN_PORT=%d" % p["listen_port"])
-    print("CCB_PLACEHOLDER_CONTAINER_PATH=%s" % p.get("placeholder_container_path", ""))
-    print("CCB_TOKEN_BASENAME=%s" % p.get("token_basename", ""))
-    print("CCB_DELIVERY=%s" % p["delivery"])
+    _emit("CCB_BASE_URL_ENV", p.get("agent_base_url_env", ""))
+    _emit("CCB_TOKEN_ENV", p.get("agent_token_env", ""))
+    _emit("CCB_PLACEHOLDER_TOKEN", _fake(p.get("token_prefix", "")))
+    _emit("CCB_LISTEN_PORT", p.get("listen_port") or "")   # empty for hosted_mcp
+    _emit("CCB_PLACEHOLDER_CONTAINER_PATH", p.get("placeholder_container_path", ""))
+    _emit("CCB_TOKEN_BASENAME", p.get("token_basename", ""))
+    _emit("CCB_DELIVERY", p["delivery"])
+    _emit("CCB_CREDENTIAL_KIND", p.get("credential_kind", ""))
+    # MCP wiring (empty for LLM rows): how cc writes this route into the agent's .claude.json,
+    # and — for hosted_mcp — the sidecar port the agent reaches.
+    _emit("CCB_MCP_SERVER_NAME", p.get("mcp_server_name", ""))
+    _emit("CCB_MCP_PATH", p.get("mcp_path", ""))
+    _emit("CCB_MCP_TRANSPORT", p.get("mcp_transport", ""))
+    _emit("CCB_MCP_PORT", p.get("mcp_port") or p.get("listen_port") or "")
+    _emit("CCB_CREDENTIAL_ENV", p.get("credential_env", ""))
+    # hosted_mcp only: how to run the MCP server inside its sidecar, plus its extra env
+    # (KEY=VAL pairs). Constants in the table; word-split by cc after the eval un-quotes them.
+    _emit("CCB_HOST_RUN", " ".join(p.get("host_run", [])))
+    _emit("CCB_EXTRA_ENV", " ".join("%s=%s" % (k, v)
+                                    for k, v in p.get("extra_env", {}).items()))
+
+
+# ── registry listing (drives the bash-side provider loop; one line per route) ────
+def list_providers():
+    """One line per route: `id|delivery|credential_kind|token_basename`. The bash side
+    (broker_enabled_providers, cc --login/--status) iterates this instead of duplicating the
+    table — the single source of truth stays here. Fields are all `[a-z0-9._-]`, safe to
+    word-split in POSIX sh."""
+    for pid, p in PROVIDERS.items():
+        print("%s|%s|%s|%s" % (pid, p["delivery"],
+                               p.get("credential_kind", ""), p.get("token_basename", "")))
+
+
+# ── Shared cc-side helpers (imported by cc-lib.sh's adopt/add/intercept/warn heredocs) ──
+# These four cc subcommands used to hand-roll the same secret-shape tests, reverse-proxy
+# provider synthesis, and atomic mode-600 stores in separate python heredocs — three copies that
+# drifted (the interceptor flagged `AUTH` env keys the warner missed, and brokered headers[0]
+# blindly). Defining them ONCE here — the module the heredocs already import (like
+# tests/broker-test.py) — is the single source of truth, so the after-the-fact warner and the
+# front-line interceptor cannot disagree about what a secret looks like. All are pure and hold no
+# state; none prints a secret.
+AUTH_HEADER_NAMES = frozenset(("authorization", "x-api-key", "api-key", "x-goog-api-key"))
+_SECRET_KEY_RE = re.compile(r"(TOKEN|KEY|SECRET|PASSWORD|PASSWD|AUTH|CREDENTIAL)", re.I)
+_AUTH_SCHEME_RE = re.compile(r"(sk-|Bearer |Basic )")     # a credential-scheme prefix
+_B64_VAL_RE = re.compile(r"[A-Za-z0-9+/]{16,}={0,2}$")
+_HEX_VAL_RE = re.compile(r"[0-9a-fA-F]{24,}$")
+
+
+def key_is_secret(k):
+    """A header/env NAME that names a credential (Authorization, *_TOKEN, API_KEY, …)."""
+    return bool(_SECRET_KEY_RE.search(k or ""))
+
+
+def value_has_auth_scheme(v):
+    """A VALUE that begins with a credential scheme (Bearer/Basic/sk-)."""
+    return bool(_AUTH_SCHEME_RE.match(v or ""))
+
+
+def value_is_secret(v):
+    """A VALUE shaped like a credential: a scheme prefix, or a long base64/hex blob. For ENV
+    values, where a bare token is common. NOT used for header values — a 16-char MIME type like
+    'application/json' is valid base64, so header auth keys off the scheme/name (see
+    is_auth_header) to avoid that false positive."""
+    v = v or ""
+    return bool(value_has_auth_scheme(v) or _B64_VAL_RE.fullmatch(v) or _HEX_VAL_RE.fullmatch(v))
+
+
+def env_is_secret(kv):
+    """True if a `KEY=VALUE` env pair carries a credential — by KEY name or by VALUE shape."""
+    k, _, v = kv.partition("=")
+    return key_is_secret(k) or value_is_secret(v)
+
+
+def is_auth_header(name, value):
+    """True if an HTTP header carries auth — a known auth NAME, or a scheme-prefixed VALUE
+    (Bearer/Basic/sk-). Deliberately NOT the bare base64/hex heuristic: a common header value like
+    'application/json' is valid base64 and must not read as a credential."""
+    return (name or "").lower() in AUTH_HEADER_NAMES or value_has_auth_scheme(value)
+
+
+def find_auth_header(headers):
+    """Pick the credential-bearing header from ['Name: value', …] or [(name, value), …].
+    Prefer a recognised auth NAME, else a scheme-prefixed VALUE — so the auth header need NOT be
+    first (the old headers[0] assumption brokered the wrong header). Returns (name, value) or
+    (None, None)."""
+    pairs = []
+    for h in headers:
+        if isinstance(h, (list, tuple)):
+            n, v = h[0], h[1]
+        else:
+            n, _, v = h.partition(":")
+        pairs.append((n.strip(), v.strip()))
+    for n, v in pairs:                       # 1st preference: a recognised auth header name
+        if v and (n or "").lower() in AUTH_HEADER_NAMES:
+            return n, v
+    for n, v in pairs:                       # 2nd: a value carrying an explicit auth scheme
+        if v and value_has_auth_scheme(v):
+            return n, v
+    return None, None
+
+
+def scheme_of(header_value):
+    """The auth-scheme prefix (Bearer/Basic/'') a header value carries."""
+    for s in ("Bearer", "Basic"):
+        if header_value.startswith(s + " "):
+            return s
+    return ""
+
+
+def recover_secret(header_value, scheme):
+    """The raw secret with its scheme prefix (if any) stripped."""
+    v = header_value
+    if scheme and v.startswith(scheme + " "):
+        v = v[len(scheme) + 1:]
+    return v.strip()
+
+
+def synthesize_reverse_proxy(name, url, header_name, scheme, port, transport="http"):
+    """Build a reverse_proxy_mcp provider def (NO secret in it) from an inline remote MCP entry.
+    The one place this dict shape is defined for adopt/add/intercept. Raises ValueError on a
+    non-http(s) url."""
+    u = urllib.parse.urlsplit(url)
+    if u.scheme not in ("http", "https") or not u.hostname:
+        raise ValueError("cannot parse an http(s) upstream from url %r" % url)
+    return {
+        "id": name, "delivery": "reverse_proxy_mcp", "credential_kind": "paste_token",
+        "upstream_origin": "%s://%s" % (u.scheme, u.netloc),
+        "mcp_path": u.path or "",
+        "mcp_transport": transport if transport in ("http", "sse") else "http",
+        "inject_header": header_name or "Authorization",
+        "inject_template": (scheme + " {secret}") if scheme else "{secret}",
+        "listen_port": port, "token_basename": "%s-token" % name, "mcp_server_name": name,
+    }
+
+
+def write_provider_def(provdir, name, prov):
+    """Atomically write a provider def to <provdir>/<name>.json under a mode-700 dir."""
+    os.makedirs(provdir, exist_ok=True)
+    os.chmod(provdir, 0o700)
+    pf = os.path.join(provdir, name + ".json")
+    tmp = pf + ".tmp.%d" % os.getpid()
+    with open(tmp, "w") as fh:
+        json.dump(prov, fh, indent=2)
+    os.replace(tmp, pf)
+    return pf
+
+
+def store_secret(kib, basename, secret):
+    """Atomically write a secret to <kib>/<basename>, mode 600, never briefly world-readable.
+    The single atomic-store idiom the adopt/intercept heredocs share (bash keeps its own
+    _store_secret_file for the paths where the secret is a shell variable)."""
+    os.makedirs(kib, exist_ok=True)
+    os.chmod(kib, 0o700)
+    dest = os.path.join(kib, basename)
+    old = os.umask(0o077)
+    try:
+        tmp = dest + ".tmp.%d" % os.getpid()
+        with open(tmp, "w") as fh:
+            fh.write(secret + "\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, dest)
+    finally:
+        os.umask(old)
+    return dest
+
+
+# ── match a URL to a reverse_proxy_mcp route (for cc --mcp-adopt) ─────────────
+def match_upstream_route(url):
+    """Return `(id, token_basename, auth_scheme)` for an EXISTING reverse_proxy_mcp route (always
+    a user-defined one — no MCP is built in) whose upstream host matches `url`'s host, else None.
+    Lets `cc --mcp-adopt` reuse a route the user already added for that host instead of
+    synthesizing a duplicate. auth_scheme is the literal prefix the inject template puts before
+    the secret (Basic / Bearer / empty) so cc can strip it off the inline header to recover the
+    raw stored secret."""
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    if not host:
+        return None
+    for pid, p in PROVIDERS.items():
+        if p.get("delivery") != "reverse_proxy_mcp":
+            continue
+        up = (urllib.parse.urlsplit(p["upstream_origin"]).hostname or "").lower()
+        if up and up == host:
+            scheme = p.get("inject_template", "{secret}").replace("{secret}", "").strip()
+            return pid, p.get("token_basename", ""), scheme
+    return None
+
+
+def match_upstream(url):
+    r = match_upstream_route(url)
+    if r:
+        print("%s|%s|%s" % r)
 
 
 # ── probe: is this token accepted upstream? (host-side, never prints the token) ──
@@ -508,13 +798,26 @@ def main():
     ap.add_argument("--serve", action="store_true")
     ap.add_argument("--config")
     ap.add_argument("--host-config", metavar="PROVIDER_ID")
+    ap.add_argument("--list-providers", action="store_true",
+                    help="emit `id|delivery|credential_kind|token_basename` per route")
+    ap.add_argument("--match-upstream", metavar="URL",
+                    help="print `id|token_basename|auth_scheme` for the route serving URL's host")
+    ap.add_argument("--next-port", action="store_true",
+                    help="print the next free listen port for a new user-defined route")
     ap.add_argument("--make-placeholder", nargs=2, metavar=("OUT", "PROVIDER_ID"))
     ap.add_argument("--placeholder-token", metavar="PROVIDER_ID")
     ap.add_argument("--probe", nargs=2, metavar=("TOKENFILE", "PROVIDER_ID"))
     args = ap.parse_args()
+    _merge_user_providers()          # fold ~/.keep-it-in-your-box/providers.d/*.json onto the LLM built-ins
 
     if args.host_config:
         host_config(args.host_config)
+    elif args.list_providers:
+        list_providers()
+    elif args.next_port:
+        next_port()
+    elif args.match_upstream:
+        match_upstream(args.match_upstream)
     elif args.placeholder_token:
         p = PROVIDERS.get(args.placeholder_token)
         if p is None:
@@ -530,7 +833,7 @@ def main():
             ap.error("--serve requires --config")
         serve(args.config)
     else:
-        ap.error("one of --serve / --host-config / --make-placeholder / "
+        ap.error("one of --serve / --host-config / --list-providers / --make-placeholder / "
                  "--placeholder-token / --probe is required")
 
 

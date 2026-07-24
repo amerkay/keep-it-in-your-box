@@ -760,22 +760,52 @@ broker_wanted() {
 KIB_DIR="$(dirname "$KIB_CONFIG")"
 BROKER_TOKEN_FILE="$KIB_DIR/claude-token"
 
+# User-defined provider definitions (generic MCP brokering — any service, no code change).
+# Exported so EVERY cc-broker.py invocation (--list-providers, --host-config, --match-upstream,
+# --serve in the sidecar) folds them onto the built-in presets. The dir is host-only; it is
+# also mounted read-only into the broker sidecar, which reads it via this same env var.
+PROVIDERS_DIR="$KIB_DIR/providers.d"
+export CC_PROVIDERS_DIR="$PROVIDERS_DIR"
+
 # -s, not -f: an empty file is not a token. This is the single predicate for "is the broker
 # usable", used by the launch path, the attach check and --broker-status alike.
 broker_has_token() { [ -s "$BROKER_TOKEN_FILE" ]; }
 
-# The enabled provider set. Claude when its host token file exists; the ready-but-unstarted
-# rows (codex/gemini) light up when their own token file is dropped in $KIB_DIR — no code
-# change, exactly as documented. (Only claude is wired+served today.)
-broker_enabled_providers() {
-    local ids=""
-    broker_has_token && ids="claude"
+# The registry (single source of truth is cc-broker.py's PROVIDERS). Each line is
+# `id|delivery|credential_kind|token_basename`. The bash side iterates this instead of
+# duplicating the table, so a new provider is a row in cc-broker.py and nothing here.
+_broker_list_providers() {
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 "$SCRIPT_DIR/cc-broker.py" --list-providers 2>/dev/null
+}
+
+# A provider is ACTIVE when its host credential file ($KIB_DIR/<token_basename>) is non-empty.
+# Emit the active ids whose delivery is in the space-separated set $1, in registry order.
+_active_providers() {
+    local want="$1" id delivery kind basename ids=""
+    while IFS='|' read -r id delivery kind basename; do
+        [ -n "$id" ] || continue
+        case " $want " in *" $delivery "*) ;; *) continue ;; esac
+        [ -s "$KIB_DIR/$basename" ] && ids="${ids:+$ids }$id"
+    done <<EOF
+$(_broker_list_providers)
+EOF
     printf '%s' "$ids"
 }
 
+# `broker_enabled_providers` are the routes the BROKER SIDECAR serves (base_url_env +
+# reverse_proxy_mcp); `hosted_mcp_providers` run in their OWN sidecar (start_hosted_mcp). The
+# claude row is required for the broker to launch (checked in start_broker); MCP rows are
+# purely additive and never block a launch. Order follows the registry (claude first).
+broker_enabled_providers() { _active_providers "base_url_env reverse_proxy_mcp"; }
+hosted_mcp_providers()     { _active_providers "hosted_mcp"; }
+
 # Fixed at container creation, like the .ccignore rules and the unlock-shared mode: a second
 # terminal must never attach under a broker config that changed since the container started.
-broker_config_hash() { hash8 "$(broker_enabled_providers)|$CC_BROKER_ENDPOINT_MODE"; }
+# Covers BOTH sidecar-served routes and hosted MCPs, so adding/removing either forces a relaunch.
+broker_config_hash() {
+    hash8 "$(broker_enabled_providers)|$(hosted_mcp_providers)|$CC_BROKER_ENDPOINT_MODE"
+}
 
 # Read the host-facing facts for one provider out of cc-broker.py — the single source of
 # truth, so the bash side never duplicates the PROVIDERS table. Sets CCB_* in the CALLER's
@@ -877,23 +907,45 @@ start_broker() {
             || _broker_abort "could not create the broker network ($BROKER_NET)."
     fi
 
-    # cap-drop=ALL, no devices — strictly less privileged than the FUSE sidecar. The token is
+    # One read-only token mount per SIDECAR-SERVED route, at /run/broker/token/<id> (the path
+    # _write_broker_config puts in token_paths). claude is always present here (checked above);
+    # a reverse_proxy_mcp route like dataforseo adds its own when its token file exists.
+    local id delivery kind basename
+    local -a tok_mounts=()
+    while IFS='|' read -r id delivery kind basename; do
+        case "$delivery" in base_url_env|reverse_proxy_mcp) ;; *) continue ;; esac
+        [ -s "$KIB_DIR/$basename" ] || continue
+        tok_mounts+=( -v "$KIB_DIR/$basename:/run/broker/token/$id:ro" )
+    done <<EOF
+$(_broker_list_providers)
+EOF
+
+    # cap-drop=ALL, no devices — strictly less privileged than the FUSE sidecar. Tokens are
     # mounted HERE ONLY and READ-ONLY: the broker has no write path to any credential, by
     # construction rather than by discipline. The placeholder + ready marker land in
     # $BROKER_OUT, which cc reads host-side.
-    if ! docker run -d --name "$BROKER_CNAME" \
-        --cap-drop=ALL --security-opt no-new-privileges \
-        --user "$(id -u):$(id -g)" --userns=host --entrypoint python3 \
-        --network "$BROKER_NET" --network-alias cc-broker \
-        -v "$BROKER_TOKEN_FILE:/run/broker/token/claude:ro" \
-        -v "$BROKER_OUT:/run/broker/out" \
-        -v "$BROKER_DIR/config.json:/run/broker/config.json:ro" \
-        -v /etc/passwd:/etc/passwd:ro \
-        -v /etc/group:/etc/group:ro \
-        -v "$SCRIPT_DIR/cc-broker.py:/usr/local/bin/cc-broker.py:ro" \
-        "$IMAGE_NAME" \
-        /usr/local/bin/cc-broker.py --serve --config /run/broker/config.json >/dev/null 2>&1
-    then
+    # User-defined provider defs (if any) are mounted read-only so the sidecar's serve() folds
+    # them onto the LLM built-ins, exactly as the host-side --list/--host-config calls do.
+    local -a prov_mount=()
+    [ -d "$PROVIDERS_DIR" ] && prov_mount=(
+        -v "$PROVIDERS_DIR:/run/broker/providers.d:ro" -e CC_PROVIDERS_DIR=/run/broker/providers.d )
+
+    local -a broker_run=(
+        docker run -d --name "$BROKER_CNAME"
+        --cap-drop=ALL --security-opt no-new-privileges
+        --user "$(id -u):$(id -g)" --userns=host --entrypoint python3
+        --network "$BROKER_NET" --network-alias cc-broker
+        "${tok_mounts[@]}"
+        "${prov_mount[@]}"
+        -v "$BROKER_OUT:/run/broker/out"
+        -v "$BROKER_DIR/config.json:/run/broker/config.json:ro"
+        -v /etc/passwd:/etc/passwd:ro
+        -v /etc/group:/etc/group:ro
+        -v "$SCRIPT_DIR/cc-broker.py:/usr/local/bin/cc-broker.py:ro"
+        "$IMAGE_NAME"
+        /usr/local/bin/cc-broker.py --serve --config /run/broker/config.json
+    )
+    if ! "${broker_run[@]}" >/dev/null 2>&1; then
         _broker_abort "could not start the credential broker sidecar."
     fi
 
@@ -913,6 +965,123 @@ start_broker() {
     start_broker_notifier
     BROKER_ENABLED=1
     echo "🔐 credential broker: active — the real token is NOT in the sandbox (sidecar: $BROKER_CNAME)." >&2
+
+    # Add-ons, both fail-SOFT (a broken MCP must never block the session the way a broker
+    # startup failure does): bring up any hosted-MCP sidecars, then write every active brokered
+    # MCP route into the agent's .claude.json so the agent reaches them WITHOUT holding a header.
+    start_hosted_mcp
+    inject_brokered_mcps
+}
+
+# ── Hosted MCP sidecars (shape B/C: a LOCAL/client-signed MCP that can't be header-brokered) ──
+# The MCP server runs in its own cap-drop=ALL sidecar on the broker network, holding its
+# credential file READ-ONLY; the agent reaches it at http://<id>:<port><mcp_path>. The secret
+# (e.g. a Google service-account JSON and its client-side JWT signing) never enters the agent
+# container. supergateway bridges the server's stdio to streamable-HTTP. FAIL-SOFT: on any
+# error we warn and skip that MCP (and don't inject its .claude.json entry), never abort.
+#
+# NOTE (verify on first real use, like the codex/gemini rows): needs `uv`/`uvx` + `npx` and
+# network in the image to fetch supergateway and the server; HOME/cache dirs are pointed at
+# /tmp so the unprivileged sidecar user can write them.
+HOSTED_MCP_UP=""            # space-separated ids whose sidecar came up (read by inject_brokered_mcps)
+start_hosted_mcp() {
+    local ids id; ids="$(hosted_mcp_providers)"
+    [ -n "$ids" ] || return 0
+    for id in $ids; do
+        local CCB_TOKEN_BASENAME="" CCB_CREDENTIAL_ENV="" CCB_MCP_PORT="" \
+              CCB_HOST_RUN="" CCB_EXTRA_ENV=""
+        if ! _broker_host_config "$id"; then
+            warn "hosted MCP '$id': could not read its host-config — skipping."
+            continue
+        fi
+        [ -n "$CCB_HOST_RUN" ] && [ -n "$CCB_MCP_PORT" ] && [ -n "$CCB_TOKEN_BASENAME" ] || {
+            warn "hosted MCP '$id': incomplete registry entry — skipping."; continue; }
+
+        local cname="${CNAME}-hmcp-${id}"
+        docker rm -f "$cname" >/dev/null 2>&1 || true      # clear a crashed leftover
+        # extra_env (KEY=VAL, constants) → -e flags; word-split is safe (no metacharacters).
+        local -a env_args=() kv
+        for kv in $CCB_EXTRA_ENV; do env_args+=( -e "$kv" ); done
+        local -a run=(
+            docker run -d --name "$cname"
+            --cap-drop=ALL --security-opt no-new-privileges
+            --user "$(id -u):$(id -g)" --userns=host
+            --network "$BROKER_NET" --network-alias "$id"
+            -v "$KIB_DIR/$CCB_TOKEN_BASENAME:/run/cred/$CCB_TOKEN_BASENAME:ro"
+            -e "$CCB_CREDENTIAL_ENV=/run/cred/$CCB_TOKEN_BASENAME"
+            -e "HOME=/tmp" -e "UV_CACHE_DIR=/tmp/.uv" -e "npm_config_cache=/tmp/.npm"
+            "${env_args[@]}"
+            -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro
+            --entrypoint sh "$IMAGE_NAME"
+            -c "exec npx -y supergateway --stdio \"$CCB_HOST_RUN\" --outputTransport streamableHttp --port $CCB_MCP_PORT --host 0.0.0.0"
+        )
+        if "${run[@]}" >/dev/null 2>&1; then
+            HOSTED_MCP_UP="${HOSTED_MCP_UP:+$HOSTED_MCP_UP }$id"
+            echo "🔐 hosted MCP '$id': sidecar up (cred stays host-side: $cname)." >&2
+        else
+            warn "hosted MCP '$id': sidecar failed to start — the agent will launch without it."
+        fi
+    done
+}
+
+# Write every ACTIVE brokered MCP route into the agent's per-project .claude.json mcpServers,
+# as { "<name>": {"type":"<transport>","url":"http://<host>:<port><path>", "_ccBroker": true} }
+# with NO auth header — cc owns this file, the agent never sees a credential. reverse_proxy_mcp
+# routes point at the broker (cc-broker:<listen_port>); hosted_mcp routes point at their sidecar
+# alias (<id>:<mcp_port>) and are injected ONLY if their sidecar came up (HOSTED_MCP_UP).
+# Entries we own carry "_ccBroker": true; every launch we drop the stale ones we own and
+# rewrite the current set, so disabling a provider cleanly removes its entry. User-authored
+# servers (without the marker) are never touched.
+inject_brokered_mcps() {
+    [ "$BROKER_ENABLED" = 1 ] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    local cfg="$SESSION_DIR/.claude.json"
+
+    # Build the desired entry set as `name<TAB>type<TAB>url` lines from the registry.
+    local specs="" id delivery kind basename
+    while IFS='|' read -r id delivery kind basename; do
+        local host="" port="" active=0
+        case "$delivery" in
+            reverse_proxy_mcp) [ -s "$KIB_DIR/$basename" ] && { host="cc-broker"; active=1; } ;;
+            hosted_mcp) case " $HOSTED_MCP_UP " in *" $id "*) host="$id"; active=1 ;; esac ;;
+            *) continue ;;
+        esac
+        [ "$active" = 1 ] || continue
+        local CCB_MCP_SERVER_NAME="" CCB_MCP_PATH="" CCB_MCP_TRANSPORT="" CCB_MCP_PORT=""
+        _broker_host_config "$id" || continue
+        [ -n "$CCB_MCP_SERVER_NAME" ] && [ -n "$CCB_MCP_PORT" ] || continue
+        specs="${specs}${CCB_MCP_SERVER_NAME}	${CCB_MCP_TRANSPORT:-http}	http://${host}:${CCB_MCP_PORT}${CCB_MCP_PATH}
+"
+    done <<EOF
+$(_broker_list_providers)
+EOF
+
+    CC_MCP_SPECS="$specs" CC_MCP_CFG="$cfg" python3 - <<'PY' || warn "could not inject brokered MCP entries into .claude.json"
+import json, os, sys
+cfg = os.environ["CC_MCP_CFG"]
+specs = [l.split("\t") for l in os.environ["CC_MCP_SPECS"].splitlines() if l.strip()]
+try:
+    with open(cfg) as fh:
+        data = json.load(fh)
+except (OSError, ValueError):
+    data = {}
+servers = data.get("mcpServers")
+if not isinstance(servers, dict):
+    servers = {}
+# Drop only the entries WE own (marker), leaving user-authored servers intact.
+servers = {k: v for k, v in servers.items()
+           if not (isinstance(v, dict) and v.get("_ccBroker"))}
+for name, transport, url in specs:
+    servers[name] = {"type": transport, "url": url, "_ccBroker": True}
+data["mcpServers"] = servers
+tmp = cfg + ".tmp.%d" % os.getpid()
+with open(tmp, "w") as fh:
+    json.dump(data, fh, indent=2)
+os.replace(tmp, cfg)
+if specs:
+    sys.stderr.write("🔐 brokered MCP(s) wired into .claude.json: %s\n"
+                     % ", ".join(s[0] for s in specs))
+PY
 }
 
 # Agent-facing wiring, appended to the main container's ARGS. Reads the base-URL env name,
@@ -927,20 +1096,28 @@ start_broker() {
 #      parent-first by destination depth).
 add_broker_env_args() {
     [ "$BROKER_ENABLED" = 1 ] || return 0
-    # One python3 spawn: --host-config emits the base-URL/token env names, the listen port,
-    # the placeholder container path AND a fresh placeholder token (CCB_PLACEHOLDER_TOKEN).
-    local CCB_BASE_URL_ENV="" CCB_TOKEN_ENV="" CCB_PLACEHOLDER_TOKEN="" \
-          CCB_LISTEN_PORT="" CCB_PLACEHOLDER_CONTAINER_PATH=""
-    _broker_host_config claude \
-        || _broker_abort "could not read the broker's host-config for the agent."
-    [ -n "$CCB_BASE_URL_ENV" ] && [ -n "$CCB_TOKEN_ENV" ] && [ -n "$CCB_PLACEHOLDER_TOKEN" ] \
-        && [ -n "$CCB_LISTEN_PORT" ] && [ -n "$CCB_PLACEHOLDER_CONTAINER_PATH" ] \
-        || _broker_abort "the broker's host-config is incomplete."
-    ARGS+=(
-        -e "$CCB_BASE_URL_ENV=http://cc-broker:$CCB_LISTEN_PORT"
-        -e "$CCB_TOKEN_ENV=$CCB_PLACEHOLDER_TOKEN"
-        -v "$BROKER_OUT/claude.cred.json:$CCB_PLACEHOLDER_CONTAINER_PATH:ro"
-    )
+    # Loop the sidecar-served routes. base_url_env rows (claude/codex/gemini) need the agent's
+    # base-URL + placeholder-token env, and — where a credential file is shadowed (claude) — the
+    # synthetic .credentials.json mount. reverse_proxy_mcp rows (dataforseo) need NOTHING here:
+    # the agent reaches them via the .claude.json URL (inject_brokered_mcps), not an env var.
+    local id delivery
+    for id in $(broker_enabled_providers); do
+        local CCB_BASE_URL_ENV="" CCB_TOKEN_ENV="" CCB_PLACEHOLDER_TOKEN="" \
+              CCB_LISTEN_PORT="" CCB_PLACEHOLDER_CONTAINER_PATH="" CCB_DELIVERY=""
+        _broker_host_config "$id" \
+            || _broker_abort "could not read the broker's host-config for '$id'."
+        [ "$CCB_DELIVERY" = base_url_env ] || continue
+        [ -n "$CCB_BASE_URL_ENV" ] && [ -n "$CCB_TOKEN_ENV" ] && [ -n "$CCB_PLACEHOLDER_TOKEN" ] \
+            && [ -n "$CCB_LISTEN_PORT" ] \
+            || _broker_abort "the broker's host-config for '$id' is incomplete."
+        ARGS+=(
+            -e "$CCB_BASE_URL_ENV=http://cc-broker:$CCB_LISTEN_PORT"
+            -e "$CCB_TOKEN_ENV=$CCB_PLACEHOLDER_TOKEN"
+        )
+        # Only claude shadows a real credential file; codex/gemini have no file to overlay.
+        [ -n "$CCB_PLACEHOLDER_CONTAINER_PATH" ] \
+            && ARGS+=( -v "$BROKER_OUT/$id.cred.json:$CCB_PLACEHOLDER_CONTAINER_PATH:ro" )
+    done
 }
 
 # Dual-home the main container onto the broker net AFTER its docker run (a container's single
@@ -979,125 +1156,556 @@ stop_broker() {
     # Negative pid: the notifier is a setsid'd pipeline — kill the whole process group.
     [ -n "$pid" ] && kill -TERM "-$pid" 2>/dev/null || true
     docker rm -f "$BROKER_CNAME" >/dev/null 2>&1 || true
+    # Hosted-MCP sidecars share the broker net and must go before `network rm`. Match by the
+    # ${CNAME}-hmcp-* name prefix so we get every one without tracking their ids here.
+    local hm
+    for hm in $(docker ps -aq -f "name=^${BROKER_CNAME%-broker}-hmcp-" 2>/dev/null); do
+        docker rm -f "$hm" >/dev/null 2>&1 || true
+    done
     # The main container must be gone first (teardown_container stops it before calling this),
     # or the network still has an endpoint and rm fails — harmless, it's retried next teardown.
     docker network rm "$BROKER_NET" >/dev/null 2>&1 || true
     rm -rf "$BROKER_DIR" 2>/dev/null || true
 }
 
-# ── Token lifecycle: cc --broker-login / --broker-logout / --broker-status ─────
-# All three run HOST-SIDE and exit before any container work, so they are usable while the
-# sandbox is broken or has never been built. None of them ever prints the token.
+# ── Credential lifecycle: cc --login / --logout / --status <name> ──────────────
+# All run HOST-SIDE and exit before any container work, so they are usable while the sandbox
+# is broken or has never been built. None ever prints a credential. Registry-driven: adding a
+# provider row to cc-broker.py makes `cc --login <that-id>` work with no change here.
 
 _broker_need_python() {
     command -v python3 >/dev/null 2>&1 && return 0
-    die "python3 is required host-side to manage the broker token, and it is not on PATH." \
+    die "python3 is required host-side to manage broker credentials, and it is not on PATH." \
         "On macOS: xcode-select --install"
 }
 
-# Mint (or replace) the brokered token. Deliberately a two-step dance rather than capturing
-# `claude setup-token`'s stdout: that command is interactive (it opens a browser and draws a
-# TUI), so capturing its output fights it for the terminal and breaks in ways that are hard
-# to diagnose. Showing it, then reading a paste, is boring and works everywhere.
-broker_login() {
-    _broker_need_python
-    [ -t 0 ] || die "cc --broker-login needs an interactive terminal."
-    mkdir -p "$KIB_DIR" && chmod 700 "$KIB_DIR"
-
-    echo "🔐 cc --broker-login — mint a long-lived token for the credential broker."
-    echo
-    echo "   This token is stored HOST-ONLY at:"
-    echo "     $BROKER_TOKEN_FILE"
-    echo "   and is mounted read-only into the broker sidecar. It never enters the sandbox,"
-    echo "   and cc never writes to ~/.claude-shared/.credentials.json."
-    echo
-    if command -v claude >/dev/null 2>&1; then
-        echo "   Running \`claude setup-token\` now. Complete the browser flow, then copy the"
-        echo "   token it prints (it starts with sk-ant-oat01-)."
-        echo
-        claude setup-token || echo "   ⚠️  claude setup-token exited non-zero — paste a token anyway, or Ctrl-C." >&2
-    else
-        echo "   \`claude\` is not on this host's PATH, so run this yourself and copy the token:"
-        echo "     claude setup-token"
-    fi
-    echo
-    local token=""
-    printf '   Paste the token (input hidden), then Enter: '
-    read -rs token || true
-    echo
-    case "$token" in
-        "")            die "no token entered — nothing was written." ;;
-        *[!\ -~]*)     die "that does not look like a token (it contains control characters)." ;;
-        sk-ant-oat01-*|sk-ant-api*) ;;
-        *) echo "   ⚠️  that does not start with sk-ant-oat01- or sk-ant-api — storing it anyway;" >&2
-           echo "      the probe below is what actually decides whether it works." >&2 ;;
-    esac
-
-    # Write via a private temp file + rename: atomic, and the token is never briefly
-    # world-readable. umask covers the window before chmod on filesystems that ignore it.
-    local tmp="$BROKER_TOKEN_FILE.tmp.$$"
-    ( umask 077; printf '%s\n' "$token" > "$tmp" ) || die "could not write $tmp"
-    chmod 600 "$tmp" && mv -f "$tmp" "$BROKER_TOKEN_FILE" \
-        || { rm -f "$tmp"; die "could not install the token at $BROKER_TOKEN_FILE"; }
-    unset token
-    echo "   ✅ stored (mode 600)."
-    echo
-
-    # The probe is advisory: its output tells you whether the token works, but login's job
-    # was to STORE the token and it did. Only a definitive rejection (exit 1) is a login
-    # failure worth propagating — an inconclusive probe (exit 2: rate-limit / upstream blip /
-    # offline) must not report the successful store as failed to a wrapping script. Kept as a
-    # single `A || B` expression so errexit (active inside the function) can't abort on the
-    # probe's non-zero return before the decision is made.
-    broker_probe || _login_ok_after_probe "$?"
+# Resolve one provider from the registry. Sets _P_DELIVERY/_P_KIND/_P_BASENAME/_P_FILE in the
+# caller's scope; returns 1 for an unknown id.
+_provider_lookup() {
+    local id delivery kind basename
+    _P_DELIVERY=""; _P_KIND=""; _P_BASENAME=""; _P_FILE=""
+    while IFS='|' read -r id delivery kind basename; do
+        [ "$id" = "$1" ] || continue
+        _P_DELIVERY="$delivery"; _P_KIND="$kind"; _P_BASENAME="$basename"; _P_FILE="$KIB_DIR/$basename"
+        return 0
+    done <<EOF
+$(_broker_list_providers)
+EOF
+    return 1
 }
 
-# Map a broker_probe exit status to broker_login's: a successful store is a successful login
-# UNLESS the probe definitively rejected the token (1). 0 (accepted) and 2 (inconclusive) both
-# keep login successful. Factored out so tests/check.sh can assert the truth table directly.
+_provider_ids_csv() {
+    local id rest out=""
+    while IFS='|' read -r id rest; do out="${out:+$out, }$id"; done <<EOF
+$(_broker_list_providers)
+EOF
+    printf '%s' "$out"
+}
+
+# Atomic mode-600 write of a secret to a host file (never briefly world-readable).
+_store_secret_file() {
+    local tmp="$1.tmp.$$"
+    ( umask 077; printf '%s\n' "$2" > "$tmp" ) || die "could not write $1"
+    chmod 600 "$tmp" && mv -f "$tmp" "$1" || { rm -f "$tmp"; die "could not install $1"; }
+}
+
+# Per-provider "how to obtain it" guidance (human hints, not machine facts — kept here rather
+# than in the registry so the table stays word-splittable).
+_provider_login_hint() {
+    case "$1" in
+        claude)
+            if command -v claude >/dev/null 2>&1; then
+                echo "   Running \`claude setup-token\`; complete the browser flow, then copy the"
+                echo "   token it prints (starts sk-ant-oat01-)."; echo
+                claude setup-token || echo "   ⚠️  claude setup-token exited non-zero — paste a token anyway, or Ctrl-C." >&2
+            else
+                echo "   \`claude\` is not on PATH — run this on the host and copy the token:"
+                echo "     claude setup-token"
+            fi ;;
+        codex)  echo "   Create an OpenAI API key (starts sk-…): https://platform.openai.com/api-keys" ;;
+        gemini) echo "   Create a Gemini API key: https://aistudio.google.com/apikey" ;;
+        # Everything else is a user-defined MCP (providers.d/); service-specific guidance lives
+        # with its provider def (e.g. examples/providers/*.json), not in this hardcoded table.
+        *)      if [ "$_P_KIND" = file_path ]; then
+                    echo "   Provide the path to the credential file for '$1'."
+                else
+                    echo "   Paste the credential for '$1'."
+                fi ;;
+    esac
+    echo
+}
+
+# Add (or replace) a provider credential, stored HOST-ONLY. paste_token → hidden paste;
+# file_path → copy a file the user names. Then probe (advisory).
+provider_login() {
+    local id="${1:-claude}"
+    _broker_need_python
+    _provider_lookup "$id" || die "unknown provider: $id" "known: $(_provider_ids_csv)"
+    [ -t 0 ] || die "cc --login needs an interactive terminal."
+    mkdir -p "$KIB_DIR" && chmod 700 "$KIB_DIR"
+
+    echo "🔐 cc --login $id — add a credential the broker injects for you."
+    echo "   Stored HOST-ONLY at: $_P_FILE"
+    echo "   (mounted read-only into the broker; it never enters the sandbox)."
+    echo
+    _provider_login_hint "$id"
+
+    if [ "$_P_KIND" = file_path ]; then
+        local path=""
+        printf '   Path to the credential file: '
+        read -r path || true
+        case "$path" in "~/"*) path="$HOME/${path#\~/}" ;; esac
+        [ -n "$path" ] || die "no path entered — nothing was written."
+        [ -f "$path" ] || die "no such file: $path"
+        ( umask 077; cp "$path" "$_P_FILE.tmp.$$" ) || die "could not read $path"
+        chmod 600 "$_P_FILE.tmp.$$" && mv -f "$_P_FILE.tmp.$$" "$_P_FILE" \
+            || { rm -f "$_P_FILE.tmp.$$"; die "could not install $_P_FILE"; }
+        echo "   ✅ copied to $_P_FILE (mode 600)."
+    else
+        local secret=""
+        printf '   Paste the credential (input hidden), then Enter: '
+        read -rs secret || true
+        echo
+        case "$secret" in
+            "")        die "nothing entered — nothing was written." ;;
+            *[!\ -~]*) die "that contains control characters — not stored." ;;
+        esac
+        # Claude token shape is advisory only; the probe decides. Other providers accept anything.
+        if [ "$id" = claude ]; then
+            case "$secret" in
+                sk-ant-oat01-*|sk-ant-api*) ;;
+                *) echo "   ⚠️  that doesn't start with sk-ant-oat01-/sk-ant-api — storing anyway; the probe decides." >&2 ;;
+            esac
+        fi
+        _store_secret_file "$_P_FILE" "$secret"
+        unset secret
+        echo "   ✅ stored (mode 600)."
+    fi
+    echo
+    provider_probe "$id" || _login_ok_after_probe "$?"
+}
+
+# Map a probe exit status to login's: a successful store is a successful login UNLESS the probe
+# definitively rejected the credential (1). 0 (accepted) and 2 (inconclusive) both keep login
+# successful. Factored out so tests/check.sh can assert the truth table directly.
 _login_ok_after_probe() { [ "$1" != 1 ]; }
 
-# Remove the brokered token. The sandbox's own credential is untouched — this only clears
-# what the broker injects, so the blast radius of getting it wrong is "the broker stops
-# working", never "you are logged out".
-broker_logout() {
-    if [ ! -e "$BROKER_TOKEN_FILE" ]; then
-        echo "🔐 no brokered token at $BROKER_TOKEN_FILE — nothing to remove."
+# Remove a provider credential. The sandbox's own credential is untouched.
+provider_logout() {
+    local id="${1:-claude}"
+    _provider_lookup "$id" || die "unknown provider: $id" "known: $(_provider_ids_csv)"
+    if [ ! -e "$_P_FILE" ]; then
+        echo "🔐 no stored credential for '$id' at $_P_FILE — nothing to remove."
         return 0
     fi
-    rm -f "$BROKER_TOKEN_FILE" || die "could not remove $BROKER_TOKEN_FILE"
-    echo "🔐 removed $BROKER_TOKEN_FILE"
-    echo "   Revoke it at https://console.anthropic.com/settings/keys if it may have leaked."
-    echo "   Mint a fresh one with: cc --broker-login"
-    if broker_wanted; then
+    rm -f "$_P_FILE" || die "could not remove $_P_FILE"
+    echo "🔐 removed $_P_FILE"
+    [ "$id" = claude ] && echo "   Revoke it at https://console.anthropic.com/settings/keys if it may have leaked."
+    echo "   Re-add with: cc --login $id"
+    if [ "$id" = claude ] && broker_wanted; then
         echo "   The broker is ENABLED, so cc will refuse to launch until you do."
     fi
 }
 
-# Ask the upstream whether the stored token is still accepted. Exit status mirrors
-# cc-broker.py --probe: 0 accepted, 1 rejected, 2 inconclusive.
-broker_probe() {
+# Ask the upstream whether a stored credential is accepted. Exit status mirrors cc-broker.py
+# --probe: 0 accepted, 1 rejected, 2 inconclusive (incl. providers with no probe defined).
+provider_probe() {
+    local id="${1:-claude}"
     _broker_need_python
-    broker_has_token || { echo "🔐 no brokered token at $BROKER_TOKEN_FILE (cc --broker-login)"; return 1; }
-    echo "   probing api.anthropic.com with the stored token…"
-    python3 "$SCRIPT_DIR/cc-broker.py" --probe "$BROKER_TOKEN_FILE" claude
+    _provider_lookup "$id" || return 1
+    [ -s "$_P_FILE" ] || { echo "🔐 no credential stored for '$id' ($_P_FILE)"; return 1; }
+    echo "   checking the stored credential for '$id'…"
+    python3 "$SCRIPT_DIR/cc-broker.py" --probe "$_P_FILE" "$id"
 }
 
-broker_status() {
+# Status of EVERY registry provider (never prints contents — size/mode only).
+provider_status() {
     echo "🔐 credential broker"
-    echo "   enabled:    $(broker_wanted && echo yes || echo "no  (set 'broker = on' in $KIB_CONFIG, or CC_BROKER=1)")"
-    echo "   token file: $BROKER_TOKEN_FILE"
+    echo "   enabled:  $(broker_wanted && echo yes || echo "no  (set 'broker = on' in $KIB_CONFIG, or CC_BROKER=1)")"
+    local id delivery kind basename file mode size
+    while IFS='|' read -r id delivery kind basename; do
+        file="$KIB_DIR/$basename"
+        if [ -s "$file" ]; then
+            mode="$(ls -l "$file" 2>/dev/null | cut -c1-10)"
+            size="$(wc -c < "$file" 2>/dev/null | tr -d ' ')"
+            printf '   %-11s stored  (%s bytes, %s) [%s]\n' "$id" "$size" "$mode" "$delivery"
+        else
+            printf '   %-11s —       add: cc --login %s   [%s]\n' "$id" "$id" "$delivery"
+        fi
+    done <<EOF
+$(_broker_list_providers)
+EOF
     if broker_has_token; then
-        # Size and mode only — never the contents, and never a prefix of them.
-        local mode size
-        mode="$(ls -l "$BROKER_TOKEN_FILE" 2>/dev/null | cut -c1-10)"
-        size="$(wc -c < "$BROKER_TOKEN_FILE" 2>/dev/null | tr -d ' ')"
-        echo "   stored:     yes ($size bytes, $mode)"
-        broker_probe
-    else
-        echo "   stored:     NO — mint one with: cc --broker-login"
-        return 1
+        echo
+        provider_probe claude
     fi
+    broker_has_token          # exit non-zero when claude (the required cred) is absent
+}
+
+# Back-compat aliases: the original --broker-* subcommands act on the claude provider.
+broker_login()  { provider_login  claude; }
+broker_logout() { provider_logout claude; }
+broker_probe()  { provider_probe  claude; }
+broker_status() { provider_status; }
+
+# ── Inline-credential detector (C4) + cc --mcp-adopt ───────────────────────────
+# Allowing the insecure `claude mcp add --header "Authorization: …"` path is fine — but that
+# credential lands in the sandbox, so the agent can read it (and it's already on its way to the
+# API). warn_inline_mcp_secrets flags it on every launch (WARN only, never blocks); mcp_adopt
+# migrates it into the broker. Neither ever prints the secret value.
+warn_inline_mcp_secrets() {
+    command -v python3 >/dev/null 2>&1 || return 0
+    CC_MCP_JSON="$PWD/.mcp.json" CC_CLAUDE_JSON="$SESSION_DIR/.claude.json" \
+    CC_WARN_BROKER_PY="$SCRIPT_DIR/cc-broker.py" \
+        python3 - <<'PY' || true
+import importlib.util, json, os, sys
+# Same secret-shape tests as the interceptor (cc-broker.py) so the warner and the front-line
+# blocker agree on what counts as a secret — they used to drift (the interceptor caught AUTH-named
+# and value-shaped secrets the warner missed).
+_spec = importlib.util.spec_from_file_location("ccbroker", os.environ["CC_WARN_BROKER_PY"])
+ccb = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(ccb)
+files = [("project .mcp.json",  os.environ.get("CC_MCP_JSON", "")),
+         ("session .claude.json", os.environ.get("CC_CLAUDE_JSON", ""))]
+for label, path in files:
+    if not path:
+        continue
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        continue
+    servers = data.get("mcpServers")
+    if not isinstance(servers, dict):
+        continue
+    for name, e in servers.items():
+        if not isinstance(e, dict) or e.get("_ccBroker"):
+            continue          # our brokered entries carry no secret — skip
+        reason = None
+        for k, v in (e.get("headers") or {}).items():
+            if v and ccb.is_auth_header(k, str(v)):
+                reason = "inline auth header"; break
+        if not reason:
+            for k, v in (e.get("env") or {}).items():
+                if v and ccb.env_is_secret("%s=%s" % (k, v)):
+                    reason = "inline env secret (%s)" % k; break
+        if reason:
+            # Value is NEVER printed — only the name + reason.
+            sys.stderr.write('⚠️  MCP "%s" (%s) carries an %s the agent can read — '
+                             'it is already sent to the API.\n' % (name, label, reason))
+            sys.stderr.write('   Broker it instead:  cc --mcp-adopt %s\n' % name)
+PY
+}
+
+# Migrate an inline-credential MCP into the broker: store the secret host-side, strip it from
+# the project config, and let inject_brokered_mcps re-add a header-free brokered entry at the
+# next launch. Only remote MCPs whose upstream matches a reverse_proxy_mcp route can be adopted;
+# a local/stdio MCP (shape B/C) needs a hosted_mcp row instead, and adopt says so.
+mcp_adopt() {
+    local name="$1"
+    [ -n "$name" ] || die "usage: cc --mcp-adopt <server-name>"
+    _broker_need_python
+    CC_ADOPT_NAME="$name" CC_KIB_DIR="$KIB_DIR" CC_BROKER_PY="$SCRIPT_DIR/cc-broker.py" \
+    CC_PROVIDERS_DIR="$PROVIDERS_DIR" \
+    CC_MCP_JSON="$PWD/.mcp.json" CC_CLAUDE_JSON="$SESSION_DIR/.claude.json" \
+        python3 - <<'PY' || return $?
+import importlib.util, json, os, sys
+name    = os.environ["CC_ADOPT_NAME"]
+kib     = os.environ["CC_KIB_DIR"]
+script  = os.environ["CC_BROKER_PY"]
+provdir = os.environ["CC_PROVIDERS_DIR"]
+files   = [f for f in (os.environ.get("CC_MCP_JSON", ""),
+                       os.environ.get("CC_CLAUDE_JSON", "")) if f]
+
+# Shared synthesis/secret helpers from cc-broker.py (single source of truth). Merge user provider
+# defs so match_upstream_route sees routes already added for this host.
+_spec = importlib.util.spec_from_file_location("ccbroker", script)
+ccb = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(ccb)
+ccb._merge_user_providers()
+
+hit = None
+for path in files:
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        continue
+    servers = data.get("mcpServers")
+    if isinstance(servers, dict) and isinstance(servers.get(name), dict):
+        hit = (path, data, servers, servers[name]); break
+if hit is None:
+    sys.exit("no MCP named %r with an inline config found in .mcp.json or .claude.json" % name)
+path, data, servers, entry = hit
+if entry.get("_ccBroker"):
+    sys.exit("%r is already a brokered entry — nothing to adopt." % name)
+
+url = entry.get("url", "")
+hdrname, authval = ccb.find_auth_header(list((entry.get("headers") or {}).items()))
+if not url or not authval:
+    sys.exit("%r has no inline remote auth header to broker. A local/stdio MCP needs a "
+             "hosted_mcp definition (cc --add-mcp … --run …), not adoption." % name)
+
+# Reuse an EXISTING brokered route (a user def you already added) if one serves this host;
+# otherwise SYNTHESIZE a new provider definition from the inline entry — this is what makes
+# adoption generic for an MCP we've never heard of. (No MCP is built in, so a match here is
+# always a prior user route, never a preset.)
+matched = ccb.match_upstream_route(url)
+if matched:
+    pid, basename, scheme = matched
+    where = "existing route '%s'" % pid
+else:
+    scheme = ccb.scheme_of(authval)
+    transport = entry.get("type") if entry.get("type") in ("http", "sse") else "http"
+    try:
+        prov = ccb.synthesize_reverse_proxy(name, url, hdrname, scheme, ccb.next_free_port(), transport)
+    except ValueError as e:
+        sys.exit(str(e))
+    basename = prov["token_basename"]
+    ccb.write_provider_def(provdir, name, prov)
+    where = "new provider def %s.json (port %d)" % (name, prov["listen_port"])
+
+# Recover the raw secret and store it host-side, mode 600, atomically.
+ccb.store_secret(kib, basename, ccb.recover_secret(authval, scheme))
+
+# Strip the inline entry so the secret leaves the project entirely.
+del servers[name]
+data["mcpServers"] = servers
+t2 = path + ".tmp.%d" % os.getpid()
+with open(t2, "w") as fh:
+    json.dump(data, fh, indent=2)
+os.replace(t2, path)
+
+sys.stderr.write("🔐 adopted '%s' via %s; stored the credential host-side as %s and removed the "
+                 "inline entry from %s.\n" % (name, where, basename, os.path.basename(path)))
+PY
+    if broker_wanted; then
+        echo "   Relaunch cc to use '$name' through the broker (no header in the sandbox)."
+    else
+        echo "   Enable the broker to use it: set 'broker = on' in $KIB_CONFIG (or CC_BROKER=1), then relaunch."
+    fi
+}
+
+# Declare a brokered MCP directly (without first adding it inline). Remote header-authed MCP:
+#   cc --add-mcp <name> --url <url> [--header "Header-Name: Scheme"]   (scheme: Bearer|Basic|"")
+# then `cc --login <name>` pastes the token. Hosted (local/stdio) MCP whose secret can't be
+# header-injected:
+#   cc --add-mcp <name> --run "<cmd>" --cred-env <ENV> [--cred-kind file|token] [--port N] \
+#       [--env KEY=VAL]...   (--env repeatable; extra env the hosted server needs, e.g. a flag)
+# Writes a provider def to $PROVIDERS_DIR/<name>.json; the login/broker paths do the rest.
+mcp_add() {
+    _broker_need_python
+    local name="" url="" header="" run="" cred_env="" cred_kind="paste_token" port="" envs=""
+    name="$1"; shift || true
+    [ -n "$name" ] && [ "${name#--}" = "$name" ] || die "usage: cc --add-mcp <name> --url <url> [--header \"H: Scheme\"]  (or --run <cmd> --cred-env <ENV> [--env KEY=VAL]...)"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --url)       url="$2"; shift 2 ;;
+            --header)    header="$2"; shift 2 ;;
+            --run)       run="$2"; shift 2 ;;
+            --cred-env)  cred_env="$2"; shift 2 ;;
+            --cred-kind) cred_kind="$2"; shift 2 ;;
+            --port)      port="$2"; shift 2 ;;
+            --env)       envs="${envs}${2}
+"; shift 2 ;;
+            *) die "cc --add-mcp: unknown option '$1'" ;;
+        esac
+    done
+    mkdir -p "$PROVIDERS_DIR" && chmod 700 "$PROVIDERS_DIR"
+    [ -z "$port" ] && port="$(python3 "$SCRIPT_DIR/cc-broker.py" --next-port)"
+
+    CC_ADD_NAME="$name" CC_ADD_URL="$url" CC_ADD_HEADER="$header" CC_ADD_RUN="$run" \
+    CC_ADD_CRED_ENV="$cred_env" CC_ADD_CRED_KIND="$cred_kind" CC_ADD_PORT="$port" \
+    CC_ADD_ENV="$envs" CC_ADD_DIR="$PROVIDERS_DIR" CC_ADD_BROKER_PY="$SCRIPT_DIR/cc-broker.py" \
+    python3 - <<'PY' || return $?
+import importlib.util, os, sys
+e = os.environ
+_spec = importlib.util.spec_from_file_location("ccbroker", e["CC_ADD_BROKER_PY"])
+ccb = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(ccb)
+name, provdir, port = e["CC_ADD_NAME"], e["CC_ADD_DIR"], int(e["CC_ADD_PORT"])
+url, header, run = e["CC_ADD_URL"], e["CC_ADD_HEADER"], e["CC_ADD_RUN"]
+# --env KEY=VAL (newline-separated) → extra_env dict; only meaningful for a hosted server.
+extra_env = {}
+for line in e.get("CC_ADD_ENV", "").splitlines():
+    line = line.strip()
+    if not line:
+        continue
+    if "=" not in line:
+        sys.exit("--env expects KEY=VAL, got %r" % line)
+    k, _, v = line.partition("=")
+    if not k.strip():
+        sys.exit("--env expects KEY=VAL, got %r" % line)
+    extra_env[k.strip()] = v
+if url and run:
+    sys.exit("give --url (remote MCP) OR --run (hosted MCP), not both.")
+if url and extra_env:
+    sys.exit("--env only applies to a hosted MCP (--run); a reverse-proxy route has no server to set env on.")
+if url:
+    hdrname, scheme = "Authorization", "Bearer"
+    if header:
+        hdrname, _, sc = header.partition(":")
+        hdrname, scheme = hdrname.strip(), sc.strip()
+    try:
+        prov = ccb.synthesize_reverse_proxy(name, url, hdrname, scheme, port)
+    except ValueError:
+        sys.exit("--url must be an http(s) URL")
+elif run:
+    if not e["CC_ADD_CRED_ENV"]:
+        sys.exit("--run needs --cred-env <ENV> (the env var the server reads its credential from)")
+    kind = e["CC_ADD_CRED_KIND"]
+    base = "%s.json" % name if kind == "file" else "%s-token" % name
+    prov = {
+        "id": name, "delivery": "hosted_mcp",
+        "credential_kind": "file_path" if kind == "file" else "paste_token",
+        "token_basename": base, "host_run": run.split(),
+        "credential_env": e["CC_ADD_CRED_ENV"], "mcp_port": port,
+        "mcp_path": "/mcp", "mcp_transport": "http", "mcp_server_name": name,
+        "extra_env": extra_env,
+    }
+else:
+    sys.exit("give --url <url> (remote MCP) or --run <cmd> --cred-env <ENV> (hosted MCP)")
+ccb.write_provider_def(provdir, name, prov)
+sys.stderr.write("🔐 wrote provider def %s.json (%s, port %d).\n" % (name, prov["delivery"], port))
+PY
+    echo "   Now add its credential:  cc --login $name"
+}
+
+# Front-line preventer for the pasted vendor command. A user won't learn our flags — they take a
+# service's own `claude mcp add … --header "Authorization: …" …` line and swap `claude`→`cc`. Run
+# verbatim, that puts the raw secret in the container's argv → in `.claude.json` → readable by
+# every session. Nothing INSIDE the box can fix it (a process's argv is already in the box), so we
+# catch `mcp add`/`add-json` HERE, host-side, before any docker exec, and do the secure thing.
+#
+# Tri-state exit — 1 = NOT an intercept, passthrough to a normal launch (the default; a real
+# session must never be swallowed); 0 = handled (auto-brokered/staged), cc exits 0; 2 = blocked,
+# cc exits 2. Remote header-authed form → auto-broker (reuses mcp_add's synthesis + mcp_adopt's
+# mode-600 store). Local/stdio form with a secret `--env` → block, unless CC_ALLOW_INLINE_MCP_SECRET=1.
+# Distinct from warn_inline_mcp_secrets (the post-hoc detector for secrets that arrived some other
+# way): this one PREVENTS the write. Host-global + identity-free, like `cc --add-mcp`.
+intercept_mcp_add() {
+    # Cheap bash gate: engage only for `[claude] mcp add|add-json`; everything else passes through.
+    local -a a=( "$@" )
+    # Drop leading `claude` token(s) (bash-3.2 slice). One is injected by the `cc`=`kib claude`
+    # alias; a second appears only if the user also typed it (`cc claude mcp add`) — strip in a
+    # loop so that habit can't slip an inline secret past the gate into the container's argv.
+    while [ "${a[0]:-}" = claude ]; do a=( "${a[@]:1}" ); done
+    [ "${a[0]:-}" = mcp ] || return 1
+    case "${a[1]:-}" in add|add-json) ;; *) return 1 ;; esac
+    # No python → we can't classify/broker; passthrough (rare: python3 is a broker prerequisite).
+    command -v python3 >/dev/null 2>&1 || return 1
+
+    mkdir -p "$PROVIDERS_DIR" && chmod 700 "$PROVIDERS_DIR"
+    CC_IC_KIB="$KIB_DIR" CC_IC_DIR="$PROVIDERS_DIR" CC_IC_ALLOW="${CC_ALLOW_INLINE_MCP_SECRET:-0}" \
+    CC_IC_BROKER_ON="$(broker_wanted && echo 1 || echo 0)" \
+    CC_IC_BROKER_PY="$SCRIPT_DIR/cc-broker.py" \
+    CC_IC_NEXT_PORT="$(python3 "$SCRIPT_DIR/cc-broker.py" --next-port 2>/dev/null || echo 8100)" \
+    python3 - "${a[@]}" <<'PY'
+import importlib.util, json, os, re, sys
+env = os.environ
+# Shared secret-shape tests + reverse-proxy synthesis live in cc-broker.py (the single source of
+# truth, imported here like tests/broker-test.py) so this front-line interceptor and the
+# after-the-fact warner can never disagree about what a secret is.
+_spec = importlib.util.spec_from_file_location("ccbroker", env["CC_IC_BROKER_PY"])
+ccb = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(ccb)
+
+kib, provdir = env["CC_IC_KIB"], env["CC_IC_DIR"]
+allow, broker_on = env.get("CC_IC_ALLOW") == "1", env.get("CC_IC_BROKER_ON") == "1"
+try:
+    port = int(env["CC_IC_NEXT_PORT"])
+except ValueError:
+    port = 8100
+argv = sys.argv[1:]                       # ['mcp', 'add'|'add-json', ...]
+sub, rest = argv[1], argv[2:]
+
+# Parse the `claude mcp add` grammar tolerantly. add-json carries a JSON blob instead of flags.
+headers, envs, positionals, transport = [], [], [], ""
+if sub == "add-json":
+    positionals = [t for t in rest if not t.startswith("-")]
+    spec = {}
+    if len(positionals) >= 2:
+        try:
+            spec = json.loads(positionals[1])
+        except ValueError:
+            sys.exit(1)                    # malformed → let claude handle it
+    headers = ["%s: %s" % (k, v) for k, v in (spec.get("headers") or {}).items()]
+    envs = ["%s=%s" % (k, v) for k, v in (spec.get("env") or {}).items()]
+    url = spec.get("url", "")
+    name = positionals[0] if positionals else None
+    transport = spec.get("type", "")
+else:
+    i, seen_ddash = 0, False
+    while i < len(rest):
+        t = rest[i]
+        if seen_ddash:
+            i += 1; continue               # tokens after `--` are the stdio command
+        if t == "--":
+            seen_ddash = True; i += 1; continue
+        for flag, bucket in (("--header", headers), ("-H", headers), ("--env", envs), ("-e", envs)):
+            if t == flag and i + 1 < len(rest):
+                bucket.append(rest[i + 1]); i += 2; break
+            if t.startswith(flag + "="):
+                bucket.append(t.split("=", 1)[1]); i += 1; break
+        else:
+            if t in ("--transport", "-t") and i + 1 < len(rest):
+                transport = rest[i + 1]; i += 2; continue
+            if t.startswith("--transport="):
+                transport = t.split("=", 1)[1]; i += 1; continue
+            if t in ("--scope", "-s") and i + 1 < len(rest):
+                i += 2; continue           # ignore scope value
+            if t.startswith("-"):
+                i += 1; continue           # unknown flag
+            positionals.append(t); i += 1
+            continue
+        continue
+    name = positionals[0] if positionals else None
+    url = positionals[1] if len(positionals) > 1 else ""
+
+secret_env = [e for e in envs if ccb.env_is_secret(e)]
+is_remote = bool(re.match(r"https?://", url))
+hname, hval = ccb.find_auth_header(headers)     # picks the auth header wherever it sits (not [0])
+
+# ── Remote + auth header → AUTO-BROKER (secret never enters the box) ──
+if is_remote and hval and name:
+    scheme = ccb.scheme_of(hval)
+    secret = ccb.recover_secret(hval, scheme)
+    if not secret:
+        sys.exit(1)
+    try:
+        prov = ccb.synthesize_reverse_proxy(name, url, hname, scheme, port, transport)
+    except ValueError:
+        sys.exit(1)
+    ccb.write_provider_def(provdir, name, prov)
+    dest = ccb.store_secret(kib, "%s-token" % name, secret)
+    w = sys.stderr.write
+    w("🔐 Intercepted an inline MCP credential and brokered it host-side — it never entered the sandbox.\n")
+    w("   • '%s' → %s%s (reverse-proxy route, port %d)\n" % (name, prov["upstream_origin"], prov["mcp_path"], port))
+    w("   • credential stored host-only: %s (mode 600)\n" % os.path.basename(dest))
+    w("   • provider def: providers.d/%s.json\n" % name)
+    if broker_on:
+        w("   Start a session with `cc` — the agent gets a header-free broker URL, not the token.\n")
+    else:
+        w("   ⚠️  The broker is OFF, so this route isn't active yet. Enable it, then relaunch:\n")
+        w("        echo 'broker = on' >> ~/.keep-it-in-your-box/config\n")
+    sys.exit(0)
+
+# ── Local/stdio server with a secret in --env → BLOCK (can't header-broker it) ──
+if secret_env:
+    if allow:
+        sys.exit(1)                        # explicit opt-out: knowingly carry the secret into the box
+    w = sys.stderr.write
+    nm = name or "<name>"
+    w("❌ cc won't carry an inline MCP secret into the sandbox.\n")
+    w("   '%s' passes its credential to a LOCAL server via --env, which cc can't broker: the server\n" % nm)
+    w("   runs its own code and reads the secret as an env value (and multi-value creds like\n")
+    w("   USERNAME+PASSWORD aren't supported yet). Instead:\n")
+    w("     • If the service has a remote endpoint, use --header — cc auto-brokers it:\n")
+    w('         cc claude mcp add --header "Authorization: Bearer <token>" --transport http %s <url>\n' % nm)
+    w('     • Or a single-value hosted server:  cc --add-mcp %s --run "<cmd>" --cred-env <ENV>\n' % nm)
+    w("     • To knowingly accept the secret INSIDE the sandbox, re-run with:\n")
+    w("         CC_ALLOW_INLINE_MCP_SECRET=1 cc claude mcp add …\n")
+    sys.exit(2)
+
+sys.exit(1)                                # no secret to protect → passthrough
+PY
+    return $?
 }
 
 # ── DNS: follow the host's live resolver, without editing the host ───

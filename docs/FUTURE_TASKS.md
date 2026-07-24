@@ -131,7 +131,30 @@ intercepts wherever the request actually goes — so it survives Claude pinning 
 it "**requires TLS termination**" (the proxy must read/rewrite the `Authorization` header), which means
 a CA in the container trust store. Passes all gates; strictly more machinery than C1.
 
-### C3 · Generic authenticating reverse-proxy for third-party MCP servers ★★★★★ — **PICK (header-authed remote MCPs)**
+### C3 · Generic authenticating reverse-proxy for third-party MCP servers ★★★★★ — **BUILT 2026-07-23**
+
+> **BUILT — what shipped (differs from the sketch below in three ways):**
+> 1. **No separate `mcp-broker.py`.** It is the *same* `cc-broker.py`, extended: a new
+>    `reverse_proxy_mcp` delivery mode + a registry row. **Providers are user-extensible — any MCP, no
+>    code change:** **only the LLMs (`claude`/`codex`/`gemini`) are built in — no MCP is hardcoded.**
+>    DataForSEO and mcp-gsc ship as copy-in example defs in `examples/providers/`, and `cc-broker.py`
+>    folds `~/.keep-it-in-your-box/providers.d/*.json` onto the built-ins (`_merge_user_providers`, mounted
+>    `:ro` into the sidecar; the LLM built-ins non-overridable). `cc --mcp-adopt` *synthesizes* such a def
+>    from an inline `claude mcp add --header …` entry, and `cc --add-mcp` declares one directly. `serve()`
+>    already looped providers and streamed unbuffered, so the relay
+>    needed no change — the agent's `.mcp.json` URL carries the upstream path (`…:<port>/http`) and the
+>    broker forwards it verbatim. Resolves the two open C3 questions below: **plain HTTP** to the broker
+>    works (no CA), and **streaming is already unbuffered** (`_do_relay` reads-to-EOF, flushes per chunk).
+> 2. **Shape C added (not in the original C3 scope):** a `hosted_mcp` mode for MCPs whose secret can't be
+>    header-injected — client-signed / file creds like **mcp-gsc**'s Google service-account JSON. The MCP
+>    *server* runs in its own `cap-drop=ALL` sidecar (`start_hosted_mcp`, supergateway bridging stdio→HTTP)
+>    holding the credential; the agent reaches it over the broker net at `http://<id>:<port>`. Trade: the
+>    MCP server's own code runs in that sidecar (isolated from the agent, but trusted).
+> 3. **Unified UX:** `cc --login <name>` / `--logout <name>` / `--status` (registry-driven, generalizing
+>    `--broker-login`) add any credential the Anthropic-token way — cc fails-hard on a missing *required*
+>    cred and prints the exact fix. See CLAUDE.md "Credential broker" for the delivery-mode reference.
+>
+> The design record below stands as written.
 
 The **same principle as C1's base-URL variant**, applied to remote HTTP MCP servers (DataForSEO is the
 first consumer) rather than the Anthropic token. A quarantined sidecar holds the third-party credential
@@ -197,7 +220,27 @@ Delivery of that plugin uses the friendly `--unlock-shared` path below.
 - **Fixed-upstream is load-bearing.** A forward proxy would be an egress bypass; the reverse proxy only
   ever reaches its one hardcoded upstream.
 
-### C4 · Secret-in-config detector (host-side, advisory) ★★★☆☆ — **PICK (companion to C3)**
+### C4 · Secret-in-config detector (host-side, advisory) ★★★☆☆ — **BUILT 2026-07-23**
+
+> **BUILT:** `warn_inline_mcp_secrets` runs on every launch (create + attach) and warns — never blocks —
+> when an MCP entry in the project `.mcp.json` or this session's `.claude.json` carries an inline auth
+> header or a secret-shaped `env` value, naming the server + reason and **never printing the value**.
+> Entries cc itself brokered (`_ccBroker`) are skipped. Companion `cc --mcp-adopt <name>` migrates an
+> inline remote-MCP credential into the broker: it stores the secret host-side (mode 600), strips it from
+> the config, and lets the next launch inject a header-free brokered entry. It refuses a local/stdio MCP
+> (needs a `hosted_mcp` row) or an unknown upstream. The heuristic (open question below) is intentionally
+> conservative — key/token/secret env-name match + `Bearer`/`Basic` header shape — so it doesn't cry wolf.
+>
+> **EXTENDED 2026-07-24 — detection → PREVENTION (`intercept_mcp_add`):** the detector alone can't stop
+> the common leak. A user who won't learn `cc --add-mcp`/`--mcp-adopt` takes a vendor's own
+> `claude mcp add … --header "Authorization: …" …` line and swaps `claude`→`cc`; run verbatim, that puts
+> the raw secret in the **container's argv** before any warning fires — nothing in-box can undo it. So `cc`
+> now intercepts `[claude] mcp add|add-json` **host-side, before the `docker exec`**: the remote `--header`
+> form is **auto-brokered** (secret peeled off, stored mode-600, header-free route written — never enters
+> the box), the local/stdio `--env`-secret form is **blocked** (opt-out `CC_ALLOW_INLINE_MCP_SECRET=1`), and
+> anything else passes through. `warn_inline_mcp_secrets` stays as the backstop for secrets that arrive some
+> other way (an edited config, a teammate's commit). This makes C4 a *preventer* for the swap path, not only
+> a detector.
 
 A host-side scan in `cc` at launch — sibling to `validate_shared_settings` — that reads the
 container-visible config about to be mounted and **warns** when a **literal** credential is present,
@@ -240,7 +283,21 @@ an option.
 
 ---
 
-## G2 — Egress (opt-in, and honest about what it buys)
+## G2 — Egress (DELAYED-OR-NEVER — the broker, not a firewall, is the fix)
+
+> **Status decision (2026-07-23): delayed-or-never, on purpose.** An egress firewall does not earn
+> its complexity, because the two channels that make exfil trivial **cannot be closed**:
+> - **You are already sending secrets to Anthropic.** Exposing a credential to the agent *is* putting
+>   it on the wire to `api.anthropic.com` — encodable into the agent's own prompt/tool-call content.
+>   That channel is load-bearing and bidirectional; an allowlist cannot touch it.
+> - **GitHub and the registries must stay open**, and they are full of bad code and prompt-injection
+>   payloads *inbound* while being a trivial exfil path *outbound* (push to your own repo / gist /
+>   branch name). Allowing them — which the workflow requires — hands the adversary a route out.
+>
+> So the real fix is **C1 (broker): remove the thing worth stealing.** A filtering proxy is only ever
+> a speed-bump against a *naive/accidental* agent, off by default, and buys little on top of the
+> broker. E1 below is kept as a design record, **not** as planned work. Revisit only if a concrete
+> unattended-run scenario makes the accident-class blast-radius reduction worth the sidecar.
 
 **Reframe first, because it changes the rating.** An egress allowlist is **not an exfiltration
 boundary** and the doc must not imply it is:
@@ -264,7 +321,7 @@ exactly why egress is **opt-in, off by default** — default-deny conflicts with
 that fetch from arbitrary registries. **VERIFY:** whether `WebFetch` is server-side (like `WebSearch`,
 so it survives) or a client-side fetch (so it breaks under an allowlist).
 
-### E1 · Filtering proxy as the only route out, opt-in ★★★★☆ — **PICK (off by default)**
+### E1 · Filtering proxy as the only route out, opt-in ★★★★☆ — **DESIGN RECORD ONLY (not planned; see G2 status)**
 
 Agent container gets no default route; all egress via an HTTP/SOCKS proxy with a domain allowlist. The
 fence / sandbox-runtime model.
@@ -482,12 +539,15 @@ sake.
 2. **R1 — the FUSE sidecar on Linux** *(exists, unchanged)*. **macOS is the open A/H/U decision**
    (recommendation **H**: hardened single-container FUSE, no Colima; Linux keeps the sidecar). Add R7
    hooks on top as cheap defence-in-depth.
-3. **E1 — opt-in filtering proxy** *(reuses C1's sidecar; off by default; labelled a speed-bump)*.
+3. ~~**E1 — opt-in filtering proxy**~~ **DELAYED-OR-NEVER** (see G2). The broker (C1), not a firewall,
+   is the exfil fix; an allowlist can't close `api.anthropic.com` or the registries, which is where
+   exfil actually happens. Design kept on record; not scheduled.
 4. **K1 — tighter seccomp** *(now)*; **K2 gVisor** as a Linux-only opt-in once R1 proves `/dev/fuse`
    works.
 
-**One-line summary:** the host-side broker fixes credentials and an opt-in proxy handles egress — both
-capless and portable. Redaction is the FUSE sidecar on Linux (`cap-drop=ALL`, verified). **macOS forces
+**One-line summary:** the host-side broker fixes credentials; egress is **delayed-or-never** (an
+allowlist can't close `api.anthropic.com` or the registries, so the broker — removing the secret — is
+the only real fix). Redaction is the FUSE sidecar on Linux (`cap-drop=ALL`, verified). **macOS forces
 a trade — measured, not assumed:** in-place FUSE there is `cap-drop=ALL`-via-Colima *or*
 no-Colima-via-a-`SYS_ADMIN`-cap, never both. Recommendation: **Plan H** (no Colima; hardened
 single-container FUSE on macOS; Linux unchanged). Remaining unknown: **Gate A** (`ANTHROPIC_BASE_URL` for
@@ -596,9 +656,10 @@ Settled decisions are recorded at the top (the four gates). Remaining:
   README's "macOS ❌" rows: the on-hardware VERIFY items (clipboard binary choice, virtiofs
   ownership) — see that section.
 - [x] **C3/C4 shape** — RESOLVED. Generic parameterized reverse-proxy broker (not DFS-specific); C4 detector is host-side-at-launch and advisory (warn + recommend, never blocks); shared-plugin install surfaces a friendly `--unlock-shared` error (no new subcommand).
-- [ ] **C3 transport** — does the MCP `http` client accept a plain-HTTP `url` to the broker on the internal bridge, or require `https`? (VERIFY; if TLS-required, terminate at the broker with a cert trusted only inside the container.)
-- [ ] **C3 streaming** — confirm SSE / streamable-HTTP passthrough through the reverse proxy is unbuffered and survives long-lived connections.
-- [ ] **C4 heuristic** — entropy / base64 false-positive rate on real MCP configs; tune before enabling so it never cries wolf on a `${VAR}` reference.
+- [x] **C3 transport** — RESOLVED (built): the agent reaches the broker over **plain HTTP** on the broker net (`http://cc-broker:<port><path>`); no CA needed. The broker re-originates TLS upstream.
+- [x] **C3 streaming** — RESOLVED: `cc-broker.py _do_relay` streams the response read-to-EOF, flushing per 64 KiB chunk (`send Connection: close`); SSE / streamable-HTTP passthrough is unbuffered. `tests/broker-test.py` asserts a 3-chunk stream arrives intact.
+- [x] **C4 heuristic** — RESOLVED (conservative by choice): flags `Bearer`/`Basic` header shapes + `env` names matching `TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL`, warn-only. Entropy/base64 scoring was deemed unnecessary for a non-blocking nudge; revisit only if false positives appear on real configs.
+- **On-hardware VERIFY (needs Docker; can't run from inside the sandbox):** the `hosted_mcp` sidecar end-to-end (supergateway + `uvx <server>` fetch, HOME/cache dirs, the `/mcp` streamable-HTTP path) — built + fail-soft, same "verify on first real use" status as the codex/gemini rows.
 - [x] **Gate A** — RESOLVED 2026-07-23: Claude Code **honours** `ANTHROPIC_BASE_URL` for OAuth (`HIT POST /v1/messages?beta=true`). C1 (base-URL, no CA) is the path; C2 shelved.
 - [x] **Gate D** — RESOLVED 2026-07-23: Portmaster **permits** container→container on a user bridge (`C2C 200`). E1/broker use the internal bridge; no host-loopback fallback needed.
 - [x] **`validate_shared_settings` carve-out** — RESOLVED: no code change. `cc` sets `ANTHROPIC_BASE_URL` via a container `-e` flag (host-controlled channel); the validator keeps refusing `env.ANTHROPIC_BASE_URL` in the shared *settings.json* (the agent-writable, cross-project channel). Two different channels.

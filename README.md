@@ -106,9 +106,10 @@ cd keep-it-in-your-box
 ./migrate-sessions.sh
 ./migrate-sessions.sh --apply
 
-# Add both aliases to your shell rc, pointing at the absolute path
-echo "alias cc='$PWD/cc'"  >> ~/.bashrc
-echo "alias kib='$PWD/cc'" >> ~/.bashrc
+# Add both aliases to your shell rc, pointing at the absolute path.
+# kib = the box launcher (kib bash, kib python …); cc = kib claude (launch Claude Code).
+echo "alias kib='$PWD/cc'"        >> ~/.bashrc
+echo "alias cc='$PWD/cc claude'"  >> ~/.bashrc
 ```
 
 The image builds automatically on first run. Then `cd` into any project and run `cc`.
@@ -159,6 +160,31 @@ failed too.
   ```
 
   The brokered credential is deliberately a **static** long-lived token, never `~/.claude-shared/.credentials.json` — Anthropic's subscription refresh tokens are single-use and rotate, so a second process refreshing them logs you out of every other session. Egress itself is still open: a default-deny allowlist conflicts with the sandbox's whole purpose (building untrusted repos that fetch from arbitrary registries).
+
+- **The same broker holds your *other* secrets — a Codex key, and any MCP's token.** The broker isn't limited to a fixed list: it brokers **any** MCP, whether or not we've heard of it. **The easiest path is the one you'd do anyway: take a service's own install line and swap `claude`→`cc`.** A vendor tells you to run `claude mcp add --header "Authorization: Bearer <token>" --transport http foo <url>`; change the first word to `cc` and cc **intercepts it host-side, before anything reaches the box** — peeling the token off, storing it host-only (mode 600), and wiring a header-free broker route. The secret never enters the sandbox; you don't need to learn a new command (this is exactly why `cc` is aliased to `kib claude` — swapping `claude`→`cc` is lossless):
+
+  ```bash
+  cc mcp add --header "Authorization: Bearer <token>" --transport http foo <url>
+  #  → 🔐 Intercepted an inline MCP credential and brokered it host-side — it never entered the sandbox.
+  ```
+
+  (The local/stdio form that ships secrets as `--env` can't be brokered that way, so cc **refuses** it rather than leak — `CC_ALLOW_INLINE_MCP_SECRET=1` is the deliberate override. And if a secret got into a config some *other* way, cc still **warns** on the next launch and offers `cc --mcp-adopt <name>` to migrate it.) You can also declare one directly:
+
+  ```bash
+  # remote MCP, static auth header (broker injects it):
+  cc --add-mcp linear --url https://mcp.linear.app/sse --header "Authorization: Bearer"
+  cc --login linear          # paste the token; stored host-only, never in the box
+  # local/hosted MCP whose secret can't be header-injected (runs in its own sidecar):
+  cc --add-mcp gsc --run "uvx mcp-search-console" --cred-env GSC_CREDENTIALS_PATH \
+     --cred-kind file --env GSC_SKIP_OAUTH=true
+  cc --login gsc             # give the path to a service-account JSON key
+  cc --login codex           # an OpenAI API key → OPENAI_BASE_URL points at the broker
+  cc --status                # list every credential (size/mode only, never contents)
+  ```
+
+  **No MCP is built in — only the LLMs are.** DataForSEO (remote, Basic auth) and mcp-gsc (a Google service-account JSON, run in its own sidecar) ship as worked **examples** in [`examples/providers/`](examples/providers/) — copy one into `~/.keep-it-in-your-box/providers.d/` and `cc --login` it; your own MCP works exactly the same way. With the broker on, cc writes a **header-free** broker URL into the session config, so the agent reaches the MCP without ever holding its credential. Brokering an MCP requires `broker = on`. See [`docs/FUTURE_TASKS.md`](docs/FUTURE_TASKS.md) § G1 (C3/C4) and CLAUDE.md "Credential broker".
+
+  **An egress firewall is a "delayed-or-never" task, on purpose.** An allowlist is a speed-bump against the accidental case, never an exfiltration boundary — and the two channels that matter cannot be closed. `api.anthropic.com` must stay open, and it is itself a bidirectional exfil path: anything you expose to the agent is *already* on its way to the API, encodable into its own prompt and tool-call content. `github.com` and the package registries must stay open for the agent to work — and once they are, exfil is trivial (push to your own repo, a gist, a branch name), while the same forges serve arbitrary bad code and prompt-injection payloads *inbound*. So the real fix is the **broker** (remove the thing worth stealing), not a firewall. A filtering proxy would only ever be defence-in-depth against a naive agent, off by default; it buys little over the broker and is not planned work. See [`docs/FUTURE_TASKS.md`](docs/FUTURE_TASKS.md) § G2.
 - **`host.docker.internal` is routable** to the host network stack.
 - **The project directory is writable**, by design — the agent's job is to edit your code.
 

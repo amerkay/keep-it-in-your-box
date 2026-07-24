@@ -9,11 +9,19 @@ set -euo pipefail
 # Exactly $HOME, ~/Desktop, ~/Documents, ~/Downloads; subdirectories are fine. Runs
 # before any trap is installed, so the error stays on screen after exit.
 #
-# The broker token subcommands are exempt: they manage a HOST-GLOBAL credential, never
-# touch the project dir, and $HOME is the natural place to run them from — the guard
-# below would otherwise reject `cc --broker-login` there. (They are dispatched further
-# down, after sourcing, since they need cc-lib.sh.)
-case "${1:-}" in --broker-login|--broker-logout|--broker-status) _skip_dir_guard=1 ;; *) _skip_dir_guard=0 ;; esac
+# The credential subcommands are exempt: they manage HOST-GLOBAL credentials, never touch the
+# project dir, and $HOME is the natural place to run them from — the guard below would
+# otherwise reject `cc --login` there. (Dispatched further down, after sourcing cc-lib.sh.)
+# --mcp-adopt DOES touch the project (it reads .mcp.json), so it is NOT exempt.
+case "${1:-}" in
+    --broker-login|--broker-logout|--broker-status|--login|--logout|--status|--add-mcp) _skip_dir_guard=1 ;;
+    # `[claude] mcp add|add-json` is intercepted host-side (host-global, identity-free, like
+    # --add-mcp), so it must work from $HOME too. A normal `cc claude` session stays guarded.
+    mcp)    case "${2:-}" in add|add-json) _skip_dir_guard=1 ;; *) _skip_dir_guard=0 ;; esac ;;
+    claude) _skip_dir_guard=0
+            [ "${2:-}" = mcp ] && case "${3:-}" in add|add-json) _skip_dir_guard=1 ;; esac ;;
+    *) _skip_dir_guard=0 ;;
+esac
 _pwd="$(realpath "$PWD" 2>/dev/null || echo "$PWD")"
 _home="$(realpath "$HOME" 2>/dev/null || echo "$HOME")"
 _blocked=""
@@ -73,7 +81,23 @@ case "${1:-}" in
     --broker-login)  shift; broker_login  && exit 0 || exit $? ;;
     --broker-logout) shift; broker_logout && exit 0 || exit $? ;;
     --broker-status) shift; broker_status && exit 0 || exit $? ;;
+    # Unified, registry-driven surface. `cc --login <name>` (name defaults to claude), etc.
+    --login)   shift; provider_login  "${1:-claude}" && exit 0 || exit $? ;;
+    --logout)  shift; provider_logout "${1:-claude}" && exit 0 || exit $? ;;
+    --status)  shift; provider_status                && exit 0 || exit $? ;;
+    --add-mcp) shift; mcp_add "$@"                    && exit 0 || exit $? ;;
+    # Migrate an inline-credential MCP (claude mcp add --header …) into the broker. Touches the
+    # project dir, so it runs after identity is known — dispatched below, not here.
 esac
+
+# Front-line preventer: catch a pasted `cc [claude] mcp add … --header/--env <secret>` (the user
+# swaps claude→cc) HERE, host-side, before it can carry a secret into the container as argv. Its
+# tri-state exit drives ours — 0 = auto-brokered/staged (done), 2 = blocked, anything else = not
+# an intercept, fall through to a normal launch. See intercept_mcp_add in cc-lib.sh.
+_ic=0; intercept_mcp_add "$@" || _ic=$?
+[ "$_ic" = 0 ] && exit 0
+[ "$_ic" = 2 ] && exit 2
+unset _ic
 
 preflight_platform          # darwin: engine/perl/bind-mount checks; linux: no-op
 build_image_if_missing
@@ -185,6 +209,18 @@ fi
 
 # Every launch, not just the first: the seed covers only a brand-new session dir.
 pin_global_config "$SESSION_DIR/.claude.json"
+
+# Migrate an inline-credential MCP into the broker, then exit. Runs here (not with the other
+# subcommands) because it reads the project's .mcp.json and this session's .claude.json, both
+# of which need identity resolved. Never starts a container.
+if [ "${1:-}" = "--mcp-adopt" ]; then
+    shift
+    mcp_adopt "${1:-}" && exit 0 || exit $?
+fi
+
+# Warn (never block) if an MCP config carries an inline credential the agent can read. Runs on
+# every launch — create and attach — since a user may add one between sessions.
+warn_inline_mcp_secrets
 
 sync_ccignore_gitignore
 
@@ -544,9 +580,18 @@ trap 'exit 143' TERM
 # ── Run this terminal's session inside the project container ──
 # Re-entering through the entrypoint (rather than calling claude directly) reuses its
 # "already the target user" branch, which sets HOME and PATH correctly.
+# `cc` is aliased to `kib claude`, so an interactive launch arrives with a leading `claude`
+# token — strip it. What remains decides the command: nothing / a bare flag (`--resume`) → an
+# interactive session with the skip-permissions default the box is built around; a leading
+# `mcp …` (a claude→cc swap on `claude mcp …`, or a bare `kib mcp …`) is a Claude subcommand,
+# not a container binary, so route it through claude too — the secret-bearing `mcp add` forms
+# were already intercepted host-side above. Anything else runs verbatim in the box (`kib bash`,
+# `kib python app.py`). `claude` tolerates the global flag before a subcommand; a duplicate is
+# harmless.
+[ "${1:-}" = claude ] && shift
 if [ $# -eq 0 ]; then
     CMD=(claude --dangerously-skip-permissions)
-elif [[ "$1" == -* ]]; then
+elif [ "$1" = mcp ] || [[ "$1" == -* ]]; then
     CMD=(claude --dangerously-skip-permissions "$@")
 else
     CMD=("$@")

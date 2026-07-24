@@ -1,0 +1,13 @@
+{
+  "id": "gsc",
+  "delivery": "hosted_mcp",
+  "credential_kind": "file_path",
+  "token_basename": "gsc-service-account.json",
+  "host_run": ["uvx", "mcp-search-console"],
+  "credential_env": "GSC_CREDENTIALS_PATH",
+  "extra_env": { "GSC_SKIP_OAUTH": "true" },
+  "mcp_server_name": "gscServer",
+  "mcp_port": 8101,
+  "mcp_path": "/mcp",
+  "mcp_transport": "http"
+}

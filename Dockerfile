@@ -76,12 +76,17 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
     && mv /root/.local/bin/uv /usr/local/bin/uv \
     && mv /root/.local/bin/uvx /usr/local/bin/uvx
 
-# Install JavaScript/TypeScript development tools
+# Install JavaScript/TypeScript development tools.
+# supergateway bridges a stdio MCP server to streamable-HTTP; the credential-broker's
+# hosted-MCP sidecar (cc-lib.sh start_hosted_mcp) runs it to expose a local/client-signed MCP
+# (e.g. Google Search Console) over the broker network without the credential entering the
+# agent container. Pre-installed so the sidecar needs no runtime npm fetch.
 RUN npm install -g \
     ts-node \
     tsx \
     yarn \
-    pnpm
+    pnpm \
+    supergateway
 
 # Install shfmt (shell formatter) - non-blocking, build continues even if this fails
 RUN ARCH=$(case $(uname -m) in \
