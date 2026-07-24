@@ -936,7 +936,7 @@ EOF
         --user "$(id -u):$(id -g)" --userns=host --entrypoint python3
         --network "$BROKER_NET" --network-alias cc-broker
         "${tok_mounts[@]}"
-        "${prov_mount[@]}"
+        ${prov_mount[@]+"${prov_mount[@]}"}
         -v "$BROKER_OUT:/run/broker/out"
         -v "$BROKER_DIR/config.json:/run/broker/config.json:ro"
         -v /etc/passwd:/etc/passwd:ro
@@ -1010,7 +1010,7 @@ start_hosted_mcp() {
             -v "$KIB_DIR/$CCB_TOKEN_BASENAME:/run/cred/$CCB_TOKEN_BASENAME:ro"
             -e "$CCB_CREDENTIAL_ENV=/run/cred/$CCB_TOKEN_BASENAME"
             -e "HOME=/tmp" -e "UV_CACHE_DIR=/tmp/.uv" -e "npm_config_cache=/tmp/.npm"
-            "${env_args[@]}"
+            ${env_args[@]+"${env_args[@]}"}
             -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro
             --entrypoint sh "$IMAGE_NAME"
             -c "exec npx -y supergateway --stdio \"$CCB_HOST_RUN\" --outputTransport streamableHttp --port $CCB_MCP_PORT --host 0.0.0.0"
@@ -1337,9 +1337,10 @@ $(_broker_list_providers)
 EOF
     if broker_has_token; then
         echo
-        provider_probe claude
+        provider_probe claude     # propagate its tri-state: 0 accepted / 1 rejected / 2 inconclusive
+        return $?                  # so `cc --status` distinguishes a revoked token (re-login) from a healthy one
     fi
-    broker_has_token          # exit non-zero when claude (the required cred) is absent
+    return 1                       # no claude token stored → the required cred is absent
 }
 
 # Back-compat aliases: the original --broker-* subcommands act on the claude provider.
@@ -1701,6 +1702,19 @@ if secret_env:
     w('     • Or a single-value hosted server:  cc --add-mcp %s --run "<cmd>" --cred-env <ENV>\n' % nm)
     w("     • To knowingly accept the secret INSIDE the sandbox, re-run with:\n")
     w("         CC_ALLOW_INLINE_MCP_SECRET=1 cc claude mcp add …\n")
+    sys.exit(2)
+
+# ── An auth header we could NOT auto-broker (no remote http(s) URL, or no name, or a stdio
+# target) would still ride into the container's argv on passthrough — the exact leak this
+# interceptor exists to prevent. BLOCK it too (opt out with CC_ALLOW_INLINE_MCP_SECRET=1). ──
+if hval and not allow:
+    w = sys.stderr.write
+    nm = name or "<name>"
+    w("❌ cc won't carry an inline MCP auth header into the sandbox.\n")
+    w("   '%s' has an auth header cc couldn't broker — that needs a remote http(s) URL and a name:\n" % nm)
+    w('     cc claude mcp add --header "Authorization: Bearer <token>" --transport http %s <https-url>\n' % nm)
+    w("   To knowingly accept the secret INSIDE the sandbox, re-run with:\n")
+    w("     CC_ALLOW_INLINE_MCP_SECRET=1 cc claude mcp add …\n")
     sys.exit(2)
 
 sys.exit(1)                                # no secret to protect → passthrough

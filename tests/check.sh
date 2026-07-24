@@ -382,6 +382,20 @@ else
     bad "intercept local-env wrong" "$icB"
 fi
 
+# An auth header cc could NOT auto-broker (no remote http(s) URL, or a stdio target) must still be
+# BLOCKED, not passed through — otherwise the raw secret rides into the container argv/.claude.json.
+icH="$(_mcp_run '
+  intercept_mcp_add claude mcp add icnourl --header "Authorization: Bearer sk-noturl" 2>"$SESSION_DIR/ic.err"; echo "nourl_rc=$?"
+  grep -q sk-noturl "$SESSION_DIR/ic.err" && echo leak=yes || echo leak=no
+  intercept_mcp_add claude mcp add icstdio --header "Authorization: Bearer sk-stdio" -- npx -y some-server 2>/dev/null; echo "stdio_rc=$?"
+  CC_ALLOW_INLINE_MCP_SECRET=1 intercept_mcp_add claude mcp add icnourl --header "Authorization: Bearer sk-noturl" 2>/dev/null; echo "optout_rc=$?"')"
+if printf '%s' "$icH" | grep -q "nourl_rc=2" && printf '%s' "$icH" | grep -q "leak=no" \
+   && printf '%s' "$icH" | grep -q "stdio_rc=2" && printf '%s' "$icH" | grep -q "optout_rc=1"; then
+    ok "intercept_mcp_add: unbrokerable auth header (no URL / stdio) blocked (rc2, no leak); opt-out rc1"
+else
+    bad "intercept unbrokerable-header wrong (should block, not passthrough)" "$icH"
+fi
+
 icC="$(_mcp_run '
   intercept_mcp_add claude mcp add plainmcp https://example.com/mcp --transport http 2>/dev/null; echo "nosecret_rc=$?"
   intercept_mcp_add mcp list 2>/dev/null; echo "list_rc=$?"
