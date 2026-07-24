@@ -39,6 +39,10 @@
 #   SLEEP_GUARD_LID_SUSPEND=1   (LINUX ONLY) on going idle with the lid shut, suspend the
 #                               machine (0 disables — e.g. if you run lid-shut on purpose).
 #                               No-op on macOS, where the OS handles lid-shut sleep itself.
+#   SLEEP_GUARD_SETTLE=15       (LINUX ONLY) seconds to stay awake after a resume before the
+#                               guard may re-suspend. Blocks the sub-second resume→suspend
+#                               cycle that wedges AMD s2idle (a wake with lid still shut + idle
+#                               would otherwise re-suspend on the first poll and hang).
 
 CONTAINER="${1:?Usage: sleep-guard.sh <container-name> <session-tag>}"
 TAG="${2:?Usage: sleep-guard.sh <container-name> <session-tag>}"
@@ -47,6 +51,7 @@ GRACE="${SLEEP_GUARD_GRACE:-30}"
 MIN_BYTES="${SLEEP_GUARD_MIN_BYTES:-1024}"
 DEBUG="${SLEEP_GUARD_DEBUG:-0}"
 LID_SUSPEND="${SLEEP_GUARD_LID_SUSPEND:-1}"
+SETTLE="${SLEEP_GUARD_SETTLE:-15}"   # (LINUX) after a resume, stay awake this long before re-suspending
 
 # CC_OS / is_macos come from cc-portable.sh (the one place OS branching lives). Fall back to
 # a local probe if it is somehow unavailable, so the guard never hard-fails at startup.
@@ -60,6 +65,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INHIBIT_PID=""
 LAST_ACTIVE=0
 PREV=""             # previous "<pid> <bytes>" sample, one line per pid
+AWAKE_SINCE=0       # epoch of the last resume (or 0 = never suspended since start); gates re-suspend
+LAST_LOOP=0         # epoch of the previous loop iteration; a jump >> POLL means we were suspended
 
 release_lock() {
     if [ -n "$INHIBIT_PID" ] && kill -0 "$INHIBIT_PID" 2>/dev/null; then
@@ -178,6 +185,20 @@ docker inspect "$CONTAINER" &>/dev/null || exit 1
 
 while docker inspect "$CONTAINER" &>/dev/null; do
     NOW=$(date +%s)
+
+    # A resume looks like the poll sleep taking far longer than POLL: this host guard is
+    # frozen through the machine's own suspend, so wall-clock jumps while it was parked in
+    # `sleep`. Re-issuing suspend on the first idle poll after a wake would re-suspend within
+    # a second of resuming — a resume→suspend cycle that tight wedges the AMD s2idle path
+    # (observed: hard hang, power-cycle to recover). Arm a settle window on any such jump so
+    # devices quiesce and a lid-open event can register before we are allowed to suspend
+    # again; a suspend we issue ourselves is likewise re-detected here, so there is no loop.
+    if [ "$LAST_LOOP" -gt 0 ] && [ $((NOW - LAST_LOOP)) -gt $((POLL + 5)) ]; then
+        AWAKE_SINCE=$NOW
+        [ "$DEBUG" = 1 ] && echo "[sleep-guard] resume detected (slept $((NOW - LAST_LOOP))s) — settling ${SETTLE}s before any re-suspend" >&2
+    fi
+    LAST_LOOP=$NOW
+
     CUR="$(sample_wchar)"
     BUSIEST="$(busiest_delta "$PREV" "$CUR")"
 
@@ -196,7 +217,13 @@ while docker inspect "$CONTAINER" &>/dev/null; do
         LAST_ACTIVE=$NOW
     elif [ "$LAST_ACTIVE" -gt 0 ] && [ $((NOW - LAST_ACTIVE)) -ge "$GRACE" ]; then
         release_lock
-        suspend_if_lid_shut     # honour the lid-close we blocked while the task ran (linux)
+        # honour the lid-close we blocked while the task ran (linux), UNLESS we resumed less
+        # than SETTLE ago — re-suspending that soon after a wake wedges s2idle (see above).
+        if [ "$AWAKE_SINCE" -eq 0 ] || [ $((NOW - AWAKE_SINCE)) -ge "$SETTLE" ]; then
+            suspend_if_lid_shut
+        elif [ "$DEBUG" = 1 ]; then
+            echo "[sleep-guard] idle + lid shut, but only $((NOW - AWAKE_SINCE))s since resume (<${SETTLE}s) — deferring suspend" >&2
+        fi
     fi
 
     # Carry cur forward as the next baseline. An empty sample (session gone, or docker
