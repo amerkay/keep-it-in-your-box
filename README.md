@@ -18,6 +18,7 @@
   <a href="#compare">How it compares</a> &#183;
   <a href="#hood">Under the hood</a> &#183;
   <a href="#start">Quick start</a> &#183;
+  <a href="#dev">Development</a> &#183;
   <a href="#accepted-risks">Accepted risks</a>
 </p>
 
@@ -120,6 +121,8 @@ The image builds automatically on first run. Then `cd` into any project and run 
 - Docker — Docker Desktop, OrbStack, or Colima on macOS; any engine on Linux.
 - A Wayland session for host clipboard / image paste on Linux (optional — absent Wayland just disables paste).
 - `git`, `bash`, `perl` (system perl is fine on macOS — no Homebrew dependencies).
+
+<h2 id="dev"><img src="assets/readme/section-dev.svg" width="100%" alt="Development"></h2>
 
 ### Linting and formatting
 
