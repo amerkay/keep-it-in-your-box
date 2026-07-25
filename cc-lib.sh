@@ -84,8 +84,10 @@ check_for_updates() {
     local answer=""
     read -rp "Rebuild image in background? [y/N] " answer || answer=""
     [[ "$answer" =~ ^[Yy]$ ]] || return 0
-    # Its own process group, so `kill -TERM -PGID` kills the whole build tree.
-    detach_pgrp "$SCRIPT_DIR/build-bg.sh"
+    # Its own process group, so `kill -TERM -PGID` kills the whole build tree. `--background`
+    # plus the redirect are belt-and-braces for the same thing: setsid leaves fd 1 on the
+    # user's terminal, so without them the build streams its BuildKit UI over the session.
+    detach_pgrp "$SCRIPT_DIR/build-bg.sh" --background >/dev/null 2>&1
     echo $! >"$BUILD_PID"
     disown
     echo "🔨 Starting background rebuild... (log: $BUILD_LOG)" >&2

@@ -22,9 +22,14 @@ export MYPY_CACHE_DIR
 FAILED=""
 
 # Prefer a repo-local venv (host setup) over whatever is on PATH (the container bakes
-# /opt/dev-tools onto PATH), so a host venv never silently loses to a stale global install.
+# /opt/dev-tools onto PATH), so a host venv never silently loses to a stale global install —
+# but only if it can actually execute *here*. The repo is shared with the container, and a host
+# `uv venv` puts a symlink to a uv-managed interpreter in .venv/bin/python3 that does not exist
+# inside the sandbox: `ruff` still runs (native binary, no shebang) while `mypy` dies with
+# "required file not found". Probing beats guessing at the environment — it also routes around a
+# half-deleted or wrong-arch venv on the host, and needs no OS/container branching.
 tool() {
-    if [ -x ".venv/bin/$1" ]; then
+    if [ -x ".venv/bin/$1" ] && ".venv/bin/$1" --version >/dev/null 2>&1; then
         printf '%s\n' ".venv/bin/$1"
     elif command -v "$1" >/dev/null 2>&1; then
         printf '%s\n' "$1"

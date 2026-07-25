@@ -20,8 +20,13 @@ BUILD_PID="$SCRIPT_DIR/build.pid"
 # backgrounds it the output goes quietly to build.log, as before.
 # `if`, never `[ -t 1 ] && …`: a bare failing AND-list trips `set -e`, and
 # the non-interactive case is exactly the backgrounded one cc relies on.
+#
+# `--background` is passed by cc and OVERRIDES the tty test — do not go back to `[ -t 1 ]`
+# alone. detach_pgrp runs this under setsid, which drops the controlling terminal but leaves
+# fd 1 pointing at the user's terminal, so the tty test stayed true and BuildKit drew its
+# progress UI straight over the running Claude session (and build.log got nothing).
 INTERACTIVE=0
-if [ -t 1 ]; then INTERACTIVE=1; fi
+if [ "${1:-}" != --background ] && [ -t 1 ]; then INTERACTIVE=1; fi
 
 exec 9>"$BUILD_LOCK"
 # Non-blocking: a second build would only redo the first one's work, and both would

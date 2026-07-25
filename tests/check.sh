@@ -545,6 +545,17 @@ else
     ok "cc leaves the terminal to Claude's TUI (no 'tput reset')"
 fi
 
+# A backgrounded rebuild must not decide "nobody is watching" from the tty alone. setsid drops
+# the controlling terminal but leaves fd 1 on the user's terminal, so `[ -t 1 ]` stayed true and
+# BuildKit drew its progress UI over the running Claude session while build.log got nothing.
+if grep -qE '^if \[ "\$\{1:-\}" != --background \] && \[ -t 1 \]' build-bg.sh \
+    && grep -q 'build-bg.sh" --background >/dev/null 2>&1' cc-lib.sh; then
+    ok "backgrounded rebuild stays off the terminal (--background + redirect, not just [ -t 1 ])"
+else
+    bad "background rebuild can stream over the session" \
+        "build-bg.sh must honour --background, and cc-lib.sh must pass it AND redirect"
+fi
+
 # FUSE reads must be pread, not lseek+read. With nothreads=False several worker threads serve
 # one open file and share the fd's offset, so racing lseeks made a reader see the file
 # truncated at a 16 KiB boundary — silent corruption that showed up as "flaky" lint/test runs.
