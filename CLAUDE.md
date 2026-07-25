@@ -29,10 +29,19 @@ ends.
 ## Commands
 
 ```bash
+./dev.sh format               # ruff format + ruff --fix + shfmt -w
+./dev.sh lint                 # ruff, mypy --strict, shfmt -d
+./dev.sh check                # lint + tests/check.sh — exactly what CI runs
 ./tests/check.sh              # host-side dev suite: syntax, shellcheck, portability, broker logic
 ./tests/security-test.sh      # run INSIDE a sandbox; --list, -k <section>, --no-clipboard
 python3 tests/broker-test.py  # broker relay/injection unit tests (also run by check.sh)
 ```
+
+Toolchain config is repo-root and shared by editor, container and host: `pyproject.toml` (ruff
++ mypy `strict`), `.editorconfig` (shfmt's config too — pass it **no** style flags or it ignores
+the file), 100-column lines everywhere. Versions are pinned in `requirements-dev.txt` and in the
+Dockerfile's `ARG SHFMT_VERSION` / `ARG SHELLCHECK_VERSION`; keep the latter in step with
+`.github/workflows/lint.yml`. Conventions live in `CONVENTIONS.md`.
 
 Security-relevant changes must pass `security-test.sh` in **both** redaction modes: once
 normally, once with the container launched under `CC_SINGLE_CONTAINER=1` (the macOS topology).
@@ -82,6 +91,11 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   (`terminal-and-security.md`)
 - **No `tput reset`** (regression-guarded); keep `|| true` on `tput cols`/`lines` and `read`.
   (`terminal-and-security.md`)
+- **FUSE passthrough I/O is `os.pread`/`os.pwrite`, never `lseek`+`read`** — the shared fd offset
+  truncated reads at a 16 KiB boundary, which is where years of "flaky" lint/test runs came from.
+  Regression-guarded. Also: keep mypy's cache out of the repo (mmap over the view SIGBUSes —
+  `dev.sh` exports `MYPY_CACHE_DIR`), and keep `dev.sh`'s explicit `.py` list (`ruff format`
+  rewrites python blocks inside `*.md`). (`redaction-config-guard.md`)
 - **Never unlink lock files**, and every backgrounded host process must close fds 200/201
   (`200>&- 201>&-`) — one miss strands every project's containers. Unmount the FUSE view
   *before* killing its sidecar. (`container-lifecycle.md`)

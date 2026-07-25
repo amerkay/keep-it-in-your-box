@@ -93,7 +93,9 @@ No project here does everything. `cc` is the only one that **validates `.git/con
 - **A Wayland proxy sidecar** holds the only real compositor socket, forwarding reads and refusing every write request.
 - **Host-side, at every launch:** a `.ccignore` → `.gitignore` + pre-commit sync, a `settings.json` validator that rejects inline `hooks[].command`, and a DNS watcher that follows host network changes.
 
-Every design decision and its rationale lives in [`CLAUDE.md`](CLAUDE.md).
+Every design decision and its rationale — including the dead ends — lives in
+[`docs/design-notes/`](docs/design-notes/README.md); [`CLAUDE.md`](CLAUDE.md) carries the working
+rules that reference it.
 
 <h2 id="start"><img src="assets/readme/section-start.svg" width="100%" alt="Quick start"></h2>
 
@@ -118,6 +120,44 @@ The image builds automatically on first run. Then `cd` into any project and run 
 - Docker — Docker Desktop, OrbStack, or Colima on macOS; any engine on Linux.
 - A Wayland session for host clipboard / image paste on Linux (optional — absent Wayland just disables paste).
 - `git`, `bash`, `perl` (system perl is fine on macOS — no Homebrew dependencies).
+
+### Linting and formatting
+
+One entrypoint, behaving identically in all three places you might run it — inside the box, on
+the host, and in your editor:
+
+```bash
+./dev.sh format   # rewrite:  ruff format, ruff check --fix, shfmt -w
+./dev.sh lint     # verify:   ruff format --check, ruff check, mypy --strict, shfmt -d
+./dev.sh check    # lint + tests/check.sh — exactly what CI runs
+```
+
+Inside the box there is nothing to install: the image bakes ruff, mypy, shfmt and shellcheck at
+the pinned versions. On the host:
+
+```bash
+uv venv --python 3.13
+uv pip install -r requirements-dev.txt
+# or, without uv:  python3 -m venv .venv && ./.venv/bin/pip install -r requirements-dev.txt
+```
+
+shfmt and shellcheck are Go/Haskell binaries, not Python packages — install the pinned releases
+(shfmt `v3.13.1`, shellcheck `v0.10.0`), or `brew install shfmt shellcheck` on macOS and keep the
+versions in step. `dev.sh` prefers a repo-local `.venv` but probes each tool before using it, so a
+host venv — whose interpreter the container cannot see — falls back to the baked copies by itself.
+
+Configuration is repo-root, shared by editor, container and host, and never duplicated into an
+editor profile:
+
+| File | Governs |
+|---|---|
+| `pyproject.toml` | ruff (format, lint, import order) and mypy `strict` |
+| `.editorconfig` | 100-column lines — and **shfmt's own config**, which it reads whenever no style flags are passed, so `dev.sh` passes none |
+| `requirements-dev.txt` | exact pins for ruff and mypy |
+| `Dockerfile`, `.github/workflows/lint.yml` | pinned shfmt + shellcheck binaries, kept in step with each other |
+
+What to annotate, when a `# noqa` earns its place, and the shell rules are in
+[`CONVENTIONS.md`](CONVENTIONS.md).
 
 ### Tests
 
