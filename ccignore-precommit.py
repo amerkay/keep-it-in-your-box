@@ -18,6 +18,7 @@ import fnmatch
 import os
 import subprocess
 import sys
+from collections.abc import Sequence
 
 # ── Host-config audit ────────────────────────────────────────────────────
 # The sandbox's FUSE guard refuses to write these, but this hook is the backstop:
@@ -34,9 +35,9 @@ PRUNE_DIRS = {"node_modules", ".venv", "venv", "target", "dist", "build", ".tox"
 GITDIR_MARKERS = ("HEAD", "objects", "refs")
 
 
-def bad_keys(listing):
+def bad_keys(listing: str) -> list[str]:
     """Lines of `git config --list` output naming a command the host would run."""
-    bad = []
+    bad: list[str] = []
     for line in listing.splitlines():
         key = line.split("=", 1)[0].strip().lower()
         if not key:
@@ -47,7 +48,7 @@ def bad_keys(listing):
     return bad
 
 
-def git_config_list(args):
+def git_config_list(args: Sequence[str]) -> str:
     try:
         return subprocess.run(
             ["git", "config", *args, "--list", "--includes"],
@@ -59,7 +60,7 @@ def git_config_list(args):
         return ""
 
 
-def audit_git_config():
+def audit_git_config() -> list[str]:
     """Local git config entries whose value is a command the host would run.
 
     `--includes` is what makes this see through `include.path` indirection; without
@@ -70,14 +71,14 @@ def audit_git_config():
     return bad_keys(git_config_list(["--local"]))
 
 
-def audit_nested_gitdirs(top):
+def audit_nested_gitdirs(top: str) -> list[str]:
     """Dangerous config in git dirs the top-level scope never sees.
 
     Bare repos, `--separate-git-dir` targets and gitfile redirects are ordinary
     directories as far as `git config --local` is concerned, yet the host runs
     what they configure the moment it touches that repo.
     """
-    bad = []
+    bad: list[str] = []
     for dirpath, dirnames, _ in os.walk(top):
         dirnames[:] = [d for d in dirnames if d not in PRUNE_DIRS]
         if not all(os.path.exists(os.path.join(dirpath, m)) for m in GITDIR_MARKERS):
@@ -95,14 +96,14 @@ def audit_nested_gitdirs(top):
     return bad
 
 
-def audit_nested_hooks(top):
+def audit_nested_hooks(top: str) -> list[str]:
     """Executable hooks in *nested* git dirs — submodules, worktrees, sub-repos.
 
     The top-level .git/hooks is left alone: cc bind-mounts it read-only and it is
     the user's own. Nested ones are the gap that mount cannot cover, since a repo
     can be cloned or `git init`ed after the container started.
     """
-    found = []
+    found: list[str] = []
     for dirpath, dirnames, filenames in os.walk(top):
         dirnames[:] = [d for d in dirnames if d not in PRUNE_DIRS]
         if os.path.basename(dirpath) == ".git":
@@ -122,10 +123,10 @@ def audit_nested_hooks(top):
     return found
 
 
-def load_rules(path):
+def load_rules(path: str) -> list[tuple[bool, str, bool]]:
     """Ordered list of (negated, pattern, is_exact); order preserved so a
     later '!' rule re-includes a path an earlier rule matched."""
-    rules = []
+    rules: list[tuple[bool, str, bool]] = []
     with open(path) as f:
         for line in f:
             line = line.split("#", 1)[0].strip()
@@ -143,7 +144,7 @@ def load_rules(path):
     return rules
 
 
-def matches(rel, rules):
+def matches(rel: str, rules: Sequence[tuple[bool, str, bool]]) -> bool:
     """Gitignore-consistent: last matching rule wins, and a path under an
     already-masked parent directory can't be re-included by negation."""
     parts = rel.split("/")
@@ -156,7 +157,7 @@ def matches(rel, rules):
             if exact:
                 ppar = pat.split("/")
                 hit = len(ppar) == len(anc) and all(
-                    fnmatch.fnmatch(a, p) for a, p in zip(anc, ppar)
+                    fnmatch.fnmatch(a, p) for a, p in zip(anc, ppar, strict=True)
                 )
             else:
                 hit = not under_git and fnmatch.fnmatch(seg, pat)
@@ -168,7 +169,7 @@ def matches(rel, rules):
     return ignored
 
 
-def main():
+def main() -> int:
     try:
         top = subprocess.check_output(["git", "rev-parse", "--show-toplevel"]).decode().strip()
     except subprocess.CalledProcessError:

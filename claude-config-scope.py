@@ -38,6 +38,8 @@ import json
 import os
 import sys
 import tempfile
+from collections.abc import Callable
+from typing import Any
 
 # ── Manifest (versioned) ────────────────────────────────────────────────────
 # Every top-level entry cc knows how to place. Bump MANIFEST_VERSION when Claude Code
@@ -101,7 +103,7 @@ CC_PINNED_GLOBALS = ("leftArrowOpensAgents",)
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
-def _load_json(path):
+def _load_json(path: str) -> tuple[Any, str]:
     """Return (obj, status): status 'ok' | 'absent' | 'bad'."""
     if not os.path.exists(path):
         return None, "absent"
@@ -112,7 +114,7 @@ def _load_json(path):
         return None, "bad"
 
 
-def _atomic_write_json(path, obj):
+def _atomic_write_json(path: str, obj: Any) -> None:
     d = os.path.dirname(path) or "."
     os.makedirs(d, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".ccscope.")
@@ -129,13 +131,13 @@ def _atomic_write_json(path, obj):
         raise
 
 
-def _globals_only(cfg):
+def _globals_only(cfg: dict[str, Any]) -> dict[str, Any]:
     """Every key except the project-scoped ones."""
     return {k: v for k, v in cfg.items() if k not in GLOBAL_ONLY_DROP}
 
 
 # ── subcommands ─────────────────────────────────────────────────────────────
-def scope_in_json(src, path, dst):
+def scope_in_json(src: str, path: str, dst: str) -> int:
     """globals + this project's entry only → dst (a fresh session .claude.json)."""
     cfg, status = _load_json(src)
     if status == "bad":
@@ -169,7 +171,7 @@ def scope_in_json(src, path, dst):
     return 0
 
 
-def merge_out_json(scratch, path, canonical):
+def merge_out_json(scratch: str, path: str, canonical: str) -> int:
     """Write ONLY projects[path] from scratch back into canonical; globals untouched."""
     sc, sc_status = _load_json(scratch)
     if sc_status != "ok" or not isinstance(sc, dict):
@@ -210,7 +212,7 @@ def merge_out_json(scratch, path, canonical):
     return 0
 
 
-def _project_of(line):
+def _project_of(line: str) -> Any:
     try:
         obj = json.loads(line)
     except (ValueError, TypeError):
@@ -218,9 +220,9 @@ def _project_of(line):
     return obj.get("project") if isinstance(obj, dict) else None
 
 
-def seed_history(src, path, dst):
+def seed_history(src: str, path: str, dst: str) -> int:
     """Filter canonical history.jsonl to this project's lines → dst."""
-    lines = []
+    lines: list[str] = []
     if os.path.isfile(src):
         with open(src, errors="replace") as fh:
             for line in fh:
@@ -235,23 +237,23 @@ def seed_history(src, path, dst):
     return 0
 
 
-def merge_history(scratch, path, canonical):
+def merge_history(scratch: str, path: str, canonical: str) -> int:
     """Append this project's NEW lines from scratch back to canonical (append-only)."""
     if not os.path.isfile(scratch):
         return 0
     with open(scratch, errors="replace") as fh:
-        session_lines = [l.strip() for l in fh if l.strip() and _project_of(l.strip()) == path]
+        session_lines = [ln.strip() for ln in fh if ln.strip() and _project_of(ln.strip()) == path]
     if not session_lines:
         return 0
 
-    existing = set()
+    existing: set[str] = set()
     if os.path.isfile(canonical):
         with open(canonical, errors="replace") as fh:
             for line in fh:
                 line = line.strip()
                 if line:
                     existing.add(line)
-    new = [l for l in session_lines if l not in existing]
+    new = [ln for ln in session_lines if ln not in existing]
     if not new:
         return 0
     d = os.path.dirname(canonical) or "."
@@ -270,7 +272,7 @@ def merge_history(scratch, path, canonical):
     return 0
 
 
-def classify(claude_home):
+def classify(claude_home: str) -> int:
     """Print top-level entries NOT in the manifest (one per line). Empty = no drift."""
     if not os.path.isdir(claude_home):
         return 0
@@ -281,12 +283,13 @@ def classify(claude_home):
 
 
 # ── dispatch ────────────────────────────────────────────────────────────────
-def main(argv):
+def main(argv: list[str]) -> int:
     if len(argv) < 2:
         sys.stderr.write(__doc__)
         return 2
     cmd, rest = argv[1], argv[2:]
-    table = {
+    # Heterogeneous arity, so the callables are `...`; `argc` is what enforces it.
+    table: dict[str, tuple[Callable[..., int], int]] = {
         "scope-in-json": (scope_in_json, 3),
         "merge-out-json": (merge_out_json, 3),
         "seed-history": (seed_history, 3),
@@ -294,11 +297,11 @@ def main(argv):
         "classify": (classify, 1),
     }
     if cmd not in table:
-        sys.stderr.write("cc-scope: unknown subcommand %r\n" % cmd)
+        sys.stderr.write(f"cc-scope: unknown subcommand {cmd!r}\n")
         return 2
     fn, argc = table[cmd]
     if len(rest) != argc:
-        sys.stderr.write("cc-scope: %s needs %d argument(s)\n" % (cmd, argc))
+        sys.stderr.write(f"cc-scope: {cmd} needs {argc} argument(s)\n")
         return 2
     return fn(*rest)
 

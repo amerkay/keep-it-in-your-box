@@ -15,7 +15,9 @@ import errno
 import fnmatch
 import os
 import sys
+from collections.abc import Sequence
 from pathlib import PurePosixPath
+from typing import Any
 
 # fusepy 3.0.1 ships as the module 'fuse' from PyPI but as 'fusepy' in Debian
 # (python3-fusepy). Same library, same API — accept either so the sidecar works
@@ -27,7 +29,8 @@ except ImportError:  # Debian/Ubuntu packaging
     from fusepy import FUSE, FuseOSError, Operations
 
 STUB = (
-    b"# REDACTED BY .ccignore \xe2\x80\x94 hidden from this Claude Code Docker sandbox by user policy.\n"
+    b"# REDACTED BY .ccignore \xe2\x80\x94 hidden from this Claude Code Docker sandbox"
+    b" by user policy.\n"
     b"# Intentional, not an error. All access paths return this stub; writes return EACCES.\n"
     b"# Ask the user directly if you need the contents \xe2\x80\x94 don't try to work around it.\n"
 )
@@ -56,8 +59,11 @@ GITDIR_MARKERS = ("HEAD", "objects", "refs")
 
 GUARD_ACTIONS = ("protect", "redact")
 
+# (negated, pattern, anchor, action, immune) — see load_rules.
+Rule = tuple[bool, str, str, str, bool]
 
-def load_rules(path, guard=False):
+
+def load_rules(path: str, guard: bool = False) -> list[Rule]:
     """Parse .ccignore into an ordered list of (neg, pattern, anchor, action, immune).
 
     anchor: 'bare'  — one path segment, matches at any depth, never inside .git
@@ -71,7 +77,7 @@ def load_rules(path, guard=False):
     that among *themselves* only; _verdict tallies them separately from project
     rules and lets the guard win, so a project cannot un-protect itself.
     """
-    rules = []
+    rules: list[Rule] = []
     action = "redact"
     with open(path) as f:
         for line in f:
@@ -105,18 +111,20 @@ def load_rules(path, guard=False):
     return rules
 
 
-class Redact(Operations):
-    def __init__(self, src, rules):
+# Operations comes from an unstubbed fusepy, so it is typed Any and strict mode refuses to
+# subclass it. Nothing else in the file is loosened.
+class Redact(Operations):  # type: ignore[misc]
+    def __init__(self, src: str, rules: Sequence[Rule]) -> None:
         self.src = os.path.realpath(src)
         self.rules = rules
 
-    def _real(self, path):
+    def _real(self, path: str) -> str:
         return os.path.join(self.src, path.lstrip("/"))
 
-    def _rel(self, path):
+    def _rel(self, path: str) -> str:
         return path.lstrip("/")
 
-    def _rule_matches(self, pat, anchor, anc, seg, under_git):
+    def _rule_matches(self, pat: str, anchor: str, anc: str, seg: str, under_git: bool) -> bool:
         """True if a single rule matches this ancestor / segment (glob-aware).
 
         Every anchor compares component-by-component, so a '*' never spans '/'.
@@ -135,9 +143,9 @@ class Redact(Operations):
             apar = apar[len(apar) - len(ppar) :]
         elif len(ppar) != len(apar):
             return False
-        return all(fnmatch.fnmatch(a, p) for a, p in zip(apar, ppar))
+        return all(fnmatch.fnmatch(a, p) for a, p in zip(apar, ppar, strict=True))
 
-    def _verdict(self, rel):
+    def _verdict(self, rel: str) -> str | None:
         """None | 'redact' | 'protect' for one relative path.
 
         Rules apply in order and the last match wins, so 'dir/*' followed by
@@ -152,7 +160,8 @@ class Redact(Operations):
         """
         parts = rel.split("/")
         under_git = parts[0] == ".git"
-        guard = verdict = None
+        guard: str | None = None
+        verdict: str | None = None
         for i in range(1, len(parts) + 1):
             anc = "/".join(parts[:i])
             seg = parts[i - 1]
@@ -168,12 +177,12 @@ class Redact(Operations):
                 return effective
         return guard or verdict
 
-    def _protected(self, path):
+    def _protected(self, path: str) -> bool:
         """True if writes to this path must be refused but reads pass through."""
         rel = self._rel(path)
         return rel != "" and (self._verdict(rel) == "protect" or self._git_sensitive(rel))
 
-    def _classify(self, path):
+    def _classify(self, path: str) -> tuple[str, str]:
         """Return ('pass'|'file'|'dir'|'inside', masked_rel_root).
 
         - 'pass': not masked
@@ -208,7 +217,7 @@ class Redact(Operations):
         return ("pass", "")
 
     # ── read-only metadata ───────────────────────────────────────
-    def getattr(self, path, fh=None):
+    def getattr(self, path: str, fh: int | None = None) -> dict[str, Any]:
         kind, root = self._classify(path)
         if kind == "pass":
             st = os.lstat(self._real(path))
@@ -265,7 +274,7 @@ class Redact(Operations):
             )
         }
 
-    def readdir(self, path, fh):
+    def readdir(self, path: str, fh: int) -> list[str]:
         kind, _ = self._classify(path)
         if kind == "dir":
             return [".", "..", REDACTED_NAME]
@@ -275,15 +284,15 @@ class Redact(Operations):
         try:
             return [".", ".."] + os.listdir(real)
         except OSError as e:
-            raise FuseOSError(e.errno)
+            raise FuseOSError(e.errno) from e
 
-    def readlink(self, path):
+    def readlink(self, path: str) -> str:
         kind, _ = self._classify(path)
         if kind != "pass":
             raise FuseOSError(errno.EACCES)
         return os.readlink(self._real(path))
 
-    def statfs(self, path):
+    def statfs(self, path: str) -> dict[str, int]:
         s = os.statvfs(self.src)
         return {
             k: getattr(s, k)
@@ -302,7 +311,7 @@ class Redact(Operations):
         }
 
     # ── reads ────────────────────────────────────────────────────
-    def open(self, path, flags):
+    def open(self, path: str, flags: int) -> int:
         kind, _ = self._classify(path)
         if flags & (os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC):
             # Protected paths are writable only through the validated rename below;
@@ -313,20 +322,20 @@ class Redact(Operations):
             return 0  # virtual fd; reads served from STUB
         return os.open(self._real(path), flags)
 
-    def read(self, path, size, offset, fh):
+    def read(self, path: str, size: int, offset: int, fh: int) -> bytes:
         kind, _ = self._classify(path)
         if kind != "pass":
             return STUB[offset : offset + size]
         os.lseek(fh, offset, os.SEEK_SET)
         return os.read(fh, size)
 
-    def release(self, path, fh):
+    def release(self, path: str, fh: int) -> int:
         if fh and fh != 0:
             os.close(fh)
         return 0
 
     # ── writes (passthrough for unmasked paths) ──────────────────
-    def _deny_if_masked(self, path):
+    def _deny_if_masked(self, path: str) -> None:
         kind, _ = self._classify(path)
         if kind != "pass" or self._protected(path):
             raise FuseOSError(errno.EACCES)
@@ -336,7 +345,7 @@ class Redact(Operations):
     # target. So the rename *is* the write, and validating there needs no buffering
     # of write() calls. Blanket-denying instead would break `git remote add` and
     # `git push -u` inside the sandbox, which is why this exists at all.
-    def _is_gitdir(self, rel_dir):
+    def _is_gitdir(self, rel_dir: str) -> bool:
         """True if this directory carries git's layout, whatever it is named.
 
         `git init --bare store`, `git init --separate-git-dir=gd wt` and a `.git`
@@ -347,13 +356,13 @@ class Redact(Operations):
         real = self._real(rel_dir)
         return all(os.path.exists(os.path.join(real, m)) for m in GITDIR_MARKERS)
 
-    def _is_git_config(self, rel):
+    def _is_git_config(self, rel: str) -> bool:
         parts = rel.split("/")
         if len(parts) < 2 or parts[-1] not in ("config", "config.worktree"):
             return False
         return ".git" in parts[:-1] or self._is_gitdir("/".join(parts[:-1]))
 
-    def _git_sensitive(self, rel):
+    def _git_sensitive(self, rel: str) -> bool:
         """Host-executed paths inside any git dir, at any nesting.
 
         Kept as code rather than guard patterns because the shapes need
@@ -371,9 +380,10 @@ class Redact(Operations):
         return i >= 1 and (".git" in parts[:i] or self._is_gitdir("/".join(parts[:i])))
 
     @staticmethod
-    def _dangerous_entries(text):
+    def _dangerous_entries(text: str) -> set[tuple[str, str, str]]:
         """The (section, key, value) triples in a git config that name a command."""
-        found, section = set(), ""
+        found: set[tuple[str, str, str]] = set()
+        section = ""
         for raw in text.splitlines():
             line = raw.split("#", 1)[0].split(";", 1)[0].strip()
             if not line:
@@ -395,7 +405,7 @@ class Redact(Operations):
                 found.add((section, key, value.strip()))
         return found
 
-    def _git_config_write_ok(self, src_real, dst_real):
+    def _git_config_write_ok(self, src_real: str, dst_real: str) -> bool:
         """Allow a config write that introduces no *new* command-valued setting.
 
         Compared against the current file rather than judged absolutely: a repo
@@ -426,32 +436,32 @@ class Redact(Operations):
             )
         return not added
 
-    def create(self, path, mode, fi=None):
+    def create(self, path: str, mode: int, fi: object = None) -> int:
         self._deny_if_masked(path)
         return os.open(self._real(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
 
-    def write(self, path, data, offset, fh):
+    def write(self, path: str, data: bytes, offset: int, fh: int) -> int:
         os.lseek(fh, offset, os.SEEK_SET)
         return os.write(fh, data)
 
-    def truncate(self, path, length, fh=None):
+    def truncate(self, path: str, length: int, fh: int | None = None) -> None:
         self._deny_if_masked(path)
         with open(self._real(path), "r+b") as f:
             f.truncate(length)
 
-    def unlink(self, path):
+    def unlink(self, path: str) -> None:
         self._deny_if_masked(path)
         os.unlink(self._real(path))
 
-    def rmdir(self, path):
+    def rmdir(self, path: str) -> None:
         self._deny_if_masked(path)
         os.rmdir(self._real(path))
 
-    def mkdir(self, path, mode):
+    def mkdir(self, path: str, mode: int) -> None:
         self._deny_if_masked(path)
         os.mkdir(self._real(path), mode)
 
-    def rename(self, old, new):
+    def rename(self, old: str, new: str) -> None:
         self._deny_if_masked(old)
         if self._is_git_config(self._rel(new)):
             if not self._git_config_write_ok(self._real(old), self._real(new)):
@@ -460,23 +470,23 @@ class Redact(Operations):
             self._deny_if_masked(new)
         os.rename(self._real(old), self._real(new))
 
-    def chmod(self, path, mode):
+    def chmod(self, path: str, mode: int) -> None:
         self._deny_if_masked(path)
         os.chmod(self._real(path), mode)
 
-    def chown(self, path, uid, gid):
+    def chown(self, path: str, uid: int, gid: int) -> None:
         self._deny_if_masked(path)
         os.chown(self._real(path), uid, gid)
 
-    def utimens(self, path, times=None):
+    def utimens(self, path: str, times: tuple[float, float] | None = None) -> None:
         self._deny_if_masked(path)
         os.utime(self._real(path), times=times)
 
-    def symlink(self, target, source):
+    def symlink(self, target: str, source: str) -> None:
         self._deny_if_masked(target)
         os.symlink(source, self._real(target))
 
-    def link(self, target, source):
+    def link(self, target: str, source: str) -> None:
         self._deny_if_masked(target)
         # The source matters as much as the name: a hardlink is a second directory entry
         # for the *same inode*, and the VFS does not re-resolve it (a symlink does, which
@@ -485,18 +495,18 @@ class Redact(Operations):
         self._deny_if_masked(source)
         os.link(self._real(source), self._real(target))
 
-    def flush(self, path, fh):
+    def flush(self, path: str, fh: int) -> int:
         if fh and fh != 0:
             os.fsync(fh)
         return 0
 
-    def fsync(self, path, datasync, fh):
+    def fsync(self, path: str, datasync: int, fh: int) -> int:
         if fh and fh != 0:
             (os.fdatasync if datasync else os.fsync)(fh)
         return 0
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", required=True)
     ap.add_argument("--mnt", required=True)

@@ -28,6 +28,7 @@ import socket
 import struct
 import sys
 import threading
+from collections.abc import Sequence
 
 # ── Protocol facts ───────────────────────────────────────────────────────
 # Opcodes are frozen by the protocol XMLs (a released interface may only append
@@ -70,13 +71,13 @@ HEADER = struct.Struct("<II")
 MAX_FDS = 32
 
 
-def log(kind, detail):
+def log(kind: str, detail: object) -> None:
     """One line per event; cc's follower greps WLGUARD-DENY out of `docker logs`."""
     sys.stdout.write(f"WLGUARD-{kind} {detail}\n")
     sys.stdout.flush()
 
 
-def _read_str(body, off):
+def _read_str(body: bytes, off: int) -> tuple[str, int]:
     """Wayland string: uint32 length (including NUL), then that many bytes, padded to 4."""
     (n,) = struct.unpack_from("<I", body, off)
     off += 4
@@ -87,16 +88,16 @@ def _read_str(body, off):
 class Connection:
     """One client of the compositor, proxied. Owns its object-id -> interface map."""
 
-    def __init__(self, client, server, peer):
+    def __init__(self, client: socket.socket, server: socket.socket, peer: str) -> None:
         self.client = client
         self.server = server
         self.peer = peer
         # id 1 is always wl_display; everything else is learned from the traffic.
-        self.objects = {WL_DISPLAY_ID: "wl_display"}
+        self.objects: dict[int, str] = {WL_DISPLAY_ID: "wl_display"}
         self.closed = False
 
     # ── object tracking ──────────────────────────────────────────────────
-    def _track_request(self, obj_id, opcode, body):
+    def _track_request(self, obj_id: int, opcode: int, body: bytes) -> None:
         """Learn what a newly allocated object id is, from the request that made it."""
         iface = self.objects.get(obj_id)
         if iface == "wl_display" and opcode == WL_DISPLAY_GET_REGISTRY:
@@ -106,26 +107,26 @@ class Connection:
         if iface == "wl_registry" and opcode == WL_REGISTRY_BIND:
             # bind(name: uint, interface: string, version: uint, id: new_id) — the
             # interface name travels on the wire, so no protocol database is needed.
-            name, off = struct.unpack_from("<I", body, 0)[0], 4
+            off = 4  # past bind's leading `name` uint, which the guard never needs
             bound, off = _read_str(body, off)
             (new_id,) = struct.unpack_from("<I", body, off + 4)
             self.objects[new_id] = bound
             return
-        factory = DEVICE_FACTORIES.get(iface)
+        factory = DEVICE_FACTORIES.get(iface) if iface else None
         if factory and opcode == factory[0]:
             (new_id,) = struct.unpack_from("<I", body, 0)
             self.objects[new_id] = factory[1]
 
     # ── policy ───────────────────────────────────────────────────────────
-    def _denied(self, obj_id, opcode):
+    def _denied(self, obj_id: int, opcode: int) -> str | None:
         iface = self.objects.get(obj_id)
         return DENIED_REQUESTS.get(iface, {}).get(opcode) if iface else None
 
     # ── pumping ──────────────────────────────────────────────────────────
-    def _filter(self, buf, to_server):
+    def _filter(self, buf: bytes, to_server: bool) -> tuple[bytes, bytes]:
         """Consume whole messages from `buf`; return (bytes to forward, leftover).
 
-        Raises Denied when the client attempts a clipboard write.
+        Raises DeniedError when the client attempts a clipboard write.
         """
         out, off = bytearray(), 0
         while len(buf) - off >= HEADER.size:
@@ -137,15 +138,15 @@ class Connection:
             if to_server:
                 denied = self._denied(obj_id, opcode)
                 if denied:
-                    raise Denied(f"{self.objects.get(obj_id)}.{denied}")
+                    raise DeniedError(f"{self.objects.get(obj_id)}.{denied}")
                 self._track_request(obj_id, opcode, body)
             out += buf[off : off + size]  # server->client is always forwarded
             off += size
         return bytes(out), buf[off:]
 
-    def run(self):
+    def run(self) -> None:
         bufs = {True: b"", False: b""}  # keyed by to_server
-        held = {True: [], False: []}  # fds received but not yet forwarded
+        held: dict[bool, list[int]] = {True: [], False: []}  # received but not yet forwarded
         try:
             while True:
                 ready, _, _ = select.select([self.client, self.server], [], [])
@@ -163,7 +164,7 @@ class Connection:
                         held[to_server] = []
                     # No payload to carry them on yet: keep the fds until there is.
                     # Wayland lets an fd arrive early, never late.
-        except Denied as d:
+        except DeniedError as d:
             log("DENY", f"{self.peer} {d} — connection closed")
         except (OSError, struct.error, ConnectionError):
             pass
@@ -178,13 +179,13 @@ class Connection:
                     pass
 
 
-class Denied(Exception):
+class DeniedError(Exception):
     pass
 
 
-def recv_with_fds(sock):
+def recv_with_fds(sock: socket.socket) -> tuple[bytes, list[int]]:
     """recvmsg preserving SCM_RIGHTS — clipboard content travels as a pipe fd."""
-    fds = []
+    fds: list[int] = []
     msg, anc, _, _ = sock.recvmsg(4096, socket.CMSG_SPACE(MAX_FDS * 4))
     for level, ctype, cdata in anc:
         if level == socket.SOL_SOCKET and ctype == socket.SCM_RIGHTS:
@@ -194,8 +195,8 @@ def recv_with_fds(sock):
     return msg, fds
 
 
-def send_with_fds(sock, data, fds):
-    anc = []
+def send_with_fds(sock: socket.socket, data: bytes, fds: Sequence[int]) -> None:
+    anc: list[tuple[int, int, array.array[int]]] = []
     if fds:
         anc = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", fds))]
     sent = sock.sendmsg([data], anc)
@@ -205,7 +206,7 @@ def send_with_fds(sock, data, fds):
         os.close(fd)
 
 
-def serve(listen_path, upstream_path):
+def serve(listen_path: str, upstream_path: str) -> None:
     if os.path.exists(listen_path):
         os.unlink(listen_path)
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -228,7 +229,7 @@ def serve(listen_path, upstream_path):
         threading.Thread(target=Connection(client, upstream, f"conn{n}").run, daemon=True).start()
 
 
-def main():
+def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--upstream", required=True, help="the host compositor socket")
     p.add_argument("--listen", required=True, help="socket to expose to the sandbox")

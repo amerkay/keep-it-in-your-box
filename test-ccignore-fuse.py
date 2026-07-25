@@ -14,30 +14,35 @@ import os
 import sys
 import tempfile
 import types
+from typing import Any
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 _fuse = types.ModuleType("fuse")
-_fuse.FUSE = lambda *a, **k: None
-_fuse.Operations = object
-_fuse.FuseOSError = type("FuseOSError", (OSError,), {})
+_fuse.__dict__.update(
+    FUSE=lambda *a, **k: None,
+    Operations=object,
+    FuseOSError=type("FuseOSError", (OSError,), {}),
+)
 sys.modules["fuse"] = _fuse
 
 _spec = importlib.util.spec_from_file_location("ccfuse", os.path.join(HERE, "ccignore-fuse.py"))
+if _spec is None or _spec.loader is None:
+    sys.exit("cannot load ccignore-fuse.py next to this test")
 m = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(m)
 
 GUARD = os.path.join(HERE, "global.ccignore")
-fails = []
+fails: list[str] = []
 
 
-def check(label, got, want):
+def check(label: str, got: object, want: object) -> None:
     if got != want:
         fails.append(f"{label}: got {got!r}, want {want!r}")
     print(f"  {'ok  ' if got == want else 'FAIL'} {label:50} -> {got!r}")
 
 
-def build(project_rules=""):
+def build(project_rules: str = "") -> Any:
     """A Redact instance with the shipped guard + a project .ccignore."""
     path = write(project_rules)
     r = m.Redact.__new__(m.Redact)
@@ -47,7 +52,7 @@ def build(project_rules=""):
     return r
 
 
-def write(text):
+def write(text: str) -> str:
     fd, path = tempfile.mkstemp()
     with os.fdopen(fd, "w") as f:
         f.write(text)

@@ -20,29 +20,34 @@ import io
 import json
 import os
 import shutil
+import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 
 # Import cc-broker.py from the repo root (this file lives in tests/).
 _BROKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "cc-broker.py")
 spec = importlib.util.spec_from_file_location("ccbroker", _BROKER)
+if spec is None or spec.loader is None:
+    sys.exit(f"cannot load {_BROKER}")
 b = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(b)
 
 REAL_SECRET = "REAL-sk-ant-oat01-abcdef123456"
-seen = {}
+seen: dict[str, Any] = {}
 
 
 # ── fake upstream: records the Authorization it received, streams 3 SSE-ish chunks ──
 class Up(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, *a):
+    def log_message(self, *a: Any) -> None:
         pass
 
-    def do_POST(self):
+    def do_POST(self) -> None:
         ln = int(self.headers.get("content-length", 0) or 0)
         seen["body"] = self.rfile.read(ln)
         seen["auth"] = self.headers.get("Authorization")
@@ -53,7 +58,7 @@ class Up(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         for i in range(3):
-            self.wfile.write(("data: chunk%d\n\n" % i).encode())
+            self.wfile.write(f"data: chunk{i}\n\n".encode())
             self.wfile.flush()
             time.sleep(0.02)
 
@@ -69,7 +74,7 @@ tokf.close()
 os.chmod(tokf.name, 0o600)
 
 provider = {
-    "upstream_origin": "http://127.0.0.1:%d" % up_port,
+    "upstream_origin": f"http://127.0.0.1:{up_port}",
     "inject_header": "Authorization",
     "inject_template": "Bearer {secret}",
     "strip_incoming": ["authorization", "x-api-key"],
@@ -107,13 +112,13 @@ phd = json.load(open(ph.name))
 ok = True
 
 
-def check(name, cond):
+def check(name: str, cond: object) -> None:
     global ok
-    ok = ok and cond
+    ok = ok and bool(cond)
     print(("PASS " if cond else "FAIL ") + name)
 
 
-def _raises_systemexit(fn):
+def _raises_systemexit(fn: Callable[[], object]) -> bool:
     try:
         fn()
         return False
@@ -126,7 +131,7 @@ check("placeholder auth was stripped (not forwarded)", "fake_value" not in (seen
 check("x-api-key placeholder stripped", seen.get("xapikey") is None)
 check(
     "Host set to upstream (agent's Host dropped)",
-    seen.get("host") in ("127.0.0.1", "127.0.0.1:%d" % up_port),
+    (seen.get("host") or "") in ("127.0.0.1", f"127.0.0.1:{up_port}"),
 )
 check("request body forwarded", seen.get("body") == b'{"hi":true}')
 check("response streamed (3 chunks)", data.count("data: chunk") == 3)
@@ -245,7 +250,7 @@ os.unlink(empty.name)
 # blob is injected upstream and the agent's inbound placeholder auth is stripped — the
 # credential never leaves the broker.
 mcp_provider = {
-    "upstream_origin": "http://127.0.0.1:%d" % up_port,
+    "upstream_origin": f"http://127.0.0.1:{up_port}",
     "inject_header": "Authorization",
     "inject_template": "Basic {secret}",
     "strip_incoming": ["authorization"],
@@ -286,7 +291,7 @@ check(
     all(p.get("delivery") == "base_url_env" for p in b.PROVIDERS.values()),
 )
 schema_ok = True
-for pid, p in b.PROVIDERS.items():
+for p in b.PROVIDERS.values():
     if p.get("credential_kind") not in ("paste_token", "file_path"):
         schema_ok = False
     need = (
@@ -429,7 +434,7 @@ check(
 )
 
 
-def _raises_valueerror(fn):
+def _raises_valueerror(fn: Callable[[], object]) -> bool:
     try:
         fn()
         return False

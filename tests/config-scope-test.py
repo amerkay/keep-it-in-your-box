@@ -10,32 +10,35 @@ import json
 import os
 import sys
 import tempfile
+from typing import Any
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCOPE_PY = os.path.join(os.path.dirname(HERE), "claude-config-scope.py")
 
 _spec = importlib.util.spec_from_file_location("ccscope", SCOPE_PY)
+if _spec is None or _spec.loader is None:
+    sys.exit(f"cannot load {SCOPE_PY}")
 cs = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(cs)
 
 PA = "/home/kay/proj-a"
 PB = "/home/kay/proj-b"
 
-_fails = []
+_fails: list[str] = []
 
 
-def check(name, cond):
+def check(name: str, cond: object) -> None:
     print(("  ✓ " if cond else "  ✗ ") + name)
     if not cond:
         _fails.append(name)
 
 
-def read_json(p):
+def read_json(p: str) -> Any:
     with open(p) as fh:
         return json.load(fh)
 
 
-def test_scope_in_json(tmp):
+def test_scope_in_json(tmp: str) -> None:
     src = os.path.join(tmp, "canonical.json")
     dst = os.path.join(tmp, "session.json")
     with open(src, "w") as fh:
@@ -66,7 +69,7 @@ def test_scope_in_json(tmp):
     )
 
 
-def test_scope_in_absent_and_bad(tmp):
+def test_scope_in_absent_and_bad(tmp: str) -> None:
     dst = os.path.join(tmp, "s2.json")
     cs.scope_in_json(os.path.join(tmp, "nope.json"), PA, dst)
     check("scope-in on absent canonical → empty projects", read_json(dst)["projects"] == {})
@@ -82,7 +85,7 @@ def test_scope_in_absent_and_bad(tmp):
     )
 
 
-def test_merge_out_json(tmp):
+def test_merge_out_json(tmp: str) -> None:
     canonical = os.path.join(tmp, "canon.json")
     with open(canonical, "w") as fh:
         json.dump(
@@ -122,7 +125,7 @@ def test_merge_out_json(tmp):
     )
 
 
-def test_merge_out_failclosed(tmp):
+def test_merge_out_failclosed(tmp: str) -> None:
     canonical = os.path.join(tmp, "c2.json")
     orig = {"projects": {PA: {"allowedTools": ["KEEP"]}}}
     with open(canonical, "w") as fh:
@@ -145,7 +148,7 @@ def test_merge_out_failclosed(tmp):
     check("merge-out refuses to overwrite corrupt canonical (rc!=0)", rc != 0)
 
 
-def test_merge_out_absent_canonical(tmp):
+def test_merge_out_absent_canonical(tmp: str) -> None:
     canonical = os.path.join(tmp, "fresh.json")  # does not exist
     scratch = os.path.join(tmp, "scr3.json")
     with open(scratch, "w") as fh:
@@ -159,7 +162,7 @@ def test_merge_out_absent_canonical(tmp):
     )
 
 
-def test_merge_out_never_deletes(tmp):
+def test_merge_out_never_deletes(tmp: str) -> None:
     """A session config with no entry for this project must not wipe canonical's."""
     canonical = os.path.join(tmp, "c4.json")
     with open(canonical, "w") as fh:
@@ -175,7 +178,7 @@ def test_merge_out_never_deletes(tmp):
     )
 
 
-def test_merge_out_drops_cc_pins(tmp):
+def test_merge_out_drops_cc_pins(tmp: str) -> None:
     """cc's forced sandbox pins are not the user's choice — never export them."""
     canonical = os.path.join(tmp, "fresh2.json")  # absent
     scratch = os.path.join(tmp, "scr5.json")
@@ -196,11 +199,11 @@ def test_merge_out_drops_cc_pins(tmp):
     )
 
 
-def _hline(project, text):
+def _hline(project: str, text: str) -> str:
     return json.dumps({"display": text, "project": project})
 
 
-def test_seed_history(tmp):
+def test_seed_history(tmp: str) -> None:
     src = os.path.join(tmp, "history.jsonl")
     with open(src, "w") as fh:
         fh.write(_hline(PA, "a-one") + "\n")
@@ -215,7 +218,7 @@ def test_seed_history(tmp):
     check("seed-history drops non-json lines", "garbage-not-json" not in got)
 
 
-def test_merge_history(tmp):
+def test_merge_history(tmp: str) -> None:
     canonical = os.path.join(tmp, "canon-history.jsonl")
     with open(canonical, "w") as fh:
         fh.write(_hline(PA, "a-one") + "\n")
@@ -226,12 +229,12 @@ def test_merge_history(tmp):
         fh.write(_hline(PA, "a-three") + "\n")  # new
     cs.merge_history(scratch, PA, canonical)
     got = open(canonical).read().splitlines()
-    check("merge-history appends the new line", any("a-three" in l for l in got))
-    check("merge-history does not duplicate existing", sum("a-one" in l for l in got) == 1)
-    check("merge-history leaves other project's line intact", any("b-SENTINEL" in l for l in got))
+    check("merge-history appends the new line", any("a-three" in ln for ln in got))
+    check("merge-history does not duplicate existing", sum("a-one" in ln for ln in got) == 1)
+    check("merge-history leaves other project's line intact", any("b-SENTINEL" in ln for ln in got))
     check(
         "merge-history never rewrote other project's line count",
-        sum("b-SENTINEL" in l for l in got) == 1,
+        sum("b-SENTINEL" in ln for ln in got) == 1,
     )
 
     # Canonical cut short mid-append (no trailing newline) must not have our first line
@@ -240,14 +243,14 @@ def test_merge_history(tmp):
     with open(torn, "w") as fh:
         fh.write(_hline(PB, "b-TORN"))  # deliberately no "\n"
     cs.merge_history(scratch, PA, torn)
-    lines = [l for l in open(torn).read().splitlines() if l]
+    lines = [ln for ln in open(torn).read().splitlines() if ln]
     check(
         "merge-history repairs a missing trailing newline before appending",
-        all(json.loads(l) for l in lines) and len(lines) == 3,
+        all(json.loads(ln) for ln in lines) and len(lines) == 3,
     )
 
 
-def test_classify(tmp):
+def test_classify(tmp: str) -> None:
     home = os.path.join(tmp, "dotclaude")
     os.makedirs(home)
     for name in ("settings.json", "projects", "daemon.lock", "brand-new-store", "mystery.db"):
@@ -256,8 +259,8 @@ def test_classify(tmp):
             open(p, "w").close()
         else:
             os.makedirs(p, exist_ok=True)
-    import io
     import contextlib
+    import io
 
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
@@ -270,7 +273,7 @@ def test_classify(tmp):
     )
 
 
-def main():
+def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         for fn in (
             test_scope_in_json,
@@ -287,7 +290,7 @@ def main():
             print(fn.__name__)
             fn(tmp)
     if _fails:
-        print("\n%d check(s) FAILED: %s" % (len(_fails), ", ".join(_fails)))
+        print(f"\n{len(_fails)} check(s) FAILED: {', '.join(_fails)}")
         return 1
     print("\nAll config-scope checks passed.")
     return 0
