@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 520" width="1200" height="520" role="img" aria-labelledby="t d">
   <title id="t">How rare is each containment control across 30 surveyed agent sandboxes</title>
-  <desc id="d">Bar chart of how many of 30 surveyed projects implement each control, with whether kib has it. Clipboard mediation 0 of 30, kib yes. In-project secret redaction 3, kib yes. Host-executed config guard 4, kib yes. Credential brokering 5, kib no. VM-class boundary 6, kib no. Default-deny egress 10, kib no. Security regression suite 13, kib yes.</desc>
+  <desc id="d">Bar chart of how many of 30 surveyed projects implement each control, with whether kib has it. Clipboard mediation 0 of 30, kib yes. In-project secret redaction 3, kib yes. Host-executed config guard 4, kib yes. Credential brokering 5, kib yes. VM-class boundary 6, kib no. Default-deny egress 10, kib no. Security regression suite 13, kib yes.</desc>
   <defs>
     <linearGradient id="bg2" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#0d1424"/>
@@ -87,8 +87,8 @@
       <text x="1097" y="289" fill="#56d364">kib &#10003;</text>
     </g>
     <g>
-      <rect x="1058" y="315" width="78" height="26" rx="13" fill="#2d1214" stroke="#da3633" stroke-width="1.4"/>
-      <text x="1097" y="333" fill="#ff7b72">kib &#10007;</text>
+      <rect x="1058" y="315" width="78" height="26" rx="13" fill="#0f2417" stroke="#238636" stroke-width="1.4"/>
+      <text x="1097" y="333" fill="#56d364">kib &#10003;</text>
     </g>
     <g>
       <rect x="1058" y="359" width="78" height="26" rx="13" fill="#2d1214" stroke="#da3633" stroke-width="1.4"/>

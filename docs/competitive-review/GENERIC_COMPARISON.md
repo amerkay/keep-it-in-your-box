@@ -1,12 +1,13 @@
 <p align="center">
   <img src="../assets/sandbox-comparison/hero.svg" width="100%"
-       alt="Sandbox Comparison — kib measured against 30 open-source agent sandboxes. kib leads on 4 containment controls and is behind on 3. Of the 30 other projects, 0 mediate the clipboard, 3 redact in-project secrets, 4 guard host-executed config, and 10 enforce default-deny egress.">
+       alt="Sandbox Comparison — kib measured against 30 open-source agent sandboxes. kib leads on 5 containment controls and is behind on 2. Of the 30 other projects, 0 mediate the clipboard, 3 redact in-project secrets, 4 guard host-executed config, 5 broker credentials, and 10 enforce default-deny egress.">
 </p>
 
 A survey of open-source projects that sandbox AI coding agents, compared against this
-repository's `kib` on **security and containment**. Compiled 2026-07-22.
+repository's `kib` on **security and containment**. Field compiled 2026-07-22; `kib`'s own row
+reflects the current tree.
 
-**Every cell comes from a project's own documentation.** Nothing is inferred from a
+**Every cell about another project comes from its own documentation.** Nothing is inferred from a
 project's category, and `❓` means *"the docs don't say"* — never *"the project lacks it."*
 
 ---
@@ -14,29 +15,23 @@ project's category, and `❓` means *"the docs don't say"* — never *"the proje
 ## The finding
 
 `kib` is unusually strong on the threat class the industry only just started naming — files
-the agent writes that the **host** executes later — and unusually weak on the one the field
-has already standardised: **egress control and credential exposure**.
+the agent writes that the **host** executes later — and concedes exactly one control the field
+has standardised: **default-deny egress**.
 
 <p align="center">
   <img src="../assets/sandbox-comparison/control-rarity.svg" width="100%"
-       alt="Bar chart of how many of 30 surveyed sandboxes implement each control. Clipboard mediation 0 of 30, kib has it. In-project secret redaction 3, kib has it. Host-executed config guard 4, kib has it. Credential brokering 5, kib lacks it. VM-class boundary 6, kib lacks it. Default-deny egress 10, kib lacks it. Security regression suite 13, kib has it.">
+       alt="Bar chart of how many of 30 surveyed sandboxes implement each control. Clipboard mediation 0 of 30, kib has it. In-project secret redaction 3, kib has it. Host-executed config guard 4, kib has it. Credential brokering 5, kib has it. VM-class boundary 6, kib lacks it. Default-deny egress 10, kib lacks it. Security regression suite 13, kib has it.">
 </p>
-
-> **If you change one thing in `kib`, change credential handling.** Five surveyed projects
-> keep the API token host-side entirely and hand the agent a placeholder plus a rewritten
-> base URL. That retires `kib`'s accepted risk H3/H4 — which currently reasons that the
-> token "cannot be made unreadable — Claude needs it."
 
 ---
 
 ## Where `kib` leads
 
-### 1. Host-executed config guard — validated two days before this survey
+### 1. Host-executed config guard
 
-On **2026-07-20**, Pillar Security published
-["The Week of Sandbox Escapes"](https://www.pillar.security/blog/the-week-of-sandbox-escapes):
-seven attack chains in which the agent **stays inside its sandbox** but writes a file the
-host later executes. That is `kib`'s founding thesis, independently confirmed.
+[Pillar Security's *The Week of Sandbox Escapes*](https://www.pillar.security/blog/the-week-of-sandbox-escapes)
+(2026-07-20) documented seven attack chains in which the agent **stays inside its sandbox** but
+writes a file the host later executes — `kib`'s founding thesis, independently confirmed.
 
 | Pillar attack chain | Product | Status | `kib` control |
 |---|---|---|---|
@@ -47,15 +42,15 @@ host later executes. That is `kib`'s founding thesis, independently confirmed.
 | "GitPwned: allowlist to RCE" | Codex CLI | patched v0.95.0 | n/a — `kib` has no command allowlist to bypass |
 
 Only **4 of 30** projects guard host-executed config at all:
-[sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) (the most
-complete path enumeration in the field), [cplt](https://github.com/navikt/cplt),
-[agent-seatbelt](https://github.com/CJHwong/agent-seatbelt), and
+[sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) (the most complete
+path enumeration in the field), [cplt](https://github.com/navikt/cplt),
+[agent-seatbelt](https://github.com/CJHwong/agent-seatbelt) and
 [aicontainer](https://github.com/stefanoginella/aicontainer).
 
-**None of them content-validates `.git/config`.** All four deny writes outright — which `kib`
-deliberately rejected because it breaks `git remote add`. `kib` appears alone in validating
-at the *rename*, diffing against the current file, following `include`/`includeIf`
-indirection, and handling `.git/modules/` and `.git/worktrees/` structurally.
+**None content-validates `.git/config`.** All four deny writes outright, which `kib` rejected
+because it breaks `git remote add`. `kib` appears alone in validating at the *rename*, diffing
+against the current file, following `include`/`includeIf`, and handling `.git/modules/` and
+`.git/worktrees/` structurally.
 
 ### 2. In-project secret redaction that survives mid-session file creation
 
@@ -69,22 +64,35 @@ indirection, and handling `.git/modules/` and `.git/worktrees/` structurally.
 | [yolobox](https://github.com/finbarr/yolobox) | `--exclude ".env*"` | ✅ | ❌ opt-in |
 | [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) | `denyRead` config | ✅ | ❌ opt-in |
 
-`kib` and `cplt` are the only two that are kernel/FS-enforced, on by default, **and** cover
-files created after launch — which a launch-time bind mask structurally cannot do.
+`kib` and `cplt` are the only two that are kernel/FS-enforced, on by default, **and** cover files
+created after launch — which a launch-time bind mask structurally cannot do.
 
 ### 3. Clipboard mediation — no other implementation found
 
-**0 of 30.** [agent-safehouse](https://github.com/eugene1g/agent-safehouse) has clipboard
-entries in its policy tests, but that is a *block*. `kib`'s Wayland proxy passing reads while
-refusing writes appears to be unique. Searches surfaced the underlying attack — bracketed-paste
-truncation via `ESC[201~`, pastejacking — but no other agent sandbox mitigating it.
+**0 of 30.** [agent-safehouse](https://github.com/eugene1g/agent-safehouse) has clipboard entries
+in its policy tests, but that is a *block*. `kib`'s proxy passing reads while refusing writes
+appears unique. Searches surfaced the underlying attack — bracketed-paste truncation via
+`ESC[201~`, pastejacking — but no other agent sandbox mitigating it.
 
-### 4. Shared agent-config pivot
+### 4. Credential brokering, extended past the LLM token
 
-Nearly every container project mounts `~/.claude`, several read-write, and only
-`aicontainer` reasons about one project's session poisoning **every other project's next
-session**. `kib`'s read-only asset mounts + per-project merge farm + host-side
-`settings.json` validation is the most developed treatment found.
+**5 of 30** keep the account token host-side. `kib` does too, by default: a sidecar holds a static
+token, the container gets `ANTHROPIC_BASE_URL` plus a synthetic placeholder, and the broker
+re-originates TLS upstream — no CA in the container. *(Two caveats: a launch with no stored token
+and no interactive login falls back to mounting the real credential with a warning, and
+`broker = off` restores the old exposure by choice.)*
+
+The extension is the part nothing else in the survey documents: the same broker injects
+**third-party MCP credentials** as a header the container never sees, runs client-signed creds in
+their own `cap-drop=ALL` sidecar, and intercepts `claude mcp add … --header …` **host-side** so a
+vendor's copy-pasted line cannot put a secret in the container's argv.
+
+### 5. Shared agent-config pivot
+
+Nearly every container project mounts `~/.claude`, several read-write, and only `aicontainer`
+reasons about one project's session poisoning **every other project's next session**. `kib`'s
+read-only asset mounts, per-project assembly and host-side `settings.json` validation are the most
+developed treatment found.
 
 ---
 
@@ -92,19 +100,14 @@ session**. `kib`'s read-only asset mounts + per-project merge farm + host-side
 
 | Gap | The field | `kib` today |
 |---|---|---|
-| **Egress** | 10 of 30 enforce default-deny | Open — documented accepted risk |
-| **Credentials** | 5 broker the token host-side, so the agent never holds it | Shared OAuth token readable on disk (H3/H4) |
+| **Egress** | 10 of 30 enforce default-deny | Open — documented accepted risk; no opt-in mode |
 | **Kernel boundary** | 6 use a VM/microVM | Shared kernel; Anthropic's own docs call a VM "the strongest separation" |
-| **Platforms** | 18 of 30 support macOS | Ubuntu/Linux only |
 | **Ephemerality** | `chamber`, `yoloai`, `matchlock`, `cleanroom` reseed per run | Long-lived container by design; `KIB_FORCE_NEW_SESSION=1` is opt-in |
 
-The egress position is defensible — a default-deny allowlist conflicts with building
-untrusted repos that fetch from arbitrary registries. **The credential position is not.**
-[yoloai](https://github.com/kstenerud/yoloai), [matchlock](https://github.com/jingkaihe/matchlock),
-[microsandbox](https://github.com/superradcompany/microsandbox),
-[cleanroom](https://github.com/buildkite/cleanroom) and
-[agent-sandbox](https://github.com/mattolson/agent-sandbox) each demonstrate that the token
-*can* be made unreachable while the agent still works.
+The egress position is defensible and deliberate: a default-deny allowlist conflicts with building
+untrusted repos that fetch from arbitrary registries, and an allowlist cannot close
+`api.anthropic.com` or the registries — which is where exfil actually happens. `docs/FUTURE_TASKS.md`
+(E1) holds the design if that trade ever changes.
 
 ---
 
@@ -115,7 +118,7 @@ untrusted repos that fetch from arbitrary registries. **The credential position 
 
 | Project | Kernel boundary | Egress control | Credential exposure | Host-config guard | In-project redaction | Clipboard | Shared-config guard | Hardening | Docker socket | Multi-session | Security tests | Platforms |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| **`kib` (baseline)** | ❌ shared kernel | ❌ **open (accepted risk)** | ⚠️ shared OAuth token readable | ✅ **FUSE + structural git detection + content-validated `.git/config`** | ✅ **FUSE stub-on-read, covers mid-session files** | ✅ **Wayland proxy, writes refused** | ✅ RO mounts + host-side validator | ✅ cap-drop ALL, no-new-privs, seccomp, AppArmor | ❌ none | ✅ 1 container/project, N terminals | ✅ `security-test.sh`, 8 sections | ⚠️ **Linux only** |
+| **`kib` (baseline)** | ❌ shared kernel | ❌ **open (accepted risk)** | ✅ **brokered by default — token never in the box** | ✅ **FUSE + structural git detection + content-validated `.git/config`** | ✅ **FUSE stub-on-read, covers mid-session files** | ✅ **proxy, writes refused** | ✅ RO mounts + host-side validator | ✅ cap-drop ALL, no-new-privs, seccomp, AppArmor | ❌ none | ✅ 1 container/project, N terminals | ✅ `security-test.sh`, 11 sections, both redaction modes | Linux, macOS |
 | [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) | ❌ OS sandbox | ✅ deny-all + allowlist proxy | ⚠️ opt-in `denyRead` | ✅ mandatory deny-write: `.git/config`, `.git/hooks`, `.vscode`, `.idea`, shell rc, `.mcp.json` | ⚠️ opt-in | ❓ | n/a | ✅ seccomp BPF, nested PID ns, WFP fence | n/a | ❓ | ✅ mandatory-deny-paths suite | macOS, Linux, Win (alpha) |
 | [microsandbox](https://github.com/superradcompany/microsandbox) | ✅ microVM | ✅ deny-default, DNS+TCP, airgap | ✅ **keys never enter VM** | ❓ | ❓ | ❓ | n/a | ✅ hardware-level VM | ❓ | ⚠️ named sandboxes | ✅ domain/port/secret tests | Linux, macOS, Windows |
 | [matchlock](https://github.com/jingkaihe/matchlock) | ✅ microVM | ✅ deny-all, nftables + MITM | ✅ **in-flight injection; VM sees placeholder** | ❓ | ⚠️ VFS hook rules, no default | ❓ | n/a | ✅ VM + gVisor netstack | ❓ | ⚠️ `exec <vm-id>` | ❓ tests exist, not claimed | Linux (KVM), macOS AS |
@@ -196,17 +199,17 @@ untrusted repos that fetch from arbitrary registries. **The credential position 
 
 | Project | Why it matters to `kib` |
 |---|---|
-| [navikt/cplt](https://github.com/navikt/cplt) | **Closest philosophical match.** The same two rare controls as `kib` — host-config guard *and* in-project secret blocking — but kernel-enforced via Landlock instead of FUSE, plus the egress allowlist `kib` lacks. Organisationally backed (NAV, Norway), 10 contributors. |
-| [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) | Anthropic's own mandatory deny-write list is the most complete enumeration of host-executed config paths in the field. Worth diffing against `guest/policy/global.kibignore`. |
+| [navikt/cplt](https://github.com/navikt/cplt) | **Closest philosophical match.** The same two rare controls — host-config guard *and* in-project secret blocking — kernel-enforced via Landlock instead of FUSE, plus the egress allowlist `kib` lacks. See `COMPARE_TO_CPLT.md`. |
+| [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) | Anthropic's mandatory deny-write list is the most complete enumeration of host-executed config paths in the field. Worth diffing against `guest/policy/global.kibignore`. Its structured `extract` masking is the credential refinement worth copying. |
 | [aicontainer](https://github.com/stefanoginella/aicontainer) | The only other **container** project treating `.git/config`, `.git/hooks` and cross-project config as first-class. Also ships a digest-pinned Docker socket proxy. |
-| [yoloai](https://github.com/kstenerud/yoloai) | Reference implementation of **credential brokering** — the concrete fix for `kib`'s accepted risk H3/H4. |
+| [yoloai](https://github.com/kstenerud/yoloai) | The other on-by-default credential broker, and a working audit trail of its own escapes — including a host-RCE via agent-controlled `.git/config` filter drivers. |
 
 ---
 
 ## Method, and what to distrust
 
 <details>
-<summary><b>How this was compiled</b> — discovery, measurement, and three real limitations</summary>
+<summary><b>How this was compiled</b></summary>
 
 <br>
 
@@ -218,29 +221,19 @@ Roughly 120 projects surfaced; 30 were in scope.
 
 **Limitations, in order of how much they should worry you:**
 
-1. **Feature cells come from documentation, not code.** A project may implement a control it
-   never writes down. `❓` is therefore common and is *not* evidence of absence.
-2. **Contributor counts may be undercounts.** 18 repos were measured directly against the
-   GitHub REST API; the rest were measured after that IP hit the anonymous 60/hr limit, so
-   their numbers come from the `ungh.cc` mirror, **which appears to cap at 30**.
-3. **Star counts are a popularity signal, not a security signal.** Two of the three most
-   rigorous projects here have double-digit stars.
+1. **Feature cells come from documentation, not code.** A project may implement a control it never
+   writes down. `❓` is therefore common and is *not* evidence of absence.
+2. **Contributor counts may be undercounts.** 18 repos were measured directly against the GitHub
+   REST API; the rest come from the `ungh.cc` mirror, **which appears to cap at 30**.
+3. **Star counts are a popularity signal, not a security signal.** Two of the three most rigorous
+   projects here have double-digit stars.
 
-**Scope.** In: locally-run, open-source tools for containing a coding agent on a developer's
-own machine. Out: hosted/SaaS sandboxes (E2B, Daytona, Modal, Vercel, Fly, Runloop,
-Northflank, Cloudflare); sandbox *primitives* (bubblewrap, gVisor, Firecracker, Landlock,
-Firejail, Kata, libkrun); policy layers that add no isolation (Cupcake, nah,
-predicate-secure, shannot); closed-source vendor products (Docker `sbx`, Conductor).
-
-**Too small to compare, but design-instructive:**
-[arezi/claude-sandbox](https://github.com/arezi/claude-sandbox) (0★),
-[nkrefman/claude-sandbox](https://github.com/nkrefman/claude-sandbox) (0★),
-[ShoRoy/claude-docker-sandbox](https://github.com/ShoRoy/claude-docker-sandbox) (0★),
-[evilsquid888/claude-bubblewrap](https://github.com/evilsquid888/claude-bubblewrap) (1★),
-[todd-working/claude-code-container](https://github.com/todd-working/claude-code-container) (1★),
-[gbrindisi/littlebox](https://github.com/gbrindisi/littlebox) (3★),
-[pacificsky/cage](https://github.com/pacificsky/cage) (3★),
-[Z7Lab/claude-code-sandbox](https://github.com/Z7Lab/claude-code-sandbox) (5★).
+**Scope.** In: locally-run, open-source tools for containing a coding agent on a developer's own
+machine. Out: hosted/SaaS sandboxes (E2B, Daytona, Modal, Vercel, Fly, Runloop, Northflank,
+Cloudflare); sandbox *primitives* (bubblewrap, gVisor, Firecracker, Landlock, Firejail, Kata,
+libkrun); policy layers that add no isolation (Cupcake, nah, predicate-secure, shannot);
+closed-source vendor products (Docker `sbx`, Conductor). Eight more projects under 6★ were read
+but are too small to compare.
 
 </details>
 

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400" width="1200" height="400" role="img" aria-labelledby="t d">
   <title id="t">Head to head — kib measured against five agent sandboxes</title>
-  <desc id="d">kib compared with fence, sandbox-runtime, cplt, yoloAI and aicontainer. Of those five: none content-validate .git/config, none mediate the clipboard read versus write, two default-deny egress, and two broker credentials. kib has the first two and lacks the last two.</desc>
+  <desc id="d">kib compared with fence, sandbox-runtime, cplt, yoloAI and aicontainer. Of those five: none content-validate .git/config, none mediate the clipboard read versus write, two default-deny egress, and two broker credentials. kib has the first two, brokers credentials too, and lacks only default-deny egress.</desc>
   <defs>
     <linearGradient id="bgh" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#0d1424"/>
@@ -34,7 +34,7 @@
 
       <rect x="314" y="296" width="220" height="44" rx="22" fill="#2d1214" stroke="#da3633" stroke-width="1.5"/>
       <path d="M340 312 l14 14 M354 312 l-14 14" fill="none" stroke="#f85149" stroke-width="3.4" stroke-linecap="round"/>
-      <text x="370" y="324" font-size="17" fill="#ff7b72" textLength="142" lengthAdjust="spacingAndGlyphs">OUTVOTED ON 2</text>
+      <text x="370" y="324" font-size="17" fill="#ff7b72" textLength="142" lengthAdjust="spacingAndGlyphs">OUTVOTED ON 1</text>
     </g>
   </g>
 
@@ -61,9 +61,9 @@
       <text x="718" y="278" class="sans" fill="#adbac7">Default-deny egress</text>
       <text x="1112" y="278" class="mono" font-weight="700" fill="#ff7b72" text-anchor="end">2</text>
 
-      <circle cx="700" cy="316" r="4.5" fill="#f85149"/>
+      <circle cx="700" cy="316" r="4.5" fill="#3fb950"/>
       <text x="718" y="322" class="sans" fill="#adbac7">Brokers credentials</text>
-      <text x="1112" y="322" class="mono" font-weight="700" fill="#ff7b72" text-anchor="end">2</text>
+      <text x="1112" y="322" class="mono" font-weight="700" fill="#56d364" text-anchor="end">2</text>
     </g>
   </g>
 </svg>
