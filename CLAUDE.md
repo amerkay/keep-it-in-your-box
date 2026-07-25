@@ -100,6 +100,9 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   in (dir-backed, never a single-file bind — the rename footgun). (`credential-broker.md`)
 - **Don't "simplify" `resolv-sync.sh` to overwrite resolv.conf wholesale** — `127.0.0.11` must
   stay first or the `kib-broker` alias breaks mid-session. (`clipboard-and-dns.md`)
+- **Never nest a bind inside another bind's destination** — Docker Desktop aborts the whole
+  `docker run` (`mountpoint … is outside of rootfs`), and pre-creating the mountpoint does not
+  help. Mount flat under `/run/kib/` via `bind_via_link`, or copy the file in. (`macos.md`)
 - **Don't drop the main container's dual-homing** (`connect_broker_network`) — host dev servers
   and LAN must stay reachable alongside the broker net. (`credential-broker.md`)
 - **Don't hide clipboard interfaces from the Wayland registry** — it broke `wl-paste`; refuse the

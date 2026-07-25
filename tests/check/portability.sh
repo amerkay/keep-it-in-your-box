@@ -73,6 +73,19 @@ else
     pass "all OS branching stays in host/portable.sh (sleep-guard's fallback probe excepted)"
 fi
 
+# A bind whose destination sits inside another bind aborts the whole `docker run` on Docker
+# Desktop (runc resolves the mountpoint through the parent and finds it outside the rootfs).
+# The two dir mounts are the ones with children; anything landing inside them must go through
+# bind_via_link instead. The .git/hooks and /run/host-resolve nests are sidecar/Linux-only.
+nested="$(grep -n -- '-v "[^"]*:\([$]SESSION_CDIR\|[$]SHARED_CDIR\|/home/hostuser/\.claude-[a-z]*\)/' \
+    "${HOST_BASH[@]}" 2>/dev/null || true)"
+if [ -n "$nested" ]; then
+    fail "a bind mount nests inside the session/shared dir mount (Docker Desktop refuses it)" \
+        "$(printf '%s' "$nested" | head -3)"
+else
+    pass "no bind mount nests inside the session/shared dir mounts"
+fi
+
 # ── Host-side python ────────────────────────────────────────────────────────
 # `kib_py` runs whatever `python3` the host has, and stock macOS ships 3.9
 # (`xcode-select --install`). ruff's per-file-target-version + FA102 cover annotations;

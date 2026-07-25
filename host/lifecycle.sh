@@ -10,8 +10,9 @@
 #
 # Reads:  KIB_ROOT IMAGE_NAME KIB_FUSE_MODE UNLOCK_SHARED and the globals host/config.sh sets
 # Writes: PROJ_HASH CNAME FUSE_CNAME FUSE_ROOT WL_CNAME WL_ROOT PATTERNS_STATE CLIP_STATE
-#         CRED_WITNESS LOCK_WITNESS BROKER_CNAME BROKER_NET BROKER_DIR BROKER_OUT BROKER_HASH
-#         BROKER_ENABLED PROJECT_MOUNT_SRC PROJECT_MOUNT_OPTS REDACTION_ARGS ARGS
+#         CRED_WITNESS LOCK_WITNESS SESSION_CDIR SHARED_CDIR SHARED_ASSET_CDIR
+#         LOCK_WITNESS_CPATH TRANSCRIPTS_CPATH BROKER_CNAME BROKER_NET BROKER_DIR BROKER_OUT
+#         BROKER_HASH BROKER_ENABLED PROJECT_MOUNT_SRC PROJECT_MOUNT_OPTS REDACTION_ARGS ARGS
 #         SLEEP_GUARD_PID SESSION_TAG EPH_ROOT
 # shellcheck disable=SC2034  # most of the above are consumed in the other host units
 
@@ -46,8 +47,8 @@ kib_identity() {
     # a per-process flag would skip merge_out_credential and leave canonical holding a token
     # the box has already rotated away — which logs the account out.
     CRED_WITNESS="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.credfallback"
-    # Bound :ro into the shared-assembly dir only when locked (the default), and read back off
-    # the running container's mounts by `running_unlocked`. A witness that always exists when
+    # Bound :ro at a flat container path only when locked (the default), and read back off the
+    # running container's mounts by `running_unlocked`. A witness that always exists when
     # locked, unlike any individual shared asset — a fresh user may have no plugins at all.
     LOCK_WITNESS="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.lockwitness"
 
@@ -68,15 +69,45 @@ kib_identity() {
     REDACTION_ARGS=()
 }
 
+# Container-side paths. The two dir mounts, then the flat ones for the binds that would
+# otherwise nest inside them (see bind_via_link).
+SESSION_CDIR=/home/hostuser/.claude-session
+SHARED_CDIR=/home/hostuser/.claude-shared
+SHARED_ASSET_CDIR=/run/kib/shared
+LOCK_WITNESS_CPATH=/run/kib/shared/.kib-shared-locked
+TRANSCRIPTS_CPATH=/run/kib/transcripts
+
 container_running() { [ -n "$(docker ps -q -f "name=^${CNAME}$" 2>/dev/null)" ]; }
 sidecar_running() { [ -n "$(docker ps -q -f "name=^${FUSE_CNAME}$" 2>/dev/null)" ]; }
 broker_running() { [ -n "$(docker ps -q -f "name=^${BROKER_CNAME}$" 2>/dev/null)" ]; }
 
 # Was the running container created with --unlock-shared? Read it off the mounts, which are
-# the ground truth — no state file to go stale.
+# the ground truth — no state file to go stale. A container from a kib that mounted the witness
+# elsewhere reads as unlocked, which fails closed: kib_bring_up refuses to attach.
 running_unlocked() {
     ! docker inspect -f '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' "$CNAME" 2>/dev/null \
-        | grep -qx '/home/hostuser/.claude-shared/.kib-shared-locked'
+        | grep -qx "$LOCK_WITNESS_CPATH"
+}
+
+# ── Nested binds are refused — mount flat, link into place ───────────────────
+# A bind whose destination sits INSIDE another bind aborts the whole `docker run` on Docker
+# Desktop: runc resolves the mountpoint through the parent, lands on the engine VM's
+# /run/host_virtiofs view of it, finds a path outside the container rootfs and errors. The
+# check runs after resolution either way, so pre-creating the mountpoint does not help.
+# Mount at a flat path instead and leave a symlink to it in the parent bind's HOST-side dir:
+# dangling on the host (kib scratch — nothing reads it there), resolved in the container.
+# Not under /kib — single mode chmods that 700 root to hide the real project.
+bind_via_link() { # <host src> <flat container dest> <link path in the parent's host dir> [:ro]
+    local src="$1" dest="$2" link="$3" opts="${4:-}"
+    # An older kib left docker's own mountpoint here, ROOT-owned; unlinking it needs only the
+    # parent's write bit, which we have.
+    if [ ! -L "$link" ]; then
+        rm -rf "$link" 2>/dev/null || true
+    fi
+    mkdir -p "$(dirname "$link")" 2>/dev/null || true
+    ln -sfn "$dest" "$link" 2>/dev/null \
+        || warn "could not link $link -> $dest; it will be missing inside the box."
+    ARGS+=(-v "$src:$dest$opts")
 }
 
 # `docker run -d` returns as soon as PID 1 exists, but the entrypoint still has real work to
@@ -156,17 +187,17 @@ start_container() {
 
         # This project's private state: daemon, sessions, jobs, and the three files assembled
         # from canonical (.claude.json, history.jsonl, CLAUDE.md). No other project mounts it.
-        -v "$SESSION_BASE:/home/hostuser/.claude-session"
+        -v "$SESSION_BASE:$SESSION_CDIR"
 
-        # Shared-assembly dir: a real host directory the shared assets nest-bind into (below),
-        # plus the credential (synthetic shadow, or the real one copied in). A real dir, so
+        # Shared-assembly dir: a real host directory holding the credential (synthetic shadow,
+        # or the real one copied in) and one symlink per shared asset (below). A real dir, so
         # Claude's atomic credential rename works.
-        -v "$SHARED_BASE:/home/hostuser/.claude-shared"
+        -v "$SHARED_BASE:$SHARED_CDIR"
 
         # config (+ .claude.json) resolve to the per-project session dir; the credential store
         # to the shared-assembly dir.
-        -e CLAUDE_CONFIG_DIR=/home/hostuser/.claude-session
-        -e CLAUDE_SECURESTORAGE_CONFIG_DIR=/home/hostuser/.claude-shared
+        -e CLAUDE_CONFIG_DIR="$SESSION_CDIR"
+        -e CLAUDE_SECURESTORAGE_CONFIG_DIR="$SHARED_CDIR"
 
         # Host UID/GID/HOME for runtime user creation. `docker exec` inherits these from the
         # container config, so attached sessions get them too.
@@ -237,10 +268,15 @@ start_container() {
     fi
 
     # This project's transcripts, shared host<->box so --resume lists the same sessions on
-    # both sides. Nested rw bind inside the session mount; Docker applies mounts parent-first.
+    # both sides. Would nest inside the session mount, hence the link.
     # Skipped for an ephemeral session — it must persist nothing to canonical.
     if [ "$EPHEMERAL" != 1 ] && [ -d "$CLAUDE_HOME/projects/$SLUG" ]; then
-        ARGS+=(-v "$CLAUDE_HOME/projects/$SLUG:/home/hostuser/.claude-session/projects/$SLUG")
+        bind_via_link "$CLAUDE_HOME/projects/$SLUG" "$TRANSCRIPTS_CPATH" \
+            "$SESSION_BASE/projects/$SLUG"
+    elif [ -L "$SESSION_BASE/projects/$SLUG" ]; then
+        # Canonical lost it since the last launch: a link left dangling here is worse than no
+        # link — Claude cannot create its transcript dir over one.
+        rm -f "$SESSION_BASE/projects/$SLUG" 2>/dev/null || true
     fi
 
     # settings.json / keybindings.json are deliberately NOT bound: stage_shared_settings puts
@@ -259,7 +295,11 @@ start_container() {
     # loop exit 1, which under `set -e` kills kib before the container starts.
     for _entry in plugins skills agents commands hooks; do
         if [ -e "$CLAUDE_HOME/$_entry" ]; then
-            ARGS+=(-v "$CLAUDE_HOME/$_entry:/home/hostuser/.claude-shared/$_entry$_ro")
+            bind_via_link "$CLAUDE_HOME/$_entry" "$SHARED_ASSET_CDIR/$_entry" \
+                "$SHARED_BASE/$_entry" "$_ro"
+        elif [ -L "$SHARED_BASE/$_entry" ]; then
+            # Gone from canonical since the last launch — drop our link rather than dangle.
+            rm -f "$SHARED_BASE/$_entry" 2>/dev/null || true
         fi
     done
 
@@ -268,13 +308,13 @@ start_container() {
     if [ "$UNLOCK_SHARED" = 0 ]; then
         printf 'locked\n' >"$LOCK_WITNESS" 2>/dev/null || true
         if [ -f "$LOCK_WITNESS" ]; then
-            ARGS+=(-v "$LOCK_WITNESS:/home/hostuser/.claude-shared/.kib-shared-locked:ro")
+            ARGS+=(-v "$LOCK_WITNESS:$LOCK_WITNESS_CPATH:ro")
         fi
     fi
 
     # Broker wiring: -e ANTHROPIC_BASE_URL + the placeholder credential that SHADOWS the real
-    # .credentials.json. Appended after the shared mounts above so it overlays the file inside
-    # them (Docker applies mounts parent-first). No-op unless the broker came up.
+    # .credentials.json (copied into the shared-assembly dir, not mounted). Must follow
+    # stage_credential, which clears that path. No-op unless the broker came up.
     add_broker_env_args
 
     # The container just idles; the real work runs in `docker exec` sessions, so it survives

@@ -16,6 +16,7 @@
 #
 # Reads:  KIB_ROOT KIB_CONFIG KIB_CFG_BROKER KIB_BROKER KIB_BROKER_ENDPOINT_MODE
 #         CNAME BROKER_CNAME BROKER_NET BROKER_DIR BROKER_OUT BROKER_HASH IMAGE_NAME
+#         SHARED_BASE SHARED_CDIR CLAUDE_HOME CRED_WITNESS
 # Writes: KIB_DIR BROKER_TOKEN_FILE PROVIDERS_DIR BROKER_ENABLED HOSTED_MCP_UP ARGS
 # shellcheck disable=SC2034  # BROKER_ENABLED / HOSTED_MCP_UP are read across the boundary
 
@@ -309,8 +310,9 @@ inject_brokered_mcps() {
 #   1. the base URL, so the SDK talks to the broker instead of api.anthropic.com;
 #   2. a PLACEHOLDER token, which takes precedence over the credentials file;
 #   3. a synthetic .credentials.json shadowing the real one — (2) alone would leave a real file
-#      readable in the shared-assembly dir, which is the whole exposure. It lands AFTER the
-#      $SHARED_BASE mount so it overlays the file inside it (Docker mounts parent-first).
+#      readable in the shared-assembly dir, which is the whole exposure. COPIED into that dir
+#      (mode 0400), never bound over it: a bind nested inside its mount aborts the whole
+#      `docker run` on Docker Desktop. See bind_via_link.
 add_broker_env_args() {
     [ "$BROKER_ENABLED" = 1 ] || return 0
     # reverse_proxy_mcp rows need nothing here — the agent reaches them via the .claude.json
@@ -331,9 +333,30 @@ add_broker_env_args() {
             -e "$KIB_BROKER_TOKEN_ENV=$KIB_BROKER_PLACEHOLDER_TOKEN"
         )
         # Only claude shadows a real credential file; codex/gemini have none to overlay.
-        [ -n "$KIB_BROKER_PLACEHOLDER_CONTAINER_PATH" ] \
-            && ARGS+=(-v "$BROKER_OUT/$id.cred.json:$KIB_BROKER_PLACEHOLDER_CONTAINER_PATH:ro")
+        if [ -n "$KIB_BROKER_PLACEHOLDER_CONTAINER_PATH" ]; then
+            _stage_placeholder_credential "$id" "$KIB_BROKER_PLACEHOLDER_CONTAINER_PATH"
+        fi
     done
+}
+
+# The registry names where the placeholder lands in the container; the only such path kib can
+# write to from here is the shared-assembly dir, which the container sees at $SHARED_CDIR.
+# 0400 so the box cannot rewrite it — under the broker nothing refreshes, by design.
+_stage_placeholder_credential() { # <provider id> <container path>
+    case "$2" in
+        "$SHARED_CDIR"/*) ;;
+        *) _broker_abort "the broker's placeholder path for '$1' is not in the shared dir: $2" ;;
+    esac
+    local dst="$SHARED_BASE/${2#"$SHARED_CDIR"/}"
+    rm -f "$dst" 2>/dev/null || true # may be 0400 from the last launch, or a stale mountpoint
+    if (
+        umask 077
+        cp "$BROKER_OUT/$1.cred.json" "$dst"
+    ); then
+        chmod 0400 "$dst" 2>/dev/null || true
+    else
+        _broker_abort "could not stage the placeholder credential for '$1' into the session."
+    fi
 }
 
 # ── Fallback credential (broker off, or on-but-no-token) ─────────
@@ -352,9 +375,9 @@ stage_credential() {
     # writes a credential here that has to be folded back out on exit.
     : >"$CRED_WITNESS" 2>/dev/null || true
     [ -f "$CLAUDE_HOME/.credentials.json" ] || return 0 # never logged in — nothing to copy
-    # Unlink first: the broker-on path binds a synthetic file here, so switching the broker off
-    # leaves a root-owned Docker mountpoint cp cannot overwrite — the symptom is an
-    # unexplained login prompt.
+    # Unlink first: the broker-on path leaves a 0400 synthetic file here (and an older kib left
+    # a root-owned Docker mountpoint), so switching the broker off would hit a cp that cannot
+    # overwrite — the symptom is an unexplained login prompt.
     rm -f "$SHARED_BASE/.credentials.json" 2>/dev/null || true
     (
         umask 077
