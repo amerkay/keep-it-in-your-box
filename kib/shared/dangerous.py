@@ -38,6 +38,34 @@ SETTINGS_COMMAND_KEYS = (
 )
 # settings.json env keys that redirect the agent's auth traffic or hand over its credential.
 SETTINGS_ENV_KEYS = ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+# env keys a *child process* turns into code execution: interpreter/loader hooks and command
+# overrides. Shared settings.json loads in a HOST `claude` too, and its `env` is applied to
+# every subprocess claude spawns — so BASH_ENV / NODE_OPTIONS / LD_PRELOAD here is host RCE at
+# the next tool or git call, the same propagation path as apiKeyHelper. A denylist leaks by
+# nature; this is the known-dangerous set, kept apart from benign prefs (EDITOR, PAGER) which a
+# user legitimately sets. Names are case-sensitive — the OS only honours the exact spelling.
+SETTINGS_ENV_EXEC_KEYS = (
+    "BASH_ENV",
+    "ENV",
+    "PATH",
+    "NODE_OPTIONS",
+    "PYTHONSTARTUP",
+    "PYTHONPATH",
+    "PERL5OPT",
+    "PERL5LIB",
+    "RUBYOPT",
+    "LD_PRELOAD",
+    "LD_AUDIT",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_EXTERNAL_DIFF",
+    "GIT_PROXY_COMMAND",
+    "GIT_PAGER",
+    "PROMPT_COMMAND",
+)
 
 
 def git_key_is_dangerous(key: str) -> bool:
@@ -46,30 +74,79 @@ def git_key_is_dangerous(key: str) -> bool:
     return bool(parts[0]) and (parts[0] in GIT_SECTIONS or parts[-1] in GIT_KEYS)
 
 
+def _strip_inline_comment(s: str) -> str:
+    """Drop a `#`/`;` comment, but honour double-quoted spans — git treats a comment char
+    inside a quoted subsection or value as literal. A backslash escapes the next char in a
+    quote. A naive `split('#')` truncates `[filter "a#b"]clean = x` into nothing; git keeps it.
+    """
+    out: list[str] = []
+    in_q = False
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if c == "\\" and in_q and i + 1 < n:
+            out.append(c + s[i + 1])
+            i += 2
+            continue
+        if c == '"':
+            in_q = not in_q
+        elif c in "#;" and not in_q:
+            break
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _split_header(line: str) -> tuple[str, str]:
+    """`line` starts with `[`. Return `(section_lower, rest_after_the_closing_bracket)`.
+
+    The closing `]` is the first one OUTSIDE the quoted subsection — git's real grammar. A
+    `partition(']')` splits at the first `]`, so a subsection name containing `]`
+    (`[filter "e]v"]clean = x`) hides the key past the bracket; this walks quotes to find the
+    true close, matching what git resolves.
+    """
+    in_q = False
+    i, n = 1, len(line)
+    while i < n:
+        c = line[i]
+        if c == "\\" and in_q and i + 1 < n:
+            i += 2
+            continue
+        if c == '"':
+            in_q = not in_q
+        elif c == "]" and not in_q:
+            head = line[1:i]
+            return (head.split() or [""])[0].strip('"').lower(), line[i + 1 :].strip()
+        i += 1
+    return (line[1:].split() or [""])[0].strip('"').lower(), ""
+
+
 def git_ini_entries(text: str) -> set[tuple[str, str, str]]:
     """The `(section, key, value)` triples in git-INI *text* that name a command.
 
-    Used by the FUSE guard, which sees the candidate file before the rename that installs
-    it. Git's parser resumes scanning after `]`, so `[core]hooksPath = x` on a single line
-    is a valid setting — keep the remainder of the line instead of dropping it, which is
-    exactly the form a header-only parser misses.
+    Used by the FUSE guard, which sees the candidate file before the rename that installs it,
+    so it must read the file the way GIT will — not a naive approximation. Two grammar points
+    a header-only parser misses, each a live bypass until fixed:
+
+    * git resumes scanning after `]`, so `[core]hooksPath = x` on one line is a real setting;
+    * a subsection name is double-quoted and may itself contain `]`, `#` or `;`, which do NOT
+      end the header or start a comment (`[filter "e]v"]clean = payload` sets a clean driver).
+
+    Quote-aware header and comment handling covers both.
     """
     found: set[tuple[str, str, str]] = set()
     section = ""
     for raw in text.splitlines():
-        line = raw.split("#", 1)[0].split(";", 1)[0].strip()
+        line = _strip_inline_comment(raw).strip()
         if not line:
             continue
         if line.startswith("["):
-            # '[filter "lfs"]' → 'filter'; a subsection name is not a key.
-            head, _, rest = line[1:].partition("]")
-            section = (head.split() or [""])[0].strip('"').lower()
-            line = rest.strip()
+            section, line = _split_header(line)
             if not line:
                 continue
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
+        # A valueless key is git-legal (boolean true); keep it so a dangerous *section*
+        # (include/alias/…) is caught even when its key carries no `=`.
+        key, _, value = line.partition("=")
         key = key.strip().lower()
         if section in GIT_SECTIONS or key.split(".")[-1] in GIT_KEYS:
             found.add((section, key, value.strip()))
@@ -97,6 +174,7 @@ def settings_findings(cfg: dict[str, Any]) -> list[str]:
     env = cfg.get("env")
     if isinstance(env, dict):
         bad += [f"env.{k} = {env[k]}" for k in SETTINGS_ENV_KEYS if env.get(k)]
+        bad += [f"env.{k} = {env[k]}" for k in SETTINGS_ENV_EXEC_KEYS if env.get(k)]
 
     status_line = cfg.get("statusLine")
     if isinstance(status_line, dict) and status_line.get("command"):

@@ -14,6 +14,7 @@
   <img src="https://img.shields.io/badge/every%20fix-re--verified%20live-8957e5?style=flat-square" alt="every fix re-verified live" />
   <img src="https://img.shields.io/badge/method-live%20exploitation-30363d?style=flat-square" alt="method: live exploitation" />
   <img src="https://img.shields.io/badge/audited-2026--07--22-30363d?style=flat-square" alt="audited 2026-07-22" />
+  <img src="https://img.shields.io/badge/2nd%20pass-2026--07--25%20·%202%20new%20host--RCE%20closed-8957e5?style=flat-square" alt="2nd pass 2026-07-25: 2 new host-RCE paths found and closed" />
 </p>
 
 ---
@@ -26,6 +27,9 @@
 
 > [!TIP]
 > **All `P0` and `P1` work has shipped.** C1–C4, H1, H2, H6 and H8 are **fixed**; H5 is **mitigated**; H3/H4 remain the deliberate accepted risk. Findings are retained as the record of *why* each control exists — see [Changelog](#changelog).
+
+> [!NOTE]
+> **Second pass — 2026-07-25.** A re-audit found **two more host-RCE paths of already-known classes**, both now fixed: **C5** — the git-config write validator was not quote-aware, so a driver hidden in a double-quoted subsection name (`[filter "e]v"]clean = …`, or `#`/`;` inside the quotes) slipped past it into the real `.git/config` (the same parser-divergence class as C3); and **H9** — the shared `settings.json` env allow-check was a three-key denylist, so `NODE_OPTIONS` / `BASH_ENV` / `LD_PRELOAD` / `PATH` propagated to a host `claude`'s subprocesses (the same propagation path as H5). See [Second audit pass](#second-audit-pass--2026-07-25) for detail, the 50-vector sweep, and recommendations.
 
 > [!CAUTION]
 > The most important chains fired on the **host's next `git status` / `git add` / `git commit`** — the exact commands you run to *review the sandbox's diff before trusting it*. `core.fsmonitor` executes on a bare `git status`, before a human sees anything, and a redirected `core.hooksPath` routed git past the repo's own pre-commit hook (since replaced by the host-side audit gate). The review step the whole model relies on was where the payload detonated.
@@ -56,6 +60,7 @@ Severity, mechanism, root cause and remediation for every confirmed issue. This 
 | **C2** | Hardlink defeats the FUSE `protect`/`redact` guard | 🔴 Critical<br>Host RCE + secret read | `link()` checks only the **new name**, never the **source inode**; a hardlink aliases a protected inode and the VFS doesn't re-resolve it (a symlink does, and was correctly blocked) → write `core.hooksPath` directly, or read a `redact`ed secret past the stub | `kib/guest/fuse.py:453-455`; guard keys on **path string**, not inode | ✅ **Fixed** `P0` — `link()` now calls `_deny_if_masked(source)` as well as target. (`default_permissions` deliberately not enabled — it also changes stub-inode semantics) |
 | **C3** | Inline `[section]key=value` parser bypass | 🔴 Critical<br>Host RCE | The parser treats any `[`-line as a pure header and `continue`s, dropping a trailing inline `key=value` — but **git accepts `[core]hooksPath = …` on one line**, resuming its scan after `]` | `kib/guest/fuse.py:358-363` — hand-rolled parser diverges from git's grammar | ✅ **Fixed** `P0` — `_dangerous_entries` resumes parsing after `]`, matching git's grammar |
 | **C4** | `.gitattributes` filter/diff/merge driver via include | 🔴 Critical<br>Host RCE | Drivers are blocked on direct write, but via C1's include hop they're defined in an included file and `.gitattributes` (an unguarded worktree file) binds them → runs on checkout/diff/merge/archive | Same as C1; `.gitattributes` is an extra trigger surface | ✅ **Fixed** `P0` — closed by C1: with the include hop refused, the drivers can no longer be defined |
+| **C5** | Quoted-subsection parser bypass in the write validator | 🔴 Critical<br>Host RCE | The FUSE write validator split the section header at the *first* `]` and stripped `#`/`;` comments without honouring quotes; git treats `]`, `#`, `;` inside a double-quoted subsection as literal. So `[filter "e]v"]clean = payload` (or `"a#b"`, `"a;b"`, escaped-quote) is a live `filter.<sub>.clean` driver to git but noise to the validator → it lands in the real `.git/config` and fires on the host's `git add`/`git diff`/`git checkout`/`git archive`. **Confirmed live** (guard admitted the write; git resolved the driver). Same class as C3 | `kib/shared/dangerous.py` `git_ini_entries` (`partition("]")` + `split("#")`) | ✅ **Fixed** (2nd pass) — quote-aware `_split_header`/`_strip_inline_comment` walk the quotes to git's true close; all sibling forms closed; unit-proven against git's own resolution |
 | **H1** | Bare / `--separate-git-dir` repo (dir not named `.git`) | 🟠 High<br>Host RCE | `_is_git_config`/`_git_sensitive` required a literal `.git` component, so `config`/`hooks` under a bare or separate gitdir were unguarded → direct `core.hooksPath`, accepted and resolved | `kib/guest/fuse.py:333` / `:338`; the host-side audit covered the top repo only | ✅ **Fixed** `P0` — `_is_gitdir()` marker probe (`HEAD`+`objects`+`refs`) in both functions; `audit_nested_gitdirs()` added host-side |
 | **H2** | gitfile / symlinked `.git` redirect to an unguarded gitdir | 🟠 High<br>Host RCE | A `.git` **file** containing `gitdir: ../store` redirects config+hooks into an unguarded dir; live, `core.fsmonitor` set that way **executed on a bare `git status`** | `kib/guest/fuse.py:338` (component match) | ✅ **Fixed** `P0` — closed by H1: the redirect *target* is a real gitdir, so the marker probe guards it. The gitfile stays writable so `git worktree add` works |
 | **H3** | Shared OAuth token exfiltration over open egress | 🟠 High<br>Host credential theft | `~/.claude-shared/.credentials.json` (0600, **same-uid readable**, a real host mount outside FUSE) plus **fully open egress** → the account token leaves the box with no host trigger | Open egress + a durable credential in a container-reachable mount | ⚪ **Accepted** — the token cannot be made unreadable (Claude needs it) and default-deny egress contradicts the sandbox's purpose. **Rotate the token if an untrusted session has run** |
@@ -63,6 +68,7 @@ Severity, mechanism, root cause and remediation for every confirmed issue. This 
 | **H5** | Poison shared `settings.json` | 🟠 High<br>Host cred theft + cross-project | Writable and **outside** FUSE; the entrypoint symlinked it into every project and folded in-session edits back into the shared copy, with no validation → `ANTHROPIC_BASE_URL`, `apiKeyHelper` and inline `hooks[].command` propagate to every project's next session | `guest/entrypoint/docker-entrypoint.sh:95-110` (fold-back); no content validation | 🟡 **Mitigated** `P1` — `validate_shared_settings` (the `host/` units) vets the file host-side on every launch, before any container reads it, refusing `apiKeyHelper`/`awsAuthRefresh`/`awsCredentialExport`/`otelHeadersHelper`, `env.ANTHROPIC_{BASE_URL,API_KEY,AUTH_TOKEN}`, `statusLine.command` and inline `hooks[].command`. Left writable on purpose (`/config`, theme) — so it is prevention **at launch, not at write** |
 | **H6** | Poison shared `plugins`/`skills`/`agents`/`commands` | 🟠 High<br>Cross-project persistence | 0775, writable, symlinked into every project and — unlike `hooks/` — not read-only mounted → injected assets auto-run in every project's next session; with H3, exfil the token | Shared writable assets, no validation | ✅ **Fixed** `P1` — all four mounted `:ro` individually (the dir itself must stay writable for OAuth refresh), with a per-project **merge farm** in `guest/entrypoint/docker-entrypoint.sh` so in-session authoring and `/plugin install` still work and land per-project. `kib unlock-shared` is the deliberate opt-out |
 | **H8** | Wayland clipboard poisoning → host paste RCE / read exfil | 🟠 High<br>Host RCE (on paste) | Raw read-write Wayland socket, unmediated: the container could **write** the clipboard with bracketed-paste-bypass sequences (an embedded `ESC[201~`) that execute at your next host paste, and **read** it continuously (`wl-paste --watch`) | `cc:268` — unmediated socket mount | ✅ **Fixed** `P2` — `kib/guest/wayland_guard.py` sidecar owns the real socket and refuses every `create_data_source`/`set_selection`/`set_primary_selection` on all four clipboard interfaces, closing that connection and raising a host desktop alert. Reads pass verbatim (`SCM_RIGHTS` fds included), so `wl-paste` and image paste are unaffected |
+| **H9** | Loader/interpreter env keys in shared `settings.json` | 🟠 High<br>Host RCE + cross-project | The shared-settings validator flagged only `env.ANTHROPIC_{BASE_URL,API_KEY,AUTH_TOKEN}`. The same file loads in a host `claude`, whose `env` is applied to every subprocess it spawns → `env.NODE_OPTIONS` (`--require evil.js`), `BASH_ENV`, `LD_PRELOAD`, `GIT_SSH_COMMAND`, `PATH` are host code execution at the next tool or git call. Same propagation path as H5, wider key set | `kib/shared/dangerous.py` `SETTINGS_ENV_KEYS` (three keys only) | ✅ **Fixed** (2nd pass) — added `SETTINGS_ENV_EXEC_KEYS` (interpreter/loader/command-override set) to `settings_findings`; both the launch validator and the merge-out vet refuse them; benign prefs (`EDITOR`, `PAGER`, `LANG`) stay clean |
 | **L1** | Unguarded project `.claude/settings*.json` & `.mcp.json` | 🟡 Low<br>In-container only | `guest/policy/global.kibignore` lists `.vscode`/`.envrc`/`.env*` but not `.claude/` or `.mcp.json`; a malicious repo's autoload files get in-container RCE — **already free** under skip-permissions | Not pruned or validated | ⬜ **Open** `P3` — defense-in-depth against a future non-skip-permissions use; add them to a validated guard section |
 | **—** | Container-escape CVEs, FUSE-sidecar pivot, symlink escape, mount-propagation, host-resolver reach, sleep-guard injection | 🟢 Info | — | — | **Verified blocked** — see below |
 
@@ -122,6 +128,154 @@ Tested, not assumed.
 
 ---
 
+## Second audit pass — 2026-07-25
+
+A fresh sweep of every host-reaching control, from inside a running sandbox, with a standing
+brief: *find 50 ways to reach the host or break confinement.* Two new paths were confirmed —
+both **re-treads of classes the first pass already named**, in code the first pass did not reach
+that far into — and both are fixed. The container boundary was re-checked and still holds.
+
+### C5 — the git-config validator was not quote-aware  🔴 Critical · Host RCE · **fixed**
+
+The write validator (`kib.shared.dangerous.git_ini_entries`, called from the FUSE `rename`
+guard) found a section header's closing bracket with `partition("]")` and stripped comments with
+`split("#")`/`split(";")`. Git's grammar is different: a subsection name is **double-quoted and
+may itself contain `]`, `#` or `;`**, none of which end the header or start a comment. So git
+resolves each of these to a **live command driver**, while the validator saw only a mangled,
+harmless-looking key:
+
+```
+[filter "e]v"]clean  = payload      # ] inside the subsection
+[filter "a#b"]clean  = payload      # # inside the subsection (not a comment)
+[filter "a;b"]clean  = payload      # ; inside the subsection
+[filter "a\"]b"]clean = payload     # escaped quote, then ]
+```
+
+A driver (`filter.*.clean/smudge/process`, `diff.*.textconv`, `merge.*.driver`,
+`credential.*.helper`, …) admitted this way lands in the **real project `.git/config`** and runs
+on the host's `git add` / `git diff` / `git checkout` / `git archive` — the review-and-commit
+flow itself. **Confirmed live** in a throwaway repo behind the real FUSE mount: the guard admitted
+the rename and `git config --get 'filter.e]v.clean'` resolved to the payload. This is exactly the
+C3 class — *a hand-rolled parser diverging from git's resolution* — one grammar layer deeper.
+
+**Fix:** quote-aware `_split_header` and `_strip_inline_comment` walk the double-quoted spans to
+git's true closing bracket and never treat a quoted `#`/`;` as a comment. Verified by replaying
+every form above against **git's own** `git config --file … --list` and asserting the parser now
+agrees on all of them; the valueless-key case (`[include]\npath`) is caught too. `security-test.sh`
+gains the live C5/C5b regression; `test_dangerous.py` gains the unit cases.
+
+### H9 — loader/interpreter env keys in shared `settings.json`  🟠 High · Host RCE · **fixed**
+
+`settings_findings` refused `apiKeyHelper` and three `ANTHROPIC_*` env keys, but `env` is a free
+map and the **shared `settings.json` loads in a host `claude` too**, which applies `env` to every
+subprocess it spawns. So a poisoned shared file carrying `env.NODE_OPTIONS=--require /tmp/e.js`,
+`env.BASH_ENV=/tmp/e.sh`, `env.LD_PRELOAD=/tmp/e.so`, `env.GIT_SSH_COMMAND=…` or a `PATH`
+override is **host code execution at the next tool call or git invocation** — the same
+propagation path H5 closes for `apiKeyHelper`, with a wider key set. A denylist leaks by nature;
+the fix adds the known interpreter/loader/command-override set (`SETTINGS_ENV_EXEC_KEYS`) while
+leaving genuine user prefs (`EDITOR`, `PAGER`, `LANG`) clean, and applies on **both** the launch
+validator and the merge-out vet.
+
+> [!IMPORTANT]
+> **Live re-verification of C5 needs a container recreation.** The FUSE sidecar imported the old
+> `dangerous.py` at container creation and the bind-mounted package only reloads when the
+> container is recreated (`ps -o lstart= -p 1` inside it to check its birth time). Re-run
+> `./tests/security-test.sh` after the **last** session for this project exits and it relaunches;
+> the C5 rows go from admit→deny then. H9 runs host-side and is already effective.
+
+### The 50-vector sweep
+
+Every candidate considered this pass, with its verdict. **48 blocked, 2 were open (C5, H9) and
+are now fixed**; three residuals are called out below the table.
+
+| # | Vector | Verdict |
+|--:|:--|:--|
+| 1 | `core.hooksPath` direct write | ✅ validator + `protect` |
+| 2 | `core.fsmonitor` (fires on bare `git status`) | ✅ blocked |
+| 3 | `core.sshCommand` | ✅ blocked |
+| 4 | `core.pager` / `core.editor` | ✅ blocked |
+| 5 | `alias.*` shell escape (`!cmd`) | ✅ section-blocked |
+| 6 | `include.path` / `includeIf.*.path` indirection | ✅ C1 |
+| 7 | `filter.*.clean/smudge/process` (multi-line) | ✅ blocked |
+| 8 | `diff.*.textconv` / `merge.*.driver` | ✅ blocked |
+| 9 | `credential.*.helper` | ✅ blocked |
+| 10 | Inline `[core]hooksPath = x` one-liner | ✅ C3 |
+| 11 | **Quoted-`]` subsection inline driver** | ⛑️ **was open — C5, fixed** |
+| 12 | **`#`/`;` inside a quoted subsection** | ⛑️ **was open — C5, fixed** |
+| 13 | Escaped-quote subsection `[f "a\"]b"]clean` | ⛑️ **was open — C5, fixed** |
+| 14 | Valueless key in a dangerous section (`[include]\npath`) | ✅ now caught (C5 hardening) |
+| 15 | Bare repo (`git init --bare`) `hooksPath` | ✅ H1 marker probe |
+| 16 | `--separate-git-dir` / gitfile redirect | ✅ H2 |
+| 17 | Hardlink alias of `.git/config` | ✅ C2 (source inode checked) |
+| 18 | Symlink to `.git/config`, then write | ✅ kernel re-resolves; `readlink` refused on masked |
+| 19 | `.git/hooks/pre-commit` direct write | ✅ `protect` + `:ro` mount |
+| 20 | Submodule `.git/modules/x/config` driver | ✅ depth-aware `_git_sensitive` + host audit |
+| 21 | Worktree `.git/worktrees/x/config` driver | ✅ same |
+| 22 | Ordering: write config *before* the gitdir markers exist | ⚠️ preventer can be raced; host audit + reachability limit it (residual R1) |
+| 23 | Fake gitdir buried in `node_modules/` | ⚠️ host audit prunes it (residual R1) |
+| 24 | `.gitattributes` binding a driver defined via include | ✅ C1 shuts the include hop |
+| 25 | `.git/info/attributes` driver bind | ✅ driver undefinable |
+| 26 | settings.json `apiKeyHelper` / `aws*` / `otelHeadersHelper` | ✅ validator |
+| 27 | settings.json `statusLine.command` | ✅ blocked |
+| 28 | settings.json inline `hooks[].command` | ✅ blocked |
+| 29 | settings.json `env.ANTHROPIC_{BASE_URL,API_KEY,AUTH_TOKEN}` | ✅ blocked |
+| 30 | **settings.json `env.NODE_OPTIONS`/`BASH_ENV`/`LD_PRELOAD`/`PATH`/`GIT_SSH_COMMAND`** | ⛑️ **was open — H9, fixed** |
+| 31 | `keybindings.json` folded back unvetted | ⚠️ no command keys today (residual R2) |
+| 32 | Poison shared `plugins`/`skills`/`agents`/`commands` | ✅ H6 `:ro` + per-project farm |
+| 33 | Poison shared `hooks/` | ✅ `:ro` mount |
+| 34 | Write the `~/.claude/settings.json` a host claude loads | ✅ H5 (not bound; copy vetted) |
+| 35 | Read another project's transcripts / history | ✅ per-project scope; canonical unmounted |
+| 36 | `.claude.json` merge-out clobbering another project | ✅ subtree-only merge |
+| 37 | Steal shared OAuth token, exfil over open egress | ⚪ H3 accepted; closed on brokered path |
+| 38 | Broker SSRF — redirect the token to an attacker host | ✅ fixed upstream origin per route |
+| 39 | Broker — authenticated requests to arbitrary *paths* on the real upstream | ⚠️ no path allowlist (residual R3) |
+| 40 | Broker credential rotation / refresh abuse | ✅ static token by design; refresh loop removed |
+| 41 | Container escape via `CAP_SYS_ADMIN` / `mount(2)` / `unshare(2)` | ✅ cap-drop, seccomp, NNP → EPERM |
+| 42 | Write `/proc/sys` or `/sys` | ✅ `:ro` |
+| 43 | Reach a docker socket / binary | ✅ absent |
+| 44 | Pivot through the SYS_ADMIN FUSE sidecar | ✅ separate ns, `--network none`, no source deref |
+| 45 | Clipboard WRITE (pastejacking / bracketed-paste bypass) | ✅ Wayland guard refuses `set_selection` |
+| 46 | Wayland object-id reuse to smuggle a write | ✅ over-denial is safe; factory opcodes frozen |
+| 47 | Host resolver Varlink `connect()` | ✅ `/dev/null`-shadowed |
+| 48 | `resolv-sync` overwrite / drop embedded `127.0.0.11` | ✅ kept first; watcher runs root w/ fixed PATH |
+| 49 | Sleep-guard injection via container / session / process names | ✅ `awk '$NF+0'` coercion; kib-set tags |
+| 50 | Build-arg / `npx` shim / entrypoint env injection | ✅ `CLAUDE_VERSION` only echoed; shim adds space-free literals; entrypoint env is kib-set |
+
+**Residuals (accepted or recommended, none a confirmed host reach on its own):**
+
+- **R1 — buried/raced gitdir.** The FUSE marker probe (`HEAD`+`objects`+`refs`) is evaluated at
+  *write* time, so a config written **before** the markers exist is not seen as a git config, and
+  the host `audit_nested_gitdirs` prunes `node_modules`-class dirs. Neither fires on its own: the
+  payload still needs the **host** to run git *inside* that dir (or a gitfile pointing there), and
+  the launch/teardown audit re-scans the real tree. Reachability is the same conditional as H1/H2
+  (rated High, not Critical). **Recommendation:** in `_is_gitdir`, also treat a directory that
+  already contains a `config` naming a dangerous key as sensitive regardless of marker presence;
+  and have `audit_nested_gitdirs` descend `node_modules` far enough to spot a `HEAD`+`config` pair.
+- **R2 — `keybindings.json` folds back unvetted.** True today (no command-valued keys), but it is
+  an assumption about a file Claude owns. **Recommendation:** run it through the same scan as
+  `settings.json` on merge-out, or document the assumption at the fold-back site.
+- **R3 — broker path authority.** The reverse proxy pins the *host* (no SSRF, vector 38), but has
+  no **path** allowlist, so the agent can drive any authenticated request the OAuth token permits
+  to the real upstream (account-info reads; durable-key mint returns 403). Low/medium.
+  **Recommendation:** allowlist the paths Claude actually needs (`/v1/messages`, model/usage) per
+  route and 404 the rest — cheap defence-in-depth, not a critical fix.
+
+### Recommendations, ranked
+
+1. **Ship C5 + H9** (done in this pass) and **recreate every project container** so the FUSE
+   sidecar reloads the fixed validator; re-run `security-test.sh` to confirm C5 flips admit→deny.
+2. **Stop hand-parsing git config entirely** (deeper C5 fix): the write validator could diff
+   `git config --file <candidate> --list` against the live file instead of a Python INI parser —
+   git is then the single source of truth and this class cannot recur. The quote-aware parser
+   closes today's forms; this closes the *category*.
+3. **R3 broker path allowlist**, **R2 keybindings vetting**, **R1 gitdir hardening** — as above.
+4. **L1** (still open `P3`): add `.claude/settings*.json`, `.claude/hooks`, `.mcp.json` to a
+   validated guard section for defence-in-depth against a future non-skip-permissions mode.
+5. **Rotate the Claude token** after any untrusted session run with `broker = off`, and keep the
+   host kernel + `runc` patched — the two items no in-sandbox control can cover.
+
+---
+
 ## Changelog
 
 Security-relevant work, oldest first. Everything before the audit built the boundary; everything after closed the holes the audit found in it.
@@ -141,6 +295,7 @@ Security-relevant work, oldest first. Everything before the audit built the boun
 | 2026-07-22 | `18b2567` | **This audit lands.** 118 vectors swept, 19 exploited live and adversarially verified: 4 Criticals, 6 host-RCE paths, container hardening confirmed holding. |
 | 2026-07-22 | `e364e23` | **`P0` wave — six host-RCE paths closed** (C1–C4, H1, H2). Two brittle assumptions were behind every one: that hand-parsing equals git's resolution, and that path strings identify inodes. |
 | 2026-07-22 | `f3fa29b` | **`P1` wave — the two surfaces outside the FUSE guard.** Shared assets locked read-only with a per-project merge farm (H6); the clipboard mediated by `kib/guest/wayland_guard.py` (H8); `settings.json` validated host-side each launch (H5). |
+| 2026-07-25 | — | **Second audit pass — two more host-RCE paths, same classes, closed.** C5: the git-config write validator made quote-aware (`_split_header`/`_strip_inline_comment`) so a driver hidden in a quoted subsection name can no longer slip into `.git/config`. H9: the shared `settings.json` env check widened from three keys to the interpreter/loader/command-override set (`SETTINGS_ENV_EXEC_KEYS`). Regressions added to `security-test.sh` (C5/C5b, env keys) and `test_dangerous.py`. |
 
 ---
 
@@ -166,6 +321,8 @@ These are not novel bug classes — they are the **known** AI-coding-agent bound
 The **container** is hardened to a high standard; every kernel and namespace escape class was tested and blocked. The exposure was entirely at the **host-executed-config boundary the sandbox itself set out to defend**, plus the shared-config, clipboard and credential surfaces sitting outside it. The git-config guard was the right idea implemented on two brittle assumptions — *path strings identify inodes*, and *hand-parsing equals git's resolution* — each bypassable.
 
 Both waves have shipped. The parser follows git's grammar and refuses `include`/`includeIf`, `link()` validates its source inode, git dirs are recognised by layout, the shared config dir is read-only behind a per-project merge farm, the clipboard is read-only, and shared `settings.json` is vetted before any container reads it. What remains is the shared OAuth token under open egress — accepted deliberately, answered by rotation.
+
+The **second pass (2026-07-25)** reinforced the same lesson one layer deeper: both new findings were re-treads of already-named classes — a parser diverging from git's grammar (C5, the C3 class) and a too-narrow denylist on a host-reaching config surface (H9, the H5 class). Both are fixed, with regressions. The standing recommendation from that pass is to **stop hand-parsing git config** and diff `git config --list` output instead, so the divergence class cannot recur at all; and to add a **broker path allowlist** (R3). Neither the container boundary nor any escape class regressed.
 
 ---
 
