@@ -10,6 +10,8 @@ copies had already drifted on the chmod.
 treating a corrupt canonical file as empty is how a config gets overwritten.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import tempfile

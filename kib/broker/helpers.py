@@ -8,6 +8,8 @@ misses, or brokering `headers[0]` blindly.
 All pure, all stateless, and none of them prints a secret.
 """
 
+from __future__ import annotations
+
 import os
 import re
 import urllib.parse

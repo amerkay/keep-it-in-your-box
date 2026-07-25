@@ -4,6 +4,8 @@ There is deliberately no write path to any credential in this module; see the pa
 docstring for the post-mortem of the version that had one.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import threading

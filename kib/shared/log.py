@@ -11,6 +11,8 @@ on stdout, flushed immediately. Routing it through `logging` would let a formatt
 level filter silently break that contract.
 """
 
+from __future__ import annotations
+
 import logging
 import os
 import sys

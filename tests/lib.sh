@@ -112,7 +112,7 @@ report() {
     printf '\n'
     if [ "$FAILED" -gt 0 ]; then
         printf '\n%sFailed:%s\n' "$T_B" "$T_N"
-        printf '  %s\n' "${FAILURES[@]}"
+        printf '  %s\n' ${FAILURES[@]+"${FAILURES[@]}"}
     fi
     return $((FAILED > 0 ? 1 : 0))
 }

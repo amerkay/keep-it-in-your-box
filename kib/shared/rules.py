@@ -21,6 +21,8 @@ guard — while still negating each other, which is what lets `.env.*` redact br
 `!.env.example` carve the committed placeholder back out.
 """
 
+from __future__ import annotations
+
 import fnmatch
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -115,7 +117,9 @@ def _rule_matches(rule: Rule, ancestor: str, segment: str, under_git: bool) -> b
         parts = parts[len(parts) - len(pattern_parts) :]
     elif len(pattern_parts) != len(parts):
         return False
-    return all(fnmatch.fnmatch(a, p) for a, p in zip(parts, pattern_parts, strict=True))
+    # Both branches above have equalised the lengths, so plain zip drops nothing.
+    # `strict=` is deliberately absent: this module must import on python 3.9 (stock macOS).
+    return all(fnmatch.fnmatch(a, p) for a, p in zip(parts, pattern_parts))
 
 
 def verdict(rules: Sequence[Rule], rel: str) -> str | None:

@@ -16,6 +16,8 @@ value into a child process by accident. Structured payloads stay in the files be
 there is no stdin protocol to get wrong.
 """
 
+from __future__ import annotations
+
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from typing import NoReturn

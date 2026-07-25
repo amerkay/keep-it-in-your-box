@@ -16,6 +16,8 @@ sessions is unchecked. The FUSE guard remains the preventer — this is the dete
 Exit: 0 clean · 1 warn-class findings only · 5 refuse-class findings.
 """
 
+from __future__ import annotations
+
 import argparse
 import os
 import subprocess

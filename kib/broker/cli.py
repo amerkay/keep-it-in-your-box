@@ -19,6 +19,8 @@ Verbs:
     probe <tokenfile> <id>        is this token accepted upstream? 0 yes / 1 no / 2 unknown
 """
 
+from __future__ import annotations
+
 import http.client
 import json
 import shlex

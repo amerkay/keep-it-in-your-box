@@ -10,6 +10,8 @@ it, so a pasted `kib claude mcp add --header "Authorization: …"` has to be cau
 None of them ever prints a secret value.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os

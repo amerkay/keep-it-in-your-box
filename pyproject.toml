@@ -9,9 +9,19 @@
 line-length = 100                  # repo-wide (prose wraps here too, see .editorconfig)
 target-version = "py313"           # container runtime; the tools themselves need py3.11+
 
+# Host-side python runs on whatever `python3` the host has, and stock macOS ships 3.9
+# (`xcode-select --install`) — so `str | None` in a signature is a launch-time TypeError,
+# not a style question. FA102 makes the `from __future__ import annotations` mandatory
+# there. Runtime-only 3.10-isms (zip(strict=), dataclass(slots=)) are caught by
+# tests/check/portability.sh, which ruff cannot see. kib/guest is 3.13 (the image).
+[tool.ruff.per-file-target-version]
+"kib/host/*.py" = "py39"
+"kib/shared/*.py" = "py39"
+"kib/broker/*.py" = "py39"
+
 [tool.ruff.lint]
-# pycodestyle, pyflakes, isort, pyupgrade, bugbear, pep8-naming.
-select = ["E", "F", "I", "UP", "B", "N"]
+# pycodestyle, pyflakes, isort, pyupgrade, bugbear, pep8-naming, future-annotations.
+select = ["E", "F", "I", "UP", "B", "N", "FA"]
 
 [tool.ruff.format]                 # Black-compatible defaults
 

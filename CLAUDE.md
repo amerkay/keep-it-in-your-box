@@ -81,7 +81,13 @@ Host-side scripts (`bin/kib`, `host/*.sh`, `tools/build-image.sh`, …) must be
 bash-4isms (`declare -A`, `${var,,}`, `readarray`) are allowed only inside `host/portable.sh`'s
 linux branches — call its shims instead (`lock_fd`, `hash8`, `detach_pgrp`, `notify_desktop`).
 **All OS branching lives in `host/portable.sh`.** Enforced by `tests/check/portability.sh`, which
-also proves the darwin code paths on Linux.
+also proves the darwin code paths on Linux. Two more clauses it enforces:
+
+- Any array ever assigned `()` expands as `${arr[@]+"${arr[@]}"}`, never bare — bash 3.2 reads an
+  empty `"${arr[@]}"` as unbound under `set -u` and aborts the launch.
+- `kib/host`, `kib/shared`, `kib/broker` must run on **python 3.9** (stock macOS `python3`): keep
+  `from __future__ import annotations` at the top and no 3.10+ runtime API (`zip(strict=)`, …).
+  Only `kib/guest` may assume the image's 3.13. (`macos.md`)
 
 Bash reaches Python one way only: `kib_py <module> <args…>` (host/core.sh). Parameters travel in
 **argv** — never environment variables, never JSON the shell has to assemble.

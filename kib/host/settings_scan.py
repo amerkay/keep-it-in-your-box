@@ -12,6 +12,8 @@ Exit: 0 clean · 1 findings · 3 not JSON (warn, don't block — Claude ignores 
 settings file anyway) · 4 unreadable (fail closed: a file we cannot check must not pass).
 """
 
+from __future__ import annotations
+
 import json
 
 from kib.shared import cli, dangerous

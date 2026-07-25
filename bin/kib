@@ -193,4 +193,4 @@ warn_inline_mcp_secrets
 sync_kibignore_gitignore
 
 kib_bring_up
-kib_run_session "${CMD[@]}"
+kib_run_session ${CMD[@]+"${CMD[@]}"}

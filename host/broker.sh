@@ -209,7 +209,7 @@ EOF
         --cap-drop=ALL --security-opt no-new-privileges
         --user "$(id -u):$(id -g)" --userns=host
         --network "$BROKER_NET" --network-alias "$BROKER_ALIAS"
-        "${tok_mounts[@]}"
+        ${tok_mounts[@]+"${tok_mounts[@]}"}
         ${prov_mount[@]+"${prov_mount[@]}"}
         -v "$BROKER_OUT:/run/broker/out"
         -v "$BROKER_DIR/config.json:/run/broker/config.json:ro"

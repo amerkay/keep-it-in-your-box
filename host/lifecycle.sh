@@ -198,13 +198,11 @@ start_container() {
     # Project at the same absolute path as on the host, so Claude's path-keyed project
     # configs resolve. Sidecar mode points $PWD at the redacting mount (rslave propagates its
     # sub-mounts in); single mode adds NO bind for $PWD.
+    # `if`, not `[ … ] && ARGS+=`: the codebase's convention for array appends under set -e.
     if [ -n "$PROJECT_MOUNT_SRC" ]; then
         ARGS+=(-v "$PROJECT_MOUNT_SRC:$PWD$PROJECT_MOUNT_OPTS")
     fi
-    # `if`, not `[ … ] && ARGS+=`: the codebase's convention for array appends under set -e.
-    if [ "${#REDACTION_ARGS[@]}" -gt 0 ]; then
-        ARGS+=("${REDACTION_ARGS[@]}")
-    fi
+    ARGS+=(${REDACTION_ARGS[@]+"${REDACTION_ARGS[@]}"})
 
     # Clipboard mounts: the mediated Wayland socket on Linux (reads pass, writes refused), or
     # the pbpaste bridge spool on macOS. Both no-op if their sidecar/bridge didn't come up.

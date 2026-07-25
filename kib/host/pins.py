@@ -14,6 +14,8 @@ concurrent session holds this file in memory and rewrites it wholesale, and losi
 (re-applied next cold start) beats clobbering that session's state.
 """
 
+from __future__ import annotations
+
 import sys
 
 from kib.shared import cli, jsonio

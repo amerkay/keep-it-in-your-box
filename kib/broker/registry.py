@@ -8,6 +8,8 @@ proxy would be an egress bypass). The host reads the host-facing fields through
 long-lived credential. It is mounted READ-ONLY into the broker and nowhere else.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import sys

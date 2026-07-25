@@ -5,6 +5,8 @@ REAL credential and re-originates its own TLS to ONE hardcoded upstream per rout
 MITM, no CA in the agent's trust store: the credential is injected, not decrypted.
 """
 
+from __future__ import annotations
+
 import http.client
 import json
 import os

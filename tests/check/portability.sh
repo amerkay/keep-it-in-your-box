@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Sourced by tests/check.sh — the portability contract.
+# Sourced by tests/check.sh — the portability contract, in both host-side languages.
 #
 # Host-side scripts must be bash-3.2/BSD-clean (stock macOS, no brew). Two tiers:
-#   FATAL    — bash-4isms, and shimmed tools with a drop-in replacement (flock→lock_fd,
-#              sha256sum→hash8, grep -P).
+#   FATAL    — bash-4isms, empty-array expansion, and shimmed tools with a drop-in
+#              replacement (flock→lock_fd, sha256sum→hash8, grep -P).
 #   ADVISORY — setsid / notify-send: shimmed too, but the Wayland and broker notifiers use them
 #              raw BY DESIGN (structurally Linux-only), so these report rather than fail.
+#
+# Host-side python must import on the python3 stock macOS ships (3.9) — see the second section.
 #
 # Comments are stripped naively first; no flagged token appears inside a string in this repo.
 
@@ -13,6 +15,26 @@ section "Portability contract (host-side scripts, bash-3.2/BSD-clean)"
 
 FATAL_RE='(declare[[:space:]]+-A|[[:space:]]mapfile[[:space:]]|[[:space:]]readarray[[:space:]]|\$\{[A-Za-z_][A-Za-z0-9_]*(,,|\^\^|,|\^)[}:/]|(^|[^_.])\bflock\b|\bsha256sum\b|grep[[:space:]]+-[a-zA-Z]*P)'
 ADVISORY_RE='(\bsetsid\b|\bnotify-send\b)'
+
+# bash 3.2 expands "${arr[@]}" of an EMPTY array as an *unbound variable* under `set -u`
+# (fixed only in 4.4), so it aborts the launch. Every array ever assigned `()` must expand
+# through the `${arr[@]+"${arr[@]}"}` idiom — including where it reads as provably non-empty,
+# since the reader cannot verify that and one later edit makes it empty. Prints offenders.
+unguarded_empty_arrays() {
+    local code="$1" a out
+    while read -r a; do
+        [ -n "$a" ] || continue
+        # Delete the safe idiom first — it contains the bare form as a substring.
+        out="$(printf '%s\n' "$code" | sed "s/\${$a\[@\]+\"\${$a\[@\]}\"}//g" \
+            | grep -c "\${$a\[@\]}" || true)"
+        [ "${out:-0}" -gt 0 ] && printf ' %s' "$a"
+    done <<EOF
+$(printf '%s\n' "$code" \
+        | sed -n 's/^\(.*[^A-Za-z0-9_]\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*\)=()[[:space:]]*.*$/\2/p' \
+        | sort -u)
+EOF
+    true
+}
 
 for f in "${HOST_BASH[@]}" "${HOST_SH[@]}"; do
     [ -f "$f" ] || continue
@@ -25,8 +47,12 @@ for f in "${HOST_BASH[@]}" "${HOST_SH[@]}"; do
     esac
     code="$(sed 's/#.*$//' "$f")"
     hits="$(printf '%s\n' "$code" | grep -nE "$FATAL_RE" || true)"
+    arrays="$(unguarded_empty_arrays "$code")"
     if [ -n "$hits" ]; then
         fail "$f uses a non-portable construct" "$(printf '%s' "$hits" | head -4)"
+    elif [ -n "$arrays" ]; then
+        fail "$f expands a possibly-empty array bare (bash 3.2 + set -u aborts)" \
+            "use \${arr[@]+\"\${arr[@]}\"} for:$arrays"
     else
         pass "$f is bash-3.2/BSD-clean"
     fi
@@ -45,4 +71,57 @@ if [ -n "$stray_os" ]; then
     fail "OS branching outside host/portable.sh" "$(printf '%s' "$stray_os" | tr '\n' ' ')"
 else
     pass "all OS branching stays in host/portable.sh (sleep-guard's fallback probe excepted)"
+fi
+
+# ── Host-side python ────────────────────────────────────────────────────────
+# `kib_py` runs whatever `python3` the host has, and stock macOS ships 3.9
+# (`xcode-select --install`). ruff's per-file-target-version + FA102 cover annotations;
+# these are the three things it cannot see. kib/guest is exempt — image python only.
+section "Portability contract (host-side python, stock macOS python3.9)"
+
+py_bad="$(
+    python3 - <<'PY'
+import ast
+import pathlib
+
+# 3.10+ APIs a modern-python habit reaches for that only fail when the line is *reached*,
+# so an import smoke test would pass. Extend when one bites.
+BAD_KWARG = {("zip", "strict"), ("dataclass", "slots"), ("dataclass", "kw_only")}
+BAD_ATTR = {"pairwise"}
+
+
+def problems(path: pathlib.Path) -> list[str]:
+    src = path.read_text()
+    try:
+        tree = ast.parse(src, str(path), feature_version=(3, 9))
+    except SyntaxError as e:
+        return [f"line {e.lineno}: syntax newer than 3.9 ({e.msg})"]
+    out = []
+    defines = any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                  for n in tree.body)
+    if defines and "from __future__ import annotations" not in src:
+        out.append("missing `from __future__ import annotations` (PEP 604 is 3.10+)")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = getattr(fn, "id", None) or getattr(fn, "attr", "")
+            for kw in node.keywords:
+                if (name, kw.arg) in BAD_KWARG:
+                    out.append(f"line {node.lineno}: {name}({kw.arg}=…) is 3.10+")
+        elif isinstance(node, ast.Attribute) and node.attr in BAD_ATTR:
+            out.append(f"line {node.lineno}: {node.attr} is 3.10+")
+    return out
+
+
+for tree_dir in ("kib/host", "kib/shared", "kib/broker"):
+    for path in sorted(pathlib.Path(tree_dir).glob("*.py")):
+        for msg in problems(path):
+            print(f"{path}: {msg}")
+PY
+)" || py_bad="python3 unavailable or the scan itself failed"
+
+if [ -n "$py_bad" ]; then
+    fail "host-side python is not 3.9-clean" "$(printf '%s' "$py_bad" | head -6)"
+else
+    pass "kib/host + kib/shared + kib/broker parse and import-check clean on python 3.9"
 fi

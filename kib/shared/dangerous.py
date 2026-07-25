@@ -16,6 +16,8 @@ Matching is on the key's LAST component, so `filter.lfs.clean` matches on `clean
 Over-matching costs exactly one refused write, which is the right side to err on.
 """
 
+from __future__ import annotations
+
 from typing import Any
 
 # Last-component matches. Every entry names a value git will execute or hand to a shell.

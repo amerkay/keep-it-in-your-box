@@ -25,6 +25,8 @@ All writes are atomic or append-only; the caller serialises canonical writes und
 on `~/.claude.json.lock`.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import sys
@@ -78,6 +80,7 @@ KNOWN_PRIVATE = {
     "ide",
     ".last-cleanup",
     ".sleep-inhibit",
+    ".DS_Store",  # Finder writes it into every macOS directory; a permanent canary otherwise
     ".claude.json",
     ".claude.json.backup",
     ".claude.json.lock",
