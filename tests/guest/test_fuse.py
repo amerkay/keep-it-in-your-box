@@ -8,6 +8,7 @@ Runs anywhere, including inside the sandbox: the `fuse` module is stubbed so the
 imports without libfuse, and no real mount is touched.
 """
 
+import os
 import sys
 import types
 from collections.abc import Callable
@@ -36,14 +37,14 @@ LFS = SAFE + '[filter "lfs"]\n\tclean = git-lfs clean\n'
 
 
 @pytest.fixture
-def redact(tmp_path: Path) -> Callable[[str], Any]:
+def redact(tmp_path: Path) -> Callable[..., Any]:
     """A Redact bound to a real (empty) src dir, with the shipped guard + project rules."""
 
-    def _build(project: str = "") -> Any:
+    def _build(project: str = "", **kw: Any) -> Any:
         src = tmp_path / "src"
         src.mkdir(exist_ok=True)
         rule_list = rules.load(str(GUARD), guard=True) + rules.parse(project.splitlines())
-        return fuse.Redact(str(src), rule_list)
+        return fuse.Redact(str(src), rule_list, **kw)
 
     return _build
 
@@ -176,3 +177,63 @@ def test_a_missing_current_file_is_treated_as_empty(
     """A brand-new repo has no config to compare against; a dangerous key is still refused."""
     src = write_file("candidate", SAFE + "[core]\n\tfsmonitor = /e\n")
     assert redact("")._git_config_write_ok(str(src), "/nonexistent") is False
+
+
+# ── ownership squash (single mode / virtiofs reports root:root) ───
+def test_ownership_passes_through_by_default(redact: Callable[..., Any], tmp_path: Path) -> None:
+    """The Linux sidecar sees real ownership and must keep reporting it."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "f").write_text("x")
+    attr = redact("").getattr("/f")
+    assert (attr["st_uid"], attr["st_gid"]) == (os.getuid(), os.getgid())
+
+
+def test_ownership_squash_rewrites_passthrough_stat(
+    redact: Callable[..., Any], tmp_path: Path
+) -> None:
+    """Without this git reads the whole tree as another user's and refuses it."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "f").write_text("x")
+    attr = redact("", uid=501, gid=20).getattr("/f")
+    assert (attr["st_uid"], attr["st_gid"]) == (501, 20)
+
+
+def test_ownership_squash_covers_the_redaction_stub(redact: Callable[..., Any]) -> None:
+    """A stubbed path is synthesised, not stat'd — it needs the same owner or `ls` of a
+    redacted file disagrees with its directory."""
+    attr = redact("", uid=501, gid=20).getattr("/.env")
+    assert (attr["st_uid"], attr["st_gid"]) == (501, 20)
+
+
+def test_squash_does_not_change_the_verdict(redact: Callable[..., Any]) -> None:
+    """Redaction is presentation-independent: the squash must not open a masked path."""
+    assert redact("", uid=501, gid=20)._classify("/.env")[0] == "file"
+
+
+def test_chown_to_the_invented_owner_is_a_no_op(
+    redact: Callable[..., Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`cp -p`/`git checkout` echo back the ids we invented; forwarding them would rewrite the
+    backing file to an owner it never had."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "f").write_text("x")
+    seen: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "chown", lambda p, u, g: seen.append((u, g)))
+    redact("", uid=501, gid=20).chown("/f", 501, 20)
+    assert seen == [(-1, -1)]
+
+
+def test_chown_to_a_different_owner_still_passes_through(
+    redact: Callable[..., Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "f").write_text("x")
+    seen: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "chown", lambda p, u, g: seen.append((u, g)))
+    redact("", uid=501, gid=20).chown("/f", 4242, 20)
+    assert seen == [(4242, -1)]
+
+
+def test_chown_of_a_masked_path_is_still_refused(redact: Callable[..., Any]) -> None:
+    with pytest.raises(OSError):
+        redact("", uid=501, gid=20).chown("/.env", 501, 20)

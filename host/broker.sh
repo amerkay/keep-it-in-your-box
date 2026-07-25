@@ -310,9 +310,9 @@ inject_brokered_mcps() {
 #   1. the base URL, so the SDK talks to the broker instead of api.anthropic.com;
 #   2. a PLACEHOLDER token, which takes precedence over the credentials file;
 #   3. a synthetic .credentials.json shadowing the real one — (2) alone would leave a real file
-#      readable in the shared-assembly dir, which is the whole exposure. COPIED into that dir
-#      (mode 0400), never bound over it: a bind nested inside its mount aborts the whole
-#      `docker run` on Docker Desktop. See bind_via_link.
+#      readable in the shared-assembly dir, which is the whole exposure. Delivered as a flat
+#      :ro bind via bind_via_link — see _stage_placeholder_credential for why the mount, and
+#      not a mode bit, is what makes it read-only.
 add_broker_env_args() {
     [ "$BROKER_ENABLED" = 1 ] || return 0
     # reverse_proxy_mcp rows need nothing here — the agent reaches them via the .claude.json
@@ -341,22 +341,23 @@ add_broker_env_args() {
 
 # The registry names where the placeholder lands in the container; the only such path kib can
 # write to from here is the shared-assembly dir, which the container sees at $SHARED_CDIR.
-# 0400 so the box cannot rewrite it — under the broker nothing refreshes, by design.
+#
+# Read-only is a :ro MOUNT, not a mode bit. Docker Desktop backs every bind with `fakeowner`,
+# which stores the mode faithfully but ignores it in access(2) — a 0400 file there is still
+# writable, so the copy+chmod this used to do was a no-op on macOS and the placeholder shipped
+# writable. Nothing refreshes it under the broker, so a single-file bind carries none of the
+# rename risk the real rotating credential does. bind_via_link because the destination would
+# otherwise nest inside the shared-dir bind, which aborts the whole `docker run`.
 _stage_placeholder_credential() { # <provider id> <container path>
     case "$2" in
         "$SHARED_CDIR"/*) ;;
         *) _broker_abort "the broker's placeholder path for '$1' is not in the shared dir: $2" ;;
     esac
-    local dst="$SHARED_BASE/${2#"$SHARED_CDIR"/}"
-    rm -f "$dst" 2>/dev/null || true # may be 0400 from the last launch, or a stale mountpoint
-    if (
-        umask 077
-        cp "$BROKER_OUT/$1.cred.json" "$dst"
-    ); then
-        chmod 0400 "$dst" 2>/dev/null || true
-    else
-        _broker_abort "could not stage the placeholder credential for '$1' into the session."
-    fi
+    local rel="${2#"$SHARED_CDIR"/}"
+    local link="$SHARED_BASE/$rel" src="$BROKER_OUT/$1.cred.json"
+    [ -f "$src" ] || _broker_abort "the broker staged no placeholder credential for '$1'."
+    chmod 0400 "$src" 2>/dev/null || true # belt and braces on hosts where the mode does count
+    bind_via_link "$src" "$PLACEHOLDER_CRED_CPATH-$1" "$link" :ro
 }
 
 # ── Fallback credential (broker off, or on-but-no-token) ─────────

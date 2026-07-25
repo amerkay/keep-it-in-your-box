@@ -76,6 +76,7 @@ SHARED_CDIR=/home/hostuser/.claude-shared
 SHARED_ASSET_CDIR=/run/kib/shared
 LOCK_WITNESS_CPATH=/run/kib/shared/.kib-shared-locked
 TRANSCRIPTS_CPATH=/run/kib/transcripts
+PLACEHOLDER_CRED_CPATH=/run/kib/placeholder-cred
 
 container_running() { [ -n "$(docker ps -q -f "name=^${CNAME}$" 2>/dev/null)" ]; }
 sidecar_running() { [ -n "$(docker ps -q -f "name=^${FUSE_CNAME}$" 2>/dev/null)" ]; }
@@ -274,15 +275,53 @@ start_container() {
 
     # This project's transcripts, shared host<->box so --resume lists the same sessions on
     # both sides. Would nest inside the session mount, hence the link.
-    # Skipped for an ephemeral session — it must persist nothing to canonical.
-    if [ "$EPHEMERAL" != 1 ] && [ -d "$CLAUDE_HOME/projects/$SLUG" ]; then
-        bind_via_link "$CLAUDE_HOME/projects/$SLUG" "$TRANSCRIPTS_CPATH" \
-            "$SESSION_BASE/projects/$SLUG"
-    elif [ -L "$SESSION_BASE/projects/$SLUG" ]; then
-        # Canonical lost it since the last launch: a link left dangling here is worse than no
-        # link — Claude cannot create its transcript dir over one.
-        rm -f "$SESSION_BASE/projects/$SLUG" 2>/dev/null || true
+    # SOURCE is canonical's host-keyed dir; the LINK carries the box slug, because that is the
+    # name Claude will look for from inside (see kib_box_pwd). Equal outside single mode.
+    #
+    # Drop OUR links first, exactly as the shared-asset farm does. $SESSION_BASE outlives the
+    # container, so a link keyed by a name we no longer use is never reaped: renaming this from
+    # $SLUG to $BOX_SLUG stranded the old one, and it reads to an auditor as another project's
+    # transcripts. Only links INTO $TRANSCRIPTS_CPATH are ours; a real dir is Claude's.
+    for _t in "$SESSION_BASE"/projects/*; do
+        [ -L "$_t" ] || continue
+        [ "$(readlink "$_t" 2>/dev/null)" = "$TRANSCRIPTS_CPATH" ] || continue
+        rm -f "$_t" 2>/dev/null || true
+    done
+    unset _t
+
+    # A REAL directory at the box slug is a previous in-box session's transcripts. Before the
+    # link was keyed by the box slug, Claude — which keys by its RESOLVED cwd — created its own
+    # directory under that name, and nothing ever tied it to canonical. bind_via_link `rm -rf`s
+    # a non-symlink, so migrate it out first or the upgrade destroys every prior in-box session
+    # and `--resume` simply stops listing them.
+    _bt="$SESSION_BASE/projects/$BOX_SLUG"
+    _bt_ok=1
+    if [ -d "$_bt" ] && [ ! -L "$_bt" ]; then
+        _bt_ok=0
+        if [ "$EPHEMERAL" != 1 ] && mkdir -p "$CLAUDE_HOME/projects/$SLUG" 2>/dev/null; then
+            for _f in "$_bt"/* "$_bt"/.[!.]*; do
+                [ -e "$_f" ] || continue
+                # -n: canonical wins a name clash. It is the copy both sides already share, and
+                # a transcript is append-only, so the older duplicate is never the fuller one.
+                mv -n "$_f" "$CLAUDE_HOME/projects/$SLUG/" 2>/dev/null || true
+            done
+            # Only an EMPTY dir may go: anything left means a move failed, and keeping the
+            # data unlinked beats relinking over it.
+            rmdir "$_bt" 2>/dev/null && _bt_ok=1
+        fi
+        [ "$_bt_ok" = 1 ] || warn "could not fold this box's old transcripts into" \
+            "$CLAUDE_HOME/projects/$SLUG — leaving them in place, so --resume will not" \
+            "show them on the host. Nothing was deleted."
     fi
+
+    # Skipped for an ephemeral session — it must persist nothing to canonical. A link left
+    # DANGLING would be worse than none: Claude cannot create its transcript dir over one,
+    # which is why the sweep above drops ours whenever canonical has lost the directory.
+    if [ "$_bt_ok" = 1 ] && [ "$EPHEMERAL" != 1 ] && [ -d "$CLAUDE_HOME/projects/$SLUG" ]; then
+        bind_via_link "$CLAUDE_HOME/projects/$SLUG" "$TRANSCRIPTS_CPATH" \
+            "$SESSION_BASE/projects/$BOX_SLUG"
+    fi
+    unset _bt _bt_ok _f
 
     # settings.json / keybindings.json are deliberately NOT bound: stage_shared_settings puts
     # writable COPIES in $SHARED_BASE (already served by the dir mount above) and vets them

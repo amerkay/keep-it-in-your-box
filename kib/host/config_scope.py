@@ -5,18 +5,26 @@ transcripts and history a plain host `claude` sees. Isolation comes from assembl
 container's config from that store at launch and merging this project's changes back on exit,
 never from restructuring the originals. This module is the JSON/JSONL surgery for that seam:
 
-    scope-in-json  <src .claude.json> <project-path> <dst>
-        Globals + ONLY this project's `projects[path]` entry (+ its githubRepoPaths).
+Every verb takes the project's HOST path and its BOX path — the same string except in
+single-container mode, where Claude's resolved cwd differs from the host's (see "Host key vs
+box key" below). Canonical is always keyed by the host path; the session by the box path.
 
-    merge-out-json <scratch .claude.json> <project-path> <canonical .claude.json>
-        Read-modify-write ONLY the `projects[path]` subtree back, leaving every global key
-        and every other project untouched. Fail-closed: an unparseable file writes nothing.
+    scope-in-json  <src .claude.json> <project-path> <dst> <box-path>
+        Globals + ONLY this project's `projects[path]` entry (+ its githubRepoPaths),
+        re-keyed to <box-path>.
 
-    seed-history   <src history.jsonl> <project-path> <dst>
-        Filter canonical prompt history to this project's lines (↑ shows only this project).
+    merge-out-json <scratch .claude.json> <project-path> <canonical .claude.json> <box-path>
+        Read-modify-write ONLY the `projects[box]` subtree back into `projects[path]`, leaving
+        every global key and every other project untouched. Fail-closed: an unparseable file
+        writes nothing.
 
-    merge-history  <scratch history.jsonl> <project-path> <canonical history.jsonl>
-        Append this project's NEW lines back, so a concurrent host `claude` append is safe.
+    seed-history   <src history.jsonl> <project-path> <dst> <box-path>
+        Filter canonical prompt history to this project's lines (↑ shows only this project),
+        re-keyed to <box-path>.
+
+    merge-history  <scratch history.jsonl> <project-path> <canonical history.jsonl> <box-path>
+        Append this project's NEW lines back under the host key, so a concurrent host `claude`
+        append is safe.
 
     classify       <~/.claude>
         Print top-level entries NOT in the versioned manifest below — the drift canary.
@@ -100,8 +108,48 @@ def _globals_only(cfg: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in cfg.items() if k not in GLOBAL_ONLY_DROP}
 
 
-def scope_in_json(src: str, path: str, dst: str) -> int:
-    """Globals + this project's entry only → dst (a fresh session .claude.json)."""
+# ── Host key vs box key ─────────────────────────────────────────────────────
+# Claude keys projects/, .claude.json and history.jsonl by its RESOLVED cwd. In sidecar mode
+# the project is bound at its host path, so host and box agree and `box` == `path` throughout.
+# Single mode adds no $PWD bind: the view is mounted at $PWD, but $HOST_HOME is a symlink to
+# the container home, so the kernel resolves the cwd to /home/hostuser/<project> and Claude
+# keys everything by THAT. Left alone, a Mac box wrote a second set of entries under the
+# container path — the host's `--resume` and ↑ history could not see the box's sessions, and
+# the box could not see the host's, which is the seamless switch these functions exist to
+# preserve. So: translate on the way in, translate back on the way out. Canonical only ever
+# holds the host key.
+
+
+def _canon_line(line: str) -> str:
+    """Serialisation-independent identity for a history line (see merge_history)."""
+    try:
+        obj = json.loads(line)
+    except (ValueError, TypeError):
+        return line
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"))
+
+
+def _rekey_history(line: str, frm: str, to: str) -> str:
+    """Rewrite a history line's `project` field, byte-preserving when there is nothing to do."""
+    if frm == to:
+        return line
+    try:
+        obj = json.loads(line)
+    except (ValueError, TypeError):
+        return line
+    if not isinstance(obj, dict) or obj.get("project") != frm:
+        return line
+    obj["project"] = to
+    return json.dumps(obj)
+
+
+def scope_in_json(src: str, path: str, dst: str, box: str = "") -> int:
+    """Globals + this project's entry only → dst (a fresh session .claude.json).
+
+    `path` is canonical's key (the host path); `box` is the key Claude will use inside the
+    container. Equal outside single mode.
+    """
+    box = box or path  # sidecar mode and the unit tests: one key, no translation
     cfg, status = jsonio.load(src)
     if status == "bad":
         # A corrupt canonical file must not abort the launch; start the box from an empty
@@ -116,12 +164,12 @@ def scope_in_json(src: str, path: str, dst: str) -> int:
     out = _globals_only(cfg)
     projects = cfg.get("projects") or {}
     entry = projects.get(path) if isinstance(projects, dict) else None
-    out["projects"] = {path: entry} if entry is not None else {}
+    out["projects"] = {box: entry} if entry is not None else {}
 
     grp_all = cfg.get("githubRepoPaths") or {}
     if isinstance(grp_all, dict):
         grp = {
-            repo: [p for p in paths if p == path]
+            repo: ([box] if path in paths else [])
             for repo, paths in grp_all.items()
             if isinstance(paths, list)
         }
@@ -132,8 +180,9 @@ def scope_in_json(src: str, path: str, dst: str) -> int:
     return cli.OK
 
 
-def merge_out_json(scratch: str, path: str, canonical: str) -> int:
-    """Write ONLY projects[path] from scratch back into canonical; globals untouched."""
+def merge_out_json(scratch: str, path: str, canonical: str, box: str = "") -> int:
+    """Write ONLY projects[box] from scratch back into canonical's projects[path]."""
+    box = box or path  # sidecar mode and the unit tests: one key, no translation
     sc, sc_status = jsonio.load(scratch)
     if sc_status != "ok" or not isinstance(sc, dict):
         # Fail-closed: never touch canonical from an unreadable scratch.
@@ -152,12 +201,11 @@ def merge_out_json(scratch: str, path: str, canonical: str) -> int:
         base = _globals_only(sc)
         for k in PINNED_GLOBALS:
             base.pop(k, None)
-
     projects = base.get("projects")
     if not isinstance(projects, dict):
         projects = {}
     sc_projects = sc.get("projects") or {}
-    entry = sc_projects.get(path) if isinstance(sc_projects, dict) else None
+    entry = sc_projects.get(box) if isinstance(sc_projects, dict) else None
     # Write-if-present, never delete. "No entry in the session config" is indistinguishable
     # from "the session config was reset/re-created" (a failed scope-in, a corrupt file
     # Claude rewrote from scratch, a run that never started Claude) — and deleting
@@ -178,15 +226,16 @@ def _project_of(line: str) -> Any:
     return obj.get("project") if isinstance(obj, dict) else None
 
 
-def seed_history(src: str, path: str, dst: str) -> int:
-    """Filter canonical history.jsonl to this project's lines → dst."""
+def seed_history(src: str, path: str, dst: str, box: str = "") -> int:
+    """Filter canonical history.jsonl to this project's lines → dst, re-keyed to the box."""
+    box = box or path  # sidecar mode and the unit tests: one key, no translation
     lines: list[str] = []
     if os.path.isfile(src):
         with open(src, errors="replace") as fh:
             for line in fh:
                 line = line.strip()
                 if line and _project_of(line) == path:
-                    lines.append(line)
+                    lines.append(_rekey_history(line, path, box))
     os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
     with open(dst, "w") as fh:
         if lines:
@@ -194,20 +243,32 @@ def seed_history(src: str, path: str, dst: str) -> int:
     return cli.OK
 
 
-def merge_history(scratch: str, path: str, canonical: str) -> int:
-    """Append this project's NEW lines from scratch back to canonical (append-only)."""
+def merge_history(scratch: str, path: str, canonical: str, box: str = "") -> int:
+    """Append this project's NEW lines from scratch back to canonical (append-only).
+
+    The session wrote them under the box key; canonical only ever holds the host key.
+    """
+    box = box or path  # sidecar mode and the unit tests: one key, no translation
     if not os.path.isfile(scratch):
         return cli.OK
     with open(scratch, errors="replace") as fh:
-        session_lines = [ln.strip() for ln in fh if ln.strip() and _project_of(ln.strip()) == path]
+        session_lines = [
+            _rekey_history(ln.strip(), box, path)
+            for ln in fh
+            if ln.strip() and _project_of(ln.strip()) == box
+        ]
     if not session_lines:
         return cli.OK
 
+    # Compare PARSED, not raw. Claude writes these lines with JS `JSON.stringify` (no space
+    # after a separator); re-keying one round-trips it through Python's dumps, which does not
+    # produce the same bytes. A raw compare then matched nothing and every launch re-appended
+    # the whole seeded history. Unparseable lines fall back to their own text.
     existing: set[str] = set()
     if os.path.isfile(canonical):
         with open(canonical, errors="replace") as fh:
-            existing = {ln.strip() for ln in fh if ln.strip()}
-    new = [ln for ln in session_lines if ln not in existing]
+            existing = {_canon_line(ln.strip()) for ln in fh if ln.strip()}
+    new = [ln for ln in session_lines if _canon_line(ln) not in existing]
     if not new:
         return cli.OK
     os.makedirs(os.path.dirname(canonical) or ".", exist_ok=True)
@@ -236,10 +297,10 @@ def classify(claude_home: str) -> int:
 
 
 TABLE: dict[str, tuple[cli.Command, int]] = {
-    "scope-in-json": (scope_in_json, 3),
-    "merge-out-json": (merge_out_json, 3),
-    "seed-history": (seed_history, 3),
-    "merge-history": (merge_history, 3),
+    "scope-in-json": (scope_in_json, 4),
+    "merge-out-json": (merge_out_json, 4),
+    "seed-history": (seed_history, 4),
+    "merge-history": (merge_history, 4),
     "classify": (classify, 1),
 }
 
