@@ -1,0 +1,42 @@
+{
+  // Ruff is formatter, linter and import sorter. importStrategy already defaults to
+  // fromEnvironment; pinned so an extension default can never quietly outrank the
+  // version in requirements-dev.txt.
+  "ruff.importStrategy": "fromEnvironment",
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+      "source.fixAll.ruff": "explicit",
+      "source.organizeImports.ruff": "explicit"
+    }
+  },
+  // The extension bundles its own mypy and prefers it by default. This repo pins a
+  // newer one and runs it --strict, so the default makes the editor disagree with CI.
+  "mypy-type-checker.importStrategy": "fromEnvironment",
+  // Report on the whole workspace, not just open files — matches `./dev.sh lint`.
+  "mypy-type-checker.reportingScope": "workspace",
+  // shfmt reads .editorconfig only when passed no style flags, so nothing is passed.
+  // bin/kib and the three guest shims are shell scripts with no extension.
+  "[shellscript]": {
+    "editor.defaultFormatter": "mkhl.shfmt",
+    "editor.formatOnSave": true
+  },
+  "files.associations": {
+    "kib": "shellscript",
+    "fuse": "shellscript",
+    "wayland-guard": "shellscript",
+    "broker": "shellscript"
+  },
+  // -x follows `source`d files. The host/ units are sourced by bin/kib and share its
+  // globals, so without it half of each file reads as undefined. Same flag the check
+  // suite uses.
+  "shellcheck.customArgs": [
+    "-x"
+  ],
+  // The EditorConfig extension implements indent, EOL and charset but not
+  // max_line_length — the one setting that has to be restated here.
+  "editor.rulers": [
+    100
+  ]
+}
