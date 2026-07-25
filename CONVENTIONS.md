@@ -27,6 +27,10 @@ the kib container, a CLI on the host) — never duplicate a setting into an edit
 Bump a pin deliberately and in every place it appears. A floating version means the same code
 passes in one environment and fails in another.
 
+Editor wiring — the extensions to install and the two `.vscode/` files that point them at the
+config above — is in the README's [editor setup](README.md#editor-setup-vs-code) section. Note
+`.vscode/` is write-denied inside the sandbox, so those files are created host-side.
+
 ## Python
 
 - **Ruff** for formatting and linting; rule set is `E, F, I, UP, B, N` (see `pyproject.toml`).
