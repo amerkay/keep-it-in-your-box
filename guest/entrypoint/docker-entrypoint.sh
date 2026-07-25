@@ -258,6 +258,11 @@ fi
 # Symlink host home path so Claude's project paths (keyed by absolute path) resolve
 # This allows /resume to find conversations started on the host
 if [ -n "${HOST_HOME:-}" ] && [ "$HOST_HOME" != "$USER_HOME" ] && [ ! -e "$HOST_HOME" ]; then
+    # The parent may not exist: macOS homes live under /Users, which a debian image has no
+    # reason to have, and single mode adds no $PWD bind to create it. `ln` would then fail
+    # ENOENT and `set -e` would kill PID 1 — the container dying during startup with no
+    # message. Linux never hits it: /home is in the image.
+    mkdir -p "$(dirname "$HOST_HOME")"
     ln -sf "$USER_HOME" "$HOST_HOME"
 fi
 

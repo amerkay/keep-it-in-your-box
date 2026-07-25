@@ -11,9 +11,12 @@ section "Regression guards"
 # Match on the BIND, not the filename — the old code took the name from a loop variable, so
 # grepping "settings.json:" silently never fired. Two $CLAUDE_HOME binds are legitimate (this
 # project's transcripts, the ro-by-default asset loop); anything else is the regression.
+# Both spellings of "mount this": the direct one and bind_via_link, which takes the same source
+# as its first argument.
 # shellcheck disable=SC2016  # literal grep patterns: they must match the source text verbatim
-stray_home_binds="$(grep -E '^[[:space:]]*ARGS\+=\(-v "\$CLAUDE_HOME/' "$KIB_ROOT/host/lifecycle.sh" \
-    | grep -vE '\$CLAUDE_HOME/projects/\$SLUG:' | grep -vE '\$CLAUDE_HOME/\$_entry:' || true)"
+stray_home_binds="$(grep -E '^[[:space:]]*(ARGS\+=\(-v|bind_via_link) "\$CLAUDE_HOME/' \
+    "$KIB_ROOT/host/lifecycle.sh" \
+    | grep -vE '\$CLAUDE_HOME/projects/\$SLUG[":]' | grep -vE '\$CLAUDE_HOME/\$_entry[":]' || true)"
 if [ -n "$stray_home_binds" ]; then
     fail "canonical ~/.claude content is bind-mounted into the container: $(printf '%s' "$stray_home_binds" | tr -s ' ')" \
         "a sandboxed session could then write the settings.json the host claude loads"
@@ -209,3 +212,34 @@ t_resolv_embedded() {
     rm -rf "$dir"
 }
 t_resolv_embedded
+
+# The HOST_HOME symlink is what makes Claude's absolute-path-keyed config resolve in the box.
+# Its parent may not exist: macOS homes are under /Users, which a debian image has no reason to
+# carry, and single mode adds no $PWD bind to create it. `ln` then failed ENOENT and the
+# entrypoint's `set -e` killed PID 1 — the container died during startup with no message.
+# shellcheck disable=SC2016  # literal grep pattern: it must match the source text verbatim
+hh_block="$(sed -n '/^if .*! -e "\$HOST_HOME"/,/^fi$/p' \
+    "$KIB_ROOT/guest/entrypoint/docker-entrypoint.sh")"
+# shellcheck disable=SC2016
+if printf '%s\n' "$hh_block" | grep -q 'mkdir -p "\$(dirname "\$HOST_HOME")"'; then
+    pass "the entrypoint creates HOST_HOME's parent before symlinking it"
+else
+    fail "the entrypoint symlinks HOST_HOME without creating its parent" \
+        "on macOS /Users is not in the image, so the container exits during startup"
+fi
+
+# The project container must NOT be created with --rm. It is the only place a startup failure
+# explains itself: with --rm the engine reaped the container before wait_for_container_ready
+# could read its logs, and the whole diagnostic was "No such container". teardown_container
+# removes it explicitly instead.
+sc_block="$(sed -n '/^start_container()/,/^}$/p' "$KIB_ROOT/host/lifecycle.sh")"
+# shellcheck disable=SC2016  # a literal grep pattern: it must match the source text verbatim
+rm_calls="$(grep -c 'docker rm -f "\$CNAME"' "$KIB_ROOT/host/lifecycle.sh" || true)"
+if printf '%s\n' "$sc_block" | grep -q -- '--rm'; then
+    fail "the project container is created with --rm" \
+        "a container that dies during startup is reaped before its logs can be read"
+elif [ "${rm_calls:-0}" -eq 0 ]; then
+    fail "nothing removes the project container" "without --rm, teardown must rm it explicitly"
+else
+    pass "the project container survives a startup crash long enough to be logged"
+fi

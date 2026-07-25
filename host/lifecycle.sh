@@ -147,7 +147,12 @@ wait_for_container_ready() {
 }
 
 teardown_container() {
-    docker stop -t 5 "$CNAME" >/dev/null 2>&1 || true # started with --rm; stop removes it
+    docker stop -t 5 "$CNAME" >/dev/null 2>&1 || true
+    # Explicit, because the container is NOT created with --rm: a container that dies during
+    # startup has to survive long enough for `docker logs` to report why. With --rm the engine
+    # reaped it first and the only diagnostic was "No such container". Every cold start calls
+    # this before `docker run`, so a stopped leftover never blocks the name.
+    docker rm -f "$CNAME" >/dev/null 2>&1 || true
 
     # Mode-specific: sidecar unmounts, removes the FUSE container, then its scratch root, in
     # that order; single mode's mount died with the container, so only state remains.
@@ -182,7 +187,7 @@ start_container() {
     # --init: PID 1 is `sleep infinity`, which would never reap the zombies left behind by
     # exec'd sessions. Docker's init does.
     ARGS=(
-        -d --init --rm
+        -d --init
         --name "$CNAME"
 
         # This project's private state: daemon, sessions, jobs, and the three files assembled
