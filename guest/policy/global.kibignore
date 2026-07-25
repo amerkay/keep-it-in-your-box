@@ -1,4 +1,4 @@
-# Host-executed config guard — shipped with cc, mounted read-only from the repo.
+# Host-executed config guard — shipped with kib, mounted read-only from the repo.
 #
 # These rules are NOT a project's .kibignore. They are immune to negation: a project
 # cannot write `!.git/config` and switch its own guard off. They are also tail-matched,

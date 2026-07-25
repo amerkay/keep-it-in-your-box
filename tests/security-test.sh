@@ -493,7 +493,7 @@ section "Brokered MCPs (generic credential broker — no MCP secret in the sandb
 # credential only in the sidecar. Assert the in-container invariant: every brokered entry
 # targets the broker net with NO auth header, and the host token dir is absent. Skips when none
 # exist. (The host-side preventer is unit-tested — it cannot run from inside the sandbox.)
-_cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.claude.json"
+_cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude-session}/.claude.json"
 _brokered="$(
     python3 - "$_cfg" <<'PY' 2>/dev/null
 import json, sys

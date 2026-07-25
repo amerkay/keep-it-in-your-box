@@ -331,7 +331,8 @@ kib_bring_up() {
         verify_redaction_attach
         # Same hazard: never attach as if the token were brokered when it is not.
         verify_broker_attach
-        # And for the read-only mounts over ~/.claude-shared, fixed at creation too.
+        # And for the read-only mounts over the container's shared-assets dir, fixed at
+        # creation too.
         if [ "$(running_unlocked && echo 1 || echo 0)" != "$UNLOCK_SHARED" ]; then
             if [ "$UNLOCK_SHARED" = 1 ]; then
                 die "this project's container is running with the shared config LOCKED, and" \
@@ -341,8 +342,9 @@ kib_bring_up() {
             fi
             # Also the shape of a container created before the shared-config lock existed: it
             # has no read-only mounts either, and must not be attached to as if it had.
-            die "this project's container has ~/.claude-shared WRITABLE — it was started with" \
-                "unlock-shared, or it predates the shared-config lock. Refusing to attach" \
+            die "this project's container has the shared assets (skills, agents, plugins," \
+                "commands, hooks) WRITABLE — it was started with unlock-shared, or it" \
+                "predates the shared-config lock. Refusing to attach" \
                 "without the flag: the session would look protected and would not be." \
                 "Close all kib sessions for this project and relaunch, or attach with:" \
                 "    kib unlock-shared"
