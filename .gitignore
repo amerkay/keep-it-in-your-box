@@ -19,6 +19,12 @@ build.pid
 __pycache__/
 sleep-inhibition-*.log
 
+# Toolchain caches / host venv (see dev.sh). mypy's cache is forced outside the repo by
+# dev.sh — its mmap'd cache bus-errors on the FUSE view — but keep the entry for host runs.
+.mypy_cache/
+.ruff_cache/
+.venv/
+
 # tests/security-test.sh fixtures (now under tests/.sectest/). Kept between runs on purpose:
 # the guard rightly refuses to unlink a .git/config, so they can only be cleared from the host.
 .sectest/

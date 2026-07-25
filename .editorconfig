@@ -1,0 +1,32 @@
+root = true
+
+# Editor-agnostic baseline. The shell section below is ALSO shfmt's config: shfmt reads
+# .editorconfig whenever no style flags are passed, which is why dev.sh passes none —
+# one source of truth for the editor and the CLI. (Passing -i/-ci/-bn would silently
+# disable this file.)
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+max_line_length = 100
+
+[*.py]
+indent_style = space
+indent_size = 4
+
+# `cc` is a shell script with no extension.
+[{*.sh,cc}]
+indent_style = space
+indent_size = 4
+switch_case_indent = true
+binary_next_line = true
+
+[{*.yml,*.yaml,*.json,*.jsonc}]
+indent_style = space
+indent_size = 2
+
+# Two trailing spaces are a hard line break in Markdown.
+[*.md]
+trim_trailing_whitespace = false

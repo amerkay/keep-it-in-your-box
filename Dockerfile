@@ -10,7 +10,8 @@ RUN apt-get update && apt-get install -y curl \
     # Core development tools
     build-essential git wget vim nano \
     # Modern shell tools
-    jq ripgrep fzf fd-find bat tmux shellcheck \
+    # (shellcheck is NOT here: it is pinned to a release binary further down, with shfmt)
+    jq ripgrep fzf fd-find bat tmux \
     # Languages and runtimes
     python3 python3-pip python3-venv \
     # Database clients (minimal set)
@@ -88,32 +89,33 @@ RUN npm install -g \
     pnpm \
     supergateway
 
-# Install shfmt (shell formatter) - non-blocking, build continues even if this fails
-RUN ARCH=$(case $(uname -m) in \
-        x86_64) echo amd64;; \
-        aarch64) echo arm64;; \
-        armv7l) echo arm;; \
-        *) echo amd64;; \
-    esac) \
-    && SHFMT_FALLBACK_VERSION="v3.12.0" \
-    && echo "Attempting to install shfmt..." \
-    && SHFMT_VERSION=$(curl -s https://api.github.com/repos/mvdan/sh/releases/latest | jq -r .tag_name 2>/dev/null) \
-    && if [ -z "$SHFMT_VERSION" ] || [ "$SHFMT_VERSION" = "null" ]; then \
-        echo "Failed to fetch latest version, using fallback: $SHFMT_FALLBACK_VERSION"; \
-        SHFMT_VERSION="$SHFMT_FALLBACK_VERSION"; \
-    else \
-        echo "Using latest version: $SHFMT_VERSION"; \
-    fi \
-    && echo "Downloading shfmt ${SHFMT_VERSION} for architecture: $ARCH" \
-    && SHFMT_URL="https://github.com/mvdan/sh/releases/download/${SHFMT_VERSION}/shfmt_${SHFMT_VERSION}_linux_${ARCH}" \
-    && echo "URL: $SHFMT_URL" \
-    && if curl -fsSL "$SHFMT_URL" -o /usr/local/bin/shfmt 2>/dev/null; then \
-        chmod +x /usr/local/bin/shfmt \
-        && echo "shfmt installed successfully: $(/usr/local/bin/shfmt --version)" \
-        || echo "shfmt installed but version check failed"; \
-    else \
-        echo "Warning: Failed to download shfmt, continuing without it"; \
-    fi
+# Shell lint/format tools, PINNED and fail-hard.
+#
+# Both are enforced by ./dev.sh lint and by CI, so a floating version means the same code
+# passes here and fails there. They used to float: shfmt was fetched as GitHub "latest"
+# (formatting drifts between releases) and shellcheck came from apt (drifts with Debian, and
+# never matches the CI runner's apt). Release binaries pinned here are the only way the
+# container, CI and a host `brew install` can agree — bump these two lines deliberately, and
+# keep them in step with .github/workflows/lint.yml and requirements-dev.txt's comment.
+#
+# Fail-hard on purpose: a silently-missing formatter turns `dev.sh lint` into a no-op.
+ARG SHFMT_VERSION=v3.13.1
+ARG SHELLCHECK_VERSION=v0.10.0
+RUN set -eu \
+    && case "$(uname -m)" in \
+        x86_64) SHFMT_ARCH=amd64; SC_ARCH=x86_64 ;; \
+        aarch64) SHFMT_ARCH=arm64; SC_ARCH=aarch64 ;; \
+        armv7l) SHFMT_ARCH=arm; SC_ARCH=armv6hf ;; \
+        *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /usr/local/bin/shfmt \
+        "https://github.com/mvdan/sh/releases/download/${SHFMT_VERSION}/shfmt_${SHFMT_VERSION}_linux_${SHFMT_ARCH}" \
+    && chmod +x /usr/local/bin/shfmt \
+    && curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.${SC_ARCH}.tar.xz" \
+        | tar -xJ -C /tmp \
+    && install -m 0755 "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck \
+    && rm -rf "/tmp/shellcheck-${SHELLCHECK_VERSION}" \
+    && shfmt --version && shellcheck --version
 
 # Create symlinks for fd (some systems call it fdfind)
 RUN ln -sf /usr/bin/fdfind /usr/local/bin/fd
@@ -144,6 +146,19 @@ RUN printf '%s\n' \
     && fc-cache -f \
     && fc-match monospace \
     && fc-match ui-monospace
+
+# Python dev tools at the versions pinned in requirements-dev.txt, so `./dev.sh lint` in a
+# session matches the host and CI exactly. Installed into their own venv because Debian marks
+# the system interpreter EXTERNALLY-MANAGED (PEP 668) — `uv pip install --system` is refused
+# there. Symlinked onto PATH and made world-readable: sessions run as the host user's UID,
+# not root. Sits above the Claude layer so a version bump keeps this cached.
+COPY requirements-dev.txt /opt/requirements-dev.txt
+RUN uv venv /opt/dev-tools \
+    && uv pip install --no-cache --python /opt/dev-tools/bin/python -r /opt/requirements-dev.txt \
+    && ln -s /opt/dev-tools/bin/ruff /usr/local/bin/ruff \
+    && ln -s /opt/dev-tools/bin/mypy /usr/local/bin/mypy \
+    && chmod -R a+rX /opt/dev-tools \
+    && ruff --version && mypy --version
 
 # Install Claude Code via official native installer
 # NOTE: everything below this line rebuilds on every Claude Code version bump.

@@ -1,0 +1,51 @@
+# Lint only: no image build, no OS matrix. The image is Linux-only and linting is
+# OS-independent; the portability contract for macOS is proven on Linux by tests/check.sh,
+# which forces the darwin code paths (see its header).
+#
+# shfmt and shellcheck are installed from pinned release binaries rather than apt: the
+# runner's apt versions drift from the container's, and both tools are enforced, so a
+# mismatch fails CI on code that is clean in a session. Keep these two versions in step
+# with the Dockerfile's ARG SHFMT_VERSION / ARG SHELLCHECK_VERSION.
+name: lint
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  SHFMT_VERSION: v3.13.1
+  SHELLCHECK_VERSION: v0.10.0
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install pinned python tools
+        run: pip install --disable-pip-version-check -r requirements-dev.txt
+
+      - name: Install pinned shfmt + shellcheck
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/shfmt \
+            "https://github.com/mvdan/sh/releases/download/${SHFMT_VERSION}/shfmt_${SHFMT_VERSION}_linux_amd64"
+          sudo install -m 0755 /tmp/shfmt /usr/local/bin/shfmt
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+            | tar -xJ -C /tmp
+          sudo install -m 0755 "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
+          shfmt --version
+          shellcheck --version
+
+      # `check` = lint (ruff, mypy, shfmt) + tests/check.sh, which stays the authoritative
+      # implementation of syntax, shellcheck and the portability contract — dev.sh does not
+      # duplicate those, so CI and a local run cannot disagree about them.
+      - name: ./dev.sh check
+        run: ./dev.sh check

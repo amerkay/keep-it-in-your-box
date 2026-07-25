@@ -1,0 +1,26 @@
+# Single source of truth for the Python toolchain: VSCode, the in-container CLI and a host
+# CLI all read this file, so all three produce identical results. Versions are pinned in
+# requirements-dev.txt; run everything through ./dev.sh.
+#
+# No build backend / [project] table on purpose — this repo is a set of standalone scripts,
+# not an installable package. Only tool config lives here.
+
+[tool.ruff]
+line-length = 100                  # repo-wide (prose wraps here too, see .editorconfig)
+target-version = "py313"           # container runtime; the tools themselves need py3.11+
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, isort, pyupgrade, bugbear, pep8-naming.
+select = ["E", "F", "I", "UP", "B", "N"]
+
+[tool.ruff.format]                 # Black-compatible defaults
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+
+# fusepy ships no type stubs and is imported under either name (PyPI 'fuse' /
+# Debian 'fusepy'), so the FUSE sidecars cannot be strict about it.
+[[tool.mypy.overrides]]
+module = ["fuse", "fusepy"]
+ignore_missing_imports = true
