@@ -15,10 +15,10 @@ that reference this.
 - **`ccignore-precommit.py`** — Host-side git pre-commit hook. See [redaction-config-guard.md](redaction-config-guard.md#redaction-ccignore-fuse-pre-commit).
 - **`global.ccignore`** — Host-executed-config guard rules, shipped in-repo, mounted `:ro` into the sidecar. See [redaction-config-guard.md](redaction-config-guard.md#host-executed-config-guard).
 - **`sleep-guard.sh`** — Host-side per-terminal sleep-inhibit daemon. See [sleep-guard.md](sleep-guard.md).
-- **`docker-entrypoint.sh`** — **Baked into the image (`COPY`)** — editing it needs a rebuild, not a relaunch. Creates a user matching host UID/GID, fixes ownership, builds the shared-asset symlink farm, sets up clipboard access, `exec gosu` drops privileges. Re-entered by every `docker exec` session (takes its "already the target user" branch).
+- **`docker-entrypoint.sh`** — **Baked into the image (`COPY`)** — editing it needs a rebuild, not a relaunch. Creates a user matching host UID/GID, fixes ownership, builds the shared-asset symlink farm (CLAUDE.md excluded — cc assembles it directly), sets up clipboard access, `exec gosu` drops privileges. Re-entered by every `docker exec` session (takes its "already the target user" branch).
 - **`entrypoint-fuse.sh`** — Baked; single-mode (macOS) in-container FUSE mount. See [macos.md](macos.md).
-- **`migrate-sessions.sh`** — One-time host script splitting legacy `~/.claude` into `~/.claude-shared/` + `~/.claude-sandbox/<slug>/`. Dry-run by default; `--apply` commits; `--force` redoes. Refuses `--apply` while any `cc-*` container or host `claude` process is alive. `CC_MIGRATE_TEST=1` disables the safety checks for scratchpad testing.
-- **`shared-CLAUDE.md`** — Sandbox policy synced into a marker-delimited block atop `~/.claude-shared/CLAUDE.md`; user content below the block survives.
+- **`claude-config-scope.py`** — Host-side JSON/JSONL surgery for the canonical-`~/.claude` seam: `scope-in-json`/`merge-out-json` (this project's `.claude.json` subtree), `seed-history`/`merge-history`, `classify` (drift canary manifest). Unit-tested by `tests/config-scope-test.py`. See [container-lifecycle.md](container-lifecycle.md#session-isolation--canonical-claude-assembled-per-launch).
+- **`shared-CLAUDE.md`** — Sandbox policy, assembled by cc into a marker-delimited block atop the in-box `CLAUDE.md` (= policy + the user's canonical `~/.claude/CLAUDE.md`). Loads in-box only; canonical stays pure user memory.
 - **`build-bg.sh`** — Background image rebuild; `flock` on `build.lock`, runs under `setsid` so `kill -TERM -PGID` cancels the tree; desktop notification on completion.
 - **`Dockerfile`** — Debian trixie, Node (NodeSource, `NODE_MAJOR` arg), Python 3, Claude Code via official installer (`CLAUDE_VERSION` arg; installed version recorded in `/etc/claude-code-version`). Build args are `NODE_MAJOR` and `CLAUDE_VERSION` only — there is no `CUSTOM_PACKAGES`/`CACHE_BUST` (edit the apt line directly to add packages). SVG→GIF toolchain (`rsvg-convert`, `cairosvg`, Pillow, `ffmpeg` for the GIF assembly): prefer **`rsvg-convert`** (Pango resolves CSS font-family *lists*; cairosvg's toy font API treats the list as one literal name and falls back to proportional sans). Headless Chrome is not a usable rasterizer (hangs on GCM registration retries). `supergateway` pre-installed for hosted MCPs. Default CMD: `claude --dangerously-skip-permissions`.
 - **`tests/`** — `check.sh` (host-side dev suite; `cd`s to repo root, run as `./tests/check.sh`), `broker-test.py` (pure-stdlib broker logic; also invoked by check.sh), `security-test.sh` (run **inside** a sandbox; `--list`, `-k <section>`, `--no-clipboard`). Each security check re-attempts a real attack **and** the legitimate operation the guard must not break. Non-destructive. Fixtures in `tests/.sectest/` are reused, not recreated (the guard refuses to unlink a `.git/config`, so fresh-fixtures-per-run would pile up undeletable dirs; clear from the host).
@@ -27,9 +27,12 @@ that reference this.
 ## Build & run
 
 ```bash
-./migrate-sessions.sh            # dry run (required once before cc launches)
-./migrate-sessions.sh --apply    # commit; deletes ~/.claude and ~/.claude.json
-docker build -t keep-it-in-your-box .                          # auto on first run
+# No setup step — cc keeps ~/.claude canonical and assembles each session per launch.
+./build-bg.sh                    # rebuild the image (streams when run by hand)
+# Never a bare `docker build`: CLAUDE_VERSION stays the literal string `latest`, Docker keys
+# its cache on that string rather than on what it resolves to, so the install layer is reused
+# forever — the image keeps an old Claude and cc re-prompts for the same upgrade every launch.
+# build-bg.sh resolves the number first. To pin one deliberately:
 docker build --build-arg CLAUDE_VERSION=2.1.71 -t keep-it-in-your-box .
 /path/to/cc                      # launch claude   |  /path/to/cc bash  # shell
 CC_FORCE_NEW_SESSION=1 /path/to/cc                             # clean-slate session

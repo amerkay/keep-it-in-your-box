@@ -5,6 +5,17 @@ set -euo pipefail
 # one) and runs the session inside it via `docker exec`. The subsystems it drives —
 # image build/update, .ccignore redaction, gitignore/pre-commit sync — live in cc-lib.sh.
 
+# ── Peel off the `cc`=`kib claude` alias's leading token(s), FIRST ──
+# README's ~/.bashrc setup makes `cc` an alias for `$PWD/cc claude` — so EVERY invocation
+# through it, including `cc --unlock-shared`, `cc --broker-login`, `cc --login foo`, etc.,
+# arrives here with a `claude` token in front of the user's real first argument. Every check
+# below that inspects "$1"/"$2" (the dir guard, --unlock-shared, the broker/provider subcommand
+# dispatch, intercept_mcp_add, the final command dispatch) assumes a bare-flag/subcommand
+# shape and silently falls through to `claude` itself otherwise — `claude` then rejects the
+# flag it's never heard of. Strip however many appear (a second shows up only if the user also
+# typed it out of habit: `cc claude mcp add`) once, here, before anything looks at "$1".
+while [ "${1:-}" = claude ]; do shift; done
+
 # ── Guard: forbid launching from sensitive host directories ──
 # Exactly $HOME, ~/Desktop, ~/Documents, ~/Downloads; subdirectories are fine. Runs
 # before any trap is installed, so the error stays on screen after exit.
@@ -15,11 +26,11 @@ set -euo pipefail
 # --mcp-adopt DOES touch the project (it reads .mcp.json), so it is NOT exempt.
 case "${1:-}" in
     --broker-login|--broker-logout|--broker-status|--login|--logout|--status|--add-mcp) _skip_dir_guard=1 ;;
-    # `[claude] mcp add|add-json` is intercepted host-side (host-global, identity-free, like
-    # --add-mcp), so it must work from $HOME too. A normal `cc claude` session stays guarded.
+    # `mcp add|add-json` is intercepted host-side (host-global, identity-free, like --add-mcp),
+    # so it must work from $HOME too. A normal interactive session stays guarded. (The `cc`
+    # alias's leading `claude` token(s) are already stripped above, so this sees the real
+    # command whether it arrived as `cc mcp add …` or a bare `kib mcp add …`.)
     mcp)    case "${2:-}" in add|add-json) _skip_dir_guard=1 ;; *) _skip_dir_guard=0 ;; esac ;;
-    claude) _skip_dir_guard=0
-            [ "${2:-}" = mcp ] && case "${3:-}" in add|add-json) _skip_dir_guard=1 ;; esac ;;
     *) _skip_dir_guard=0 ;;
 esac
 _pwd="$(realpath "$PWD" 2>/dev/null || echo "$PWD")"
@@ -48,8 +59,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── cc's own flags ───────────────────────────────────────────
 # Consumed here so they never reach claude. --unlock-shared drops the read-only mounts over
-# ~/.claude-shared, which is how you deliberately install a skill/plugin for EVERY project
-# rather than just this one (see "Shared config surface" in CLAUDE.md).
+# the shared assets, so an install lands in canonical ~/.claude for EVERY project (and the
+# host claude) rather than just this one (see "Shared config surface" in CLAUDE.md).
 UNLOCK_SHARED="${CC_UNLOCK_SHARED:-0}"
 if [ "${1:-}" = "--unlock-shared" ]; then
     UNLOCK_SHARED=1
@@ -117,88 +128,91 @@ PROJ_HASH="$(hash8 "$PWD")"
 CNAME="cc-$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | cut -c1-40)-$PROJ_HASH"
 
 # ── Per-project Claude session isolation ─────────────────────
-# CLAUDE_CONFIG_DIR gets a per-project dir (daemon, sessions, jobs, history, transcripts,
-# .claude.json); CLAUDE_SECURESTORAGE_CONFIG_DIR keeps pointing at one shared dir, so
-# every project still shares a single login token. Mounting one ~/.claude into every
-# container instead made concurrent sessions fight over daemon.lock — and let every
-# container read every other project's transcripts.
-CLAUDE_SHARED="$HOME/.claude-shared"
-CLAUDE_SANDBOX="$HOME/.claude-sandbox"
+# ~/.claude and ~/.claude.json stay CANONICAL and stock-untouched — the same login,
+# transcripts and history a plain host `claude` sees, so switching between host claude and cc
+# is seamless. Per-project isolation comes from ASSEMBLING each container's config from that
+# canonical store per launch (into $SESSION_BASE/$SHARED_BASE below) and merging this project's
+# changes back out on exit. Mounting one ~/.claude into every container instead made concurrent
+# sessions fight over daemon.lock — and let every container read every other project's
+# transcripts. See docs/design-notes/.
+CLAUDE_HOME="$HOME/.claude"
+CLAUDE_JSON="$HOME/.claude.json"
+# cc-owned scratch/state, separate from canonical ~/.claude AND the never-mounted token dir
+# ~/.keep-it-in-your-box/. XDG_STATE_HOME-respecting.
+CC_STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/keep-it-in-your-box"
 SLUG="$(printf '%s' "$PWD" | sed 's/[^a-zA-Z0-9]/-/g')"
-SESSION_DIR="$CLAUDE_SANDBOX/$SLUG"
+# The two assembled dirs backing the two container paths (CLAUDE_CONFIG_DIR /
+# CLAUDE_SECURESTORAGE_CONFIG_DIR). Rebuilt on each cold start from canonical ~/.claude.
+SESSION_BASE="$CC_STATE_ROOT/$SLUG/session"
+SHARED_BASE="$CC_STATE_ROOT/$SLUG/shared"
 EPHEMERAL=0
 
-# The locks arbitrating the container's lifetime live OUTSIDE $SESSION_DIR, because that
-# dir is bind-mounted rw into the container: a sandboxed Claude could delete the lock
-# file from inside, and unlinking a lock whose inode another cc holds flocked lets the
-# next one lock a *fresh* inode — two "last terminals out", both tearing down the
-# container under a live session. Keep them host-only.
-LOCK_DIR="$CLAUDE_SANDBOX/.locks"
+# The locks arbitrating the container's lifetime live OUTSIDE the bind-mounted dirs, because
+# those are bind-mounted rw into the container: a sandboxed Claude could delete the lock file
+# from inside, and unlinking a lock whose inode another cc holds flocked lets the next one lock
+# a *fresh* inode — two "last terminals out", both tearing down the container under a live
+# session. Keep them host-only under $CC_STATE_ROOT (never mounted in).
+LOCK_DIR="$CC_STATE_ROOT/.locks"
 LOCK_FILE="$LOCK_DIR/$SLUG.lock"
 BOOT_LOCK="$LOCK_DIR/$SLUG.boot.lock"
 
-# Host-only state for the single-container FUSE mode and the macOS clipboard
-# bridge. Kept OUT of $SESSION_DIR (which is bind-mounted rw into the container)
-# for the same reason as the locks: a sandboxed Claude must not be able to edit
-# the patterns the redaction layer is validated against, nor the bridge's spool.
-# The per-container file paths are derived below, next to FUSE_ROOT, so they pick
-# up SCRATCH_SUFFIX (an ephemeral session must not share the real one's state).
-STATE_DIR="$CLAUDE_SANDBOX/.state"
+# Host-only state for the single-container FUSE mode, the macOS clipboard bridge, and the
+# shared-config lock witness. Kept OUT of the bind-mounted dirs for the same reason as the
+# locks: a sandboxed Claude must not edit the patterns redaction is validated against, the
+# bridge's spool, or the lock witness. Per-container paths (below, next to FUSE_ROOT) pick up
+# SCRATCH_SUFFIX so an ephemeral session never shares the real one's state.
+STATE_DIR="$CC_STATE_ROOT/.state"
 
 # Suffix for this session's scratch dirs. Empty for the project's shared container; set
 # for an ephemeral one so it can never touch the real one's (see CC_FORCE_NEW_SESSION).
 SCRATCH_SUFFIX=""
 
-if [ ! -f "$CLAUDE_SHARED/.migrated" ]; then
-    die "per-project session isolation isn't set up yet." \
-        "Run the one-time migration (it splits ~/.claude into a shared dir" \
-        "and one dir per project):" \
-        "  $SCRIPT_DIR/migrate-sessions.sh            # dry run — shows every change" \
-        "  $SCRIPT_DIR/migrate-sessions.sh --apply    # commit"
-fi
+# Canonical ~/.claude must exist (or be freshly skeletoned). Runs before any assembly reads it.
+ensure_claude_home() {
+    [ -d "$CLAUDE_HOME" ] && return 0
+    # Fresh install: a minimal skeleton; Claude + first login populate the rest.
+    mkdir -p "$CLAUDE_HOME/projects" && chmod 700 "$CLAUDE_HOME"
+    echo "🆕 cc: no ~/.claude yet — created a fresh skeleton (first login populates it)." >&2
+}
+ensure_claude_home
 
 mkdir -p "$LOCK_DIR" && chmod 700 "$LOCK_DIR"
+mkdir -p "$STATE_DIR" && chmod 700 "$STATE_DIR"
 
-# A legacy ~/.claude means the migration was undone, or a host `claude` recreated one.
-# It is no longer mounted, so it can't leak — but it will silently diverge, so say so.
-if [ -d "$HOME/.claude/projects" ] || [ -f "$HOME/.claude/.credentials.json" ]; then
-    warn "a legacy ~/.claude exists but is NOT used by the sandbox any more." \
-         "Remove it so it can't drift: rm -rf ~/.claude ~/.claude.json"
-fi
-
-sync_shared_claude_md
 validate_shared_settings
 
 if [ "$UNLOCK_SHARED" = 1 ]; then
-    echo "⚠️  --unlock-shared: ~/.claude-shared is WRITABLE this session. Anything written" >&2
-    echo "   there auto-runs in EVERY project's next session." >&2
+    echo "⚠️  --unlock-shared: your ~/.claude plugins/skills/agents/commands/hooks are WRITABLE" >&2
+    echo "   this session — an install lands in ~/.claude, shared with every project + host claude." >&2
 else
     echo "🔒 shared config: read-only (installs land per-project; cc --unlock-shared to share)" >&2
 fi
 
+# Config dirs backing the two container paths. Created here (needed for lock/pin/warn paths);
+# their CONTENTS are assembled fresh from canonical ~/.claude on the cold-start path only
+# (assemble_session_dir), never while a container is already attached to them.
 if [ "${CC_FORCE_NEW_SESSION:-0}" = "1" ]; then
-    # Clean slate: its own container AND its own config dir, so it has its own daemon and
-    # cannot collide with the project's real one. Throwaway — discarded on exit. Not
-    # needed just to open a second terminal (that attaches to the shared container).
-    SESSION_DIR="$CLAUDE_SANDBOX/$SLUG.ephemeral.$$"
+    # Clean slate: its own container AND its own config dirs, so it has its own daemon and
+    # cannot collide with the project's real one. Throwaway — discarded on exit, merge-out
+    # disabled. Not needed just to open a second terminal (that attaches to the shared one).
+    EPH_ROOT="$CC_STATE_ROOT/$SLUG.ephemeral.$$"
+    SESSION_BASE="$EPH_ROOT/session"
+    SHARED_BASE="$EPH_ROOT/shared"
     CNAME="$CNAME-eph-$$"
     EPHEMERAL=1
     # Its own scratch dirs too. Sharing the project's would mean this session's startup
     # ("clear anything a crashed session left behind") and its exit both tear down the
     # real container's live FUSE mount, unmasking .ccignore'd files under a live session.
     SCRATCH_SUFFIX=".eph.$$"
-    mkdir -p "$SESSION_DIR" && chmod 700 "$SESSION_DIR"
-    cp "$CLAUDE_SHARED/claude-json.seed" "$SESSION_DIR/.claude.json" 2>/dev/null || true
+    mkdir -p "$SESSION_BASE" && chmod 700 "$SESSION_BASE"
+    mkdir -p "$SHARED_BASE"  && chmod 700 "$SHARED_BASE"   # holds the real credential on the broker-off path
     # Reap it even if we bail out below (e.g. the sidecar fails): the real cleanup() trap
     # isn't installed until just before the container starts.
-    trap 'rm -rf "$SESSION_DIR"' EXIT
+    trap 'rm -rf "$EPH_ROOT"' EXIT
     echo "⚠️  CC_FORCE_NEW_SESSION=1 — ephemeral session; no history, discarded on exit." >&2
 else
-    if [ ! -d "$SESSION_DIR" ]; then
-        mkdir -p "$SESSION_DIR" && chmod 700 "$SESSION_DIR"
-        cp "$CLAUDE_SHARED/claude-json.seed" "$SESSION_DIR/.claude.json" 2>/dev/null || true
-        echo "🆕 cc: first run here — new session dir $SESSION_DIR" >&2
-    fi
+    mkdir -p "$SESSION_BASE" && chmod 700 "$SESSION_BASE"
+    mkdir -p "$SHARED_BASE"  && chmod 700 "$SHARED_BASE"   # holds the real credential on the broker-off path
     # SHARED lock, held for this terminal's lifetime: a reference count on the project's
     # container, not a mutex — any number of terminals hold it at once. It blocks only
     # while a departing session holds the lock *exclusively* to tear the container down,
@@ -207,8 +221,62 @@ else
     lock_fd -w 60 -s 200 || die "timed out waiting for the project lock ($LOCK_FILE)."
 fi
 
-# Every launch, not just the first: the seed covers only a brand-new session dir.
-pin_global_config "$SESSION_DIR/.claude.json"
+# ── Assemble this project's config from canonical ~/.claude ──────
+# scope-in .claude.json (globals + THIS project only), seed ↑ history to this project's lines,
+# and place the assembled sandbox-policy CLAUDE.md. Cold-start only (called in the else branch
+# of the container-running check below) so we never rewrite the config dir a live container is
+# attached to. Uses claude-config-scope.py — the single home for the JSON/JSONL surgery.
+_scope_py() { python3 "$SCRIPT_DIR/claude-config-scope.py" "$@"; }
+
+assemble_session_dir() {
+    # Empty private base for the machine-runtime singletons (daemon, sessions, file-history…);
+    # anything Claude Code writes that we don't recognise lands here, never in canonical.
+    mkdir -p "$SESSION_BASE/projects" 2>/dev/null || true
+
+    # Scoped .claude.json (globals + this project's entry only). Fail-soft to an empty config.
+    if command -v python3 >/dev/null 2>&1; then
+        _scope_py scope-in-json "$CLAUDE_JSON" "$PWD" "$SESSION_BASE/.claude.json" \
+            || warn "could not scope .claude.json — starting this session from an empty config."
+    else
+        printf '{\n  "projects": {}\n}\n' > "$SESSION_BASE/.claude.json"
+    fi
+    # This project's ↑ history only (never another project's prompts/pastes).
+    if command -v python3 >/dev/null 2>&1; then
+        _scope_py seed-history "$CLAUDE_HOME/history.jsonl" "$PWD" "$SESSION_BASE/history.jsonl" \
+            || : > "$SESSION_BASE/history.jsonl"
+    else
+        : > "$SESSION_BASE/history.jsonl"
+    fi
+    # Sandbox policy + the user's canonical memory, placed directly (not a shared symlink).
+    assemble_sandbox_claude_md
+
+    # settings.json/keybindings.json as a COPY in the shared-assembly dir — never a live bind on
+    # canonical, which would let the box write the file a host `claude` loads. Vetted on the way
+    # back out (merge_out_shared_settings).
+    stage_shared_settings
+
+    # Silent-log drift canary: note any top-level ~/.claude entry cc doesn't recognise. Safe by
+    # default (unknown → container-private), so this only surfaces "Claude Code grew a store".
+    check_claude_home_drift
+
+    # This project's transcripts are shared host<->box via a nested bind (added in
+    # start_container), so --resume lists the same sessions on both sides. Both ends must exist
+    # for the bind. NOT for an ephemeral session: it must persist nothing to canonical, so its
+    # transcripts stay in its own (discarded) session base instead.
+    [ "$EPHEMERAL" = 1 ] || mkdir -p "$CLAUDE_HOME/projects/$SLUG" 2>/dev/null || true
+}
+
+# Diff canonical ~/.claude's top-level entries against the versioned manifest; LOG ONLY (no
+# desktop popup). A stronger line when /etc/claude-code-version changed since we last saw it.
+check_claude_home_drift() {
+    command -v python3 >/dev/null 2>&1 || return 0
+    local unknown; unknown="$(_scope_py classify "$CLAUDE_HOME" 2>/dev/null || true)"
+    [ -n "$unknown" ] || return 0
+    echo "ℹ️  cc: unrecognised ~/.claude entries (kept container-private, not shared): $(printf '%s' "$unknown" | tr '\n' ' ')" >&2
+}
+
+# pin_global_config runs later, per launch, on both the cold-start and attach paths (it needs
+# the assembled .claude.json, which only exists after assemble_session_dir on a cold start).
 
 # Migrate an inline-credential MCP into the broker, then exit. Runs here (not with the other
 # subcommands) because it reads the project's .mcp.json and this session's .claude.json, both
@@ -236,6 +304,19 @@ WL_ROOT="/tmp/cc-wl.${PROJ_HASH}${SCRATCH_SUFFIX}"
 # final by here, so an ephemeral session gets its own files and can't disturb the real one.
 PATTERNS_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.patterns"
 CLIP_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.clip"
+# Credential-fallback witness: written by stage_credential at container creation when the box
+# got the REAL ~/.claude/.credentials.json (broker off, or on-but-no-token). It has to be a
+# host-side FILE, not a shell variable: the last terminal out is often one that merely ATTACHED
+# and so never ran stage_credential — with a per-process flag it would skip merge_out_credential
+# and leave canonical holding a refresh token the box has already rotated away, which logs the
+# account out on the host (docs/design-notes/credential-broker.md).
+CRED_WITNESS="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.credfallback"
+# Shared-config lock witness: a host-only file bound read-only into the shared-assembly dir
+# ONLY when locked (the default). It is the ground-truth `running_unlocked` reads off the
+# running container's mounts — a stable witness that always exists when locked, unlike any
+# individual shared asset (a fresh user may have no plugins/skills/… to probe). See the mount
+# block + running_unlocked below.
+LOCK_WITNESS="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.lockwitness"
 
 # Credential broker (see cc-lib.sh "Credential broker"). Globals are always defined so the
 # teardown/attach helpers can reference them unconditionally; the broker only actually runs
@@ -259,12 +340,12 @@ sidecar_running()   { [ -n "$(docker ps -q -f "name=^${FUSE_CNAME}$" 2>/dev/null
 broker_running()    { [ -n "$(docker ps -q -f "name=^${BROKER_CNAME}$" 2>/dev/null)" ]; }
 
 # Was the running container created with --unlock-shared? Read it off the mounts, which are
-# the ground truth — no state file to go stale. CLAUDE.md is the probe because it is the one
-# entry guaranteed to exist (sync_shared_claude_md writes it every launch); skills/ or
-# plugins/ may legitimately be absent, which would read as "unlocked".
+# the ground truth — no state file to go stale. The lock witness is the probe: cc binds it
+# read-only into the shared-assembly dir ONLY when locked, and — unlike any individual shared
+# asset (a fresh user may have no plugins/skills/…) — it is guaranteed present when locked.
 running_unlocked() {
     ! docker inspect -f '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' "$CNAME" 2>/dev/null |
-        grep -qx '/home/hostuser/.claude-shared/CLAUDE.md'
+        grep -qx '/home/hostuser/.claude-shared/.cc-shared-locked'
 }
 
 # `docker run -d` returns as soon as PID 1 exists, but the entrypoint still has real work
@@ -343,9 +424,13 @@ start_container() {
 
     # Credential broker: hold the real OAuth token host-side and hand the agent only a
     # placeholder + ANTHROPIC_BASE_URL pointed at the broker. Must precede the ARGS below,
-    # which add that base-URL env and the placeholder shadow (add_broker_env_args). No-op
-    # unless opted in; fail-hard if opted in and it can't start (it is the agent's auth).
+    # which add that base-URL env and the placeholder shadow (add_broker_env_args). On by
+    # default; a first launch with no token runs the login, or falls back to the real cred.
     start_broker
+    # If the broker isn't shadowing a synthetic credential (off, or on-but-no-token fallback),
+    # copy the real ~/.claude/.credentials.json into the shared-assembly DIR so the box can
+    # authenticate. Copy, never a single-file bind (rename footgun); folded back on exit.
+    stage_credential
 
     # --init: PID 1 is `sleep infinity`, which would never reap the zombies left behind by
     # exec'd sessions. Docker's init does.
@@ -353,16 +438,17 @@ start_container() {
         -d --init --rm
         --name "$CNAME"
 
-        # This project's private state: daemon, sessions, jobs, transcripts, history,
-        # .claude.json. No other project's container mounts it.
-        -v "$SESSION_DIR:/home/hostuser/.claude-session"
+        # This project's private state: daemon, sessions, jobs, and the three files assembled
+        # from canonical (.claude.json, history.jsonl, CLAUDE.md). No other project mounts it.
+        -v "$SESSION_BASE:/home/hostuser/.claude-session"
 
-        # Shared by every project: login token, settings, plugins, skills, CLAUDE.md.
-        # Writable — an OAuth refresh has to rewrite .credentials.json.
-        -v "$CLAUDE_SHARED:/home/hostuser/.claude-shared"
+        # Shared-assembly dir: a real host directory the shared assets nest-bind into (below),
+        # plus the credential (synthetic shadow, or the real one copied in by stage_credential).
+        # A real dir, so Claude's atomic credential rename works.
+        -v "$SHARED_BASE:/home/hostuser/.claude-shared"
 
-        # The split that makes the above work: config (and .claude.json) resolve to the
-        # per-project dir, credentials to the shared one.
+        # config (+ .claude.json) resolve to the per-project session dir; the credential store
+        # to the shared-assembly dir. Container-side paths unchanged from the old layout.
         -e CLAUDE_CONFIG_DIR=/home/hostuser/.claude-session
         -e CLAUDE_SECURESTORAGE_CONFIG_DIR=/home/hostuser/.claude-shared
 
@@ -444,23 +530,42 @@ start_container() {
         ARGS+=(-v "$PWD/.git/hooks:$PWD/.git/hooks:ro")
     fi
 
-    # Everything here auto-loads in EVERY project's next session, so a write from one
-    # sandboxed repo is a cross-project pivot (audit H6). Nested read-only binds over the
-    # shared mount, because ~/.claude-shared itself must stay writable: an OAuth refresh
-    # rewrites .credentials.json. settings.json is deliberately absent too — it stays
-    # writable for /config, and validate_shared_settings vets it host-side each launch.
-    #
-    # Nothing is lost by locking these: the entrypoint gives each project its own
-    # skills/agents/commands/plugins dir, so in-session creation and installs still work,
-    # they just land per-project. --unlock-shared is how you promote one to all projects.
+    # This project's transcripts, shared host<->box so --resume lists the same sessions on
+    # both sides. Nested rw bind inside the session mount; Docker applies mounts parent-first.
+    # Skipped for an ephemeral session — it must persist nothing to canonical, so its
+    # transcripts stay in its own discarded session base.
+    if [ "$EPHEMERAL" != 1 ] && [ -d "$CLAUDE_HOME/projects/$SLUG" ]; then
+        ARGS+=(-v "$CLAUDE_HOME/projects/$SLUG:/home/hostuser/.claude-session/projects/$SLUG")
+    fi
+
+    # NOTE: settings.json / keybindings.json are deliberately NOT bound here. They are staged as
+    # writable COPIES inside $SHARED_BASE (stage_shared_settings), which the whole-dir mount above
+    # already serves, and vetted before they may re-enter canonical on exit. Binding canonical rw
+    # here — as this did — let a sandboxed session write the settings.json a HOST `claude` loads.
+
+    # plugins/skills/agents/commands/hooks auto-load in EVERY project's next session (and the
+    # host claude), so a write from one sandboxed repo is a cross-project pivot (audit H6):
+    # READ-ONLY by default. Nothing is lost — the entrypoint gives each project its own farmed
+    # dir, so in-session creation/installs still work, they just land per-project. Under
+    # --unlock-shared they are writable and installs land in canonical ~/.claude (promoted to
+    # every project + the host claude).
+    local _ro=":ro"; [ "$UNLOCK_SHARED" = 1 ] && _ro=""
+    local _entry
+    # `if`, not `[ … ] && ARGS+=`: a false test on the final iteration would make the whole
+    # loop exit 1, which under `set -e` kills cc before the container starts.
+    for _entry in plugins skills agents commands hooks; do
+        if [ -e "$CLAUDE_HOME/$_entry" ]; then
+            ARGS+=(-v "$CLAUDE_HOME/$_entry:/home/hostuser/.claude-shared/$_entry$_ro")
+        fi
+    done
+
+    # Lock witness: a read-only bind that exists ONLY when locked, so running_unlocked can read
+    # the lock state off the mounts even for a user with no shared assets to probe.
     if [ "$UNLOCK_SHARED" = 0 ]; then
-        # `if`, not `[ … ] && ARGS+=`: a false test on the final iteration would make the
-        # whole loop exit 1, which under `set -e` kills cc before the container starts.
-        for _entry in CLAUDE.md hooks plugins skills agents commands; do
-            if [ -e "$CLAUDE_SHARED/$_entry" ]; then
-                ARGS+=(-v "$CLAUDE_SHARED/$_entry:/home/hostuser/.claude-shared/$_entry:ro")
-            fi
-        done
+        printf 'locked\n' > "$LOCK_WITNESS" 2>/dev/null || true
+        if [ -f "$LOCK_WITNESS" ]; then
+            ARGS+=(-v "$LOCK_WITNESS:/home/hostuser/.claude-shared/.cc-shared-locked:ro")
+        fi
     fi
 
     # Broker wiring: -e ANTHROPIC_BASE_URL + the placeholder credential that SHADOWS the real
@@ -513,9 +618,16 @@ if container_running; then
             "    cc --unlock-shared"
     fi
     wait_for_container_ready   # in case its creator died mid-startup
+    # Re-assert the pins on the live session file (a concurrent session may have rewritten it
+    # wholesale). Do NOT re-assemble here — the running container is bound to these files.
+    pin_global_config "$SESSION_BASE/.claude.json"
     echo "🔗 cc: attaching to this project's running container ($CNAME)." >&2
 else
     teardown_container    # clear anything a crashed session left behind
+    # Cold start: rebuild this project's config from canonical ~/.claude, then pin. Only here —
+    # never while a container is attached to these bind-mounted files.
+    assemble_session_dir
+    pin_global_config "$SESSION_BASE/.claude.json"
     start_container
     wait_for_container_ready
     # One resolv.conf watcher for the container's lifetime (see cc-lib.sh). Linux only:
@@ -542,12 +654,38 @@ SESSION_TAG="cc-$$-$(date +%s)"
 "$SCRIPT_DIR/sleep-guard.sh" "$CNAME" "$SESSION_TAG" 200>&- 201>&- &
 SLEEP_GUARD_PID=$!
 
+# Merge THIS project's changes back into canonical ~/.claude on the last terminal out — the
+# only moment the session files are quiescent (the container is already stopped). Under a flock
+# on ~/.claude.json.lock, so a concurrent host claude / same-project cc can't interleave a
+# write. Subtree-only (.claude.json) + append-only (history) + changed-only (credential): a
+# race loses at most this session's edit, never corrupts unrelated data. See
+# claude-config-scope.py. Not called for ephemeral sessions (merge-out disabled by design).
+merge_out_session() {
+    command -v python3 >/dev/null 2>&1 || {
+        merge_out_credential; merge_out_shared_settings; return 0; }
+    exec 203>"$CLAUDE_JSON.lock"
+    if lock_fd -w 30 -x 203; then
+        _scope_py merge-out-json "$SESSION_BASE/.claude.json" "$PWD" "$CLAUDE_JSON" \
+            || warn "could not merge this project's .claude.json changes back to ~/.claude.json."
+        _scope_py merge-history "$SESSION_BASE/history.jsonl" "$PWD" "$CLAUDE_HOME/history.jsonl" \
+            || true
+        merge_out_credential
+        merge_out_shared_settings
+        lock_fd -u 203
+    else
+        # Silence here would discard the whole session's config + ↑ history without a trace.
+        warn "timed out waiting for $CLAUDE_JSON.lock — this session's .claude.json and" \
+             "↑ history changes were NOT merged back into ~/.claude."
+    fi
+    exec 203>&-
+}
+
 cleanup() {
     kill "$SLEEP_GUARD_PID" 2>/dev/null || true
 
     if [ "$EPHEMERAL" = 1 ]; then
         teardown_container
-        [ -n "$SESSION_DIR" ] && rm -rf "$SESSION_DIR"
+        [ -n "${EPH_ROOT:-}" ] && rm -rf "$EPH_ROOT"
     else
         # Are we the last terminal out? Drop our shared lock, then try to take the lock
         # exclusively — which can only succeed if no other cc still holds it. While we
@@ -556,7 +694,8 @@ cleanup() {
         exec 200>&-
         exec 202>"$LOCK_FILE"
         if lock_fd -n -x 202; then
-            teardown_container
+            teardown_container      # stop the container first: the session files go quiescent
+            merge_out_session       # then fold this project's changes back to canonical
             lock_fd -u 202
         fi
         exec 202>&-
@@ -580,15 +719,13 @@ trap 'exit 143' TERM
 # ── Run this terminal's session inside the project container ──
 # Re-entering through the entrypoint (rather than calling claude directly) reuses its
 # "already the target user" branch, which sets HOME and PATH correctly.
-# `cc` is aliased to `kib claude`, so an interactive launch arrives with a leading `claude`
-# token — strip it. What remains decides the command: nothing / a bare flag (`--resume`) → an
+# The `cc` alias's leading `claude` token was already peeled off at the top of the script, so
+# what's left of "$@" decides the command directly: nothing / a bare flag (`--resume`) → an
 # interactive session with the skip-permissions default the box is built around; a leading
 # `mcp …` (a claude→cc swap on `claude mcp …`, or a bare `kib mcp …`) is a Claude subcommand,
 # not a container binary, so route it through claude too — the secret-bearing `mcp add` forms
 # were already intercepted host-side above. Anything else runs verbatim in the box (`kib bash`,
-# `kib python app.py`). `claude` tolerates the global flag before a subcommand; a duplicate is
-# harmless.
-[ "${1:-}" = claude ] && shift
+# `kib python app.py`).
 if [ $# -eq 0 ]; then
     CMD=(claude --dangerously-skip-permissions)
 elif [ "$1" = mcp ] || [[ "$1" == -* ]]; then

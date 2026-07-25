@@ -49,7 +49,7 @@ Neither is strictly safer — they defend different halves. The [full 7-sandbox 
 - **Secrets are redacted, not just hidden.** A FUSE layer over the project stubs reads and refuses writes to `.env`, `.env.*`, and anything in `.ccignore` — including files created *after* launch, which no bind mount can cover. Committed placeholders (`.env.example`, `.env.sample`, …) stay readable.
 - **Host-executed config is guarded.** The real boundary isn't the container — it's what the *host* runs later. `.git/config` is content-validated on write (a new `core.hooksPath`, `core.sshCommand`, `alias.*`, `filter.*.clean`, or `include` is refused; `git remote add` and `push -u` still work). `.vscode/`, `.devcontainer/`, `.envrc`, git hooks and submodule/worktree equivalents are read-through, write-denied. A pre-commit hook keeps redacted files out of history.
 - **The clipboard only goes one way.** The host Wayland socket is proxied, not handed over: clipboard *reads* pass (so image paste works), every clipboard *write* is refused — a write is host code execution at your next terminal paste. macOS gets the same asymmetry via a `pbpaste` bridge.
-- **Projects can't read each other.** Each project gets its own config dir (`~/.claude-sandbox/<slug>/`) — transcripts, prompt history, jobs and pasted content are private per project. One login token, shared read-only, serves them all.
+- **Projects can't read each other, and `~/.claude` stays stock.** cc keeps your canonical `~/.claude`/`~/.claude.json` untouched and assembles each container from only *this* project's slice per launch (its transcripts, prompt history and `.claude.json` entry), merging changes back out on exit. So a plain host `claude` and `cc` share one login, one `--resume` list and one history — while no project's box can see another's data.
 - **One container per project, shared by every terminal.** Every terminal `docker exec`s into the same long-lived container, so `/resume`, prompt history and background jobs are shared across tabs. It's torn down only when the last session exits.
 - **Follows your network.** A lightweight watcher keeps the container's DNS in step with the host across wifi/VPN changes — no host-netns sidecar, works behind a per-connection host firewall.
 - **Hardened by default.** `--cap-drop=ALL`, `no-new-privileges`, seccomp, AppArmor, no Docker socket, no host block devices. The default command is `claude --dangerously-skip-permissions` — safe *because* of the box.
@@ -101,10 +101,9 @@ Every design decision and its rationale lives in [`CLAUDE.md`](CLAUDE.md).
 git clone https://github.com/amerkay/keep-it-in-your-box.git
 cd keep-it-in-your-box
 
-# One-time migration to per-project sessions (required before first launch).
-# Dry-run first — it prints every copy / write / delete before you commit.
-./migrate-sessions.sh
-./migrate-sessions.sh --apply
+# No setup step: cc keeps your ~/.claude stock and assembles each project's isolated
+# session from it per launch — so you can switch between plain `claude` and `cc` freely
+# (same login, same --resume transcripts, same history).
 
 # Add both aliases to your shell rc, pointing at the absolute path.
 # kib = the box launcher (kib bash, kib python …); cc = kib claude (launch Claude Code).
@@ -150,16 +149,15 @@ failed too.
 
 <br>
 
-- **Open egress + a shared credential — unless you turn the broker on.** By default the account OAuth token is readable inside the box and egress is unrestricted, so an injected session could exfiltrate it with no host trigger. **Rotate the token if an untrusted session has run.** The opt-in credential broker closes exactly this: it holds a long-lived token host-side and gives the sandbox a placeholder plus an `ANTHROPIC_BASE_URL` pointed at a `cap-drop=ALL` sidecar, which strips the placeholder and injects the real token on the way out — the win holds even with egress wide open.
+- **The credential broker is ON by default, so the token never enters the box.** The broker holds a long-lived token host-side and gives the sandbox a placeholder plus an `ANTHROPIC_BASE_URL` pointed at a `cap-drop=ALL` sidecar, which strips the placeholder and injects the real token on the way out — so even with egress wide open an injected session can't exfiltrate it. A first launch with no token runs the login for you; a headless launch with no token falls back to the pre-broker behaviour (the real credential is exposed to the box — **rotate it if an untrusted session has run that way**). Turn the broker off with `broker = off` in `~/.keep-it-in-your-box/config`, or `CC_BROKER=0`.
 
   ```bash
   cc --broker-login          # mint + store a token (wraps `claude setup-token`); host-only, mode 600
   cc --broker-status         # is it still accepted? never prints the token
   cc --broker-logout         # remove it
-  echo 'broker = on' >> ~/.keep-it-in-your-box/config
   ```
 
-  The brokered credential is deliberately a **static** long-lived token, never `~/.claude-shared/.credentials.json` — Anthropic's subscription refresh tokens are single-use and rotate, so a second process refreshing them logs you out of every other session. Egress itself is still open: a default-deny allowlist conflicts with the sandbox's whole purpose (building untrusted repos that fetch from arbitrary registries).
+  The brokered credential is deliberately a **static** long-lived token, never `~/.claude/.credentials.json` — Anthropic's subscription refresh tokens are single-use and rotate, so a second process refreshing them logs you out of every other session. Egress itself is still open: a default-deny allowlist conflicts with the sandbox's whole purpose (building untrusted repos that fetch from arbitrary registries).
 
   With the broker on, Claude Code's banner reads **"Claude API"** — that's the custom base URL, *not* metered billing. A `setup-token` credential is subscription OAuth, so usage still counts against your Pro/Max plan ([why](docs/design-notes/credential-broker.md#the-claude-api-banner-is-transport-not-metered-billing)).
 

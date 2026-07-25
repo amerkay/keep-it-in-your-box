@@ -11,6 +11,24 @@ that reference this.
 
 ## Security posture
 
-Hardened against escape: seccomp, AppArmor (`docker-default`), `--cap-drop=ALL` (SETUID/SETGID/CHOWN/DAC_OVERRIDE/FOWNER added back for the entrypoint), `no-new-privileges`, PID isolation, no Docker socket, no host block devices, no writable `/proc/sys`. Read-only mounts for host-executable paths (`.git/hooks`, `~/.claude-shared/hooks`) — neither sufficient alone; see [redaction-config-guard.md](redaction-config-guard.md#host-executed-config-guard) and `validate_shared_settings`. Cross-project isolation: a container mounts only its own `~/.claude-sandbox/<slug>/`; `.claude.json` pruned per project (globals + this project's entry incl. `mcpServers`; `githubRepoPaths` scoped).
+Hardened against escape: seccomp, AppArmor (`docker-default`), `--cap-drop=ALL` (SETUID/SETGID/CHOWN/DAC_OVERRIDE/FOWNER added back for the entrypoint), `no-new-privileges`, PID isolation, no Docker socket, no host block devices, no writable `/proc/sys`. Read-only nested binds for host-executable paths (`.git/hooks`, and the canonical `~/.claude` assets `plugins/ skills/ agents/ commands/ hooks/`) — neither sufficient alone; see [redaction-config-guard.md](redaction-config-guard.md#host-executed-config-guard) and `validate_shared_settings`. Cross-project isolation: `~/.claude` stays canonical and is never mounted whole; a container gets only *this* project's assembled slice (its `projects/<slug>` transcripts, filtered `history.jsonl`, and a `.claude.json` scoped to globals + this project's entry incl. `mcpServers`; `githubRepoPaths` scoped) — merged back out on exit.
 
-**Accepted risks:** open egress + the shared OAuth token (audit H3/H4) — the token can't be made unreadable (Claude needs it) and a default-deny allowlist conflicts with building untrusted repos; **rotate the token if an untrusted session has run** (the [broker](credential-broker.md), when on, removes the token from the sandbox entirely). Wayland socket mounted but proxied. `host.docker.internal` routable. Project dir writable by design. DNS sync mounts `/run/systemd/resolve` `:ro` with Varlink sockets shadowed by `/dev/null`.
+**Accepted risks:** open egress + the shared OAuth token (audit H3/H4) — the token can't be made unreadable (Claude needs it) and a default-deny allowlist conflicts with building untrusted repos; **rotate the token if an untrusted session has run** (the [broker](credential-broker.md), when on, removes the token from the sandbox entirely). Wayland socket mounted but proxied. `host.docker.internal` routable. Project dir writable by design. DNS sync mounts `/run/systemd/resolve` `:ro` with Varlink sockets shadowed by `/dev/null`. **`chrome-devtools-mcp`'s browser runs with Chrome's own inner sandbox off** — see below.
+
+## Chrome: why `--no-sandbox`, and why only for that one MCP
+
+Chrome's Linux sandbox needs an unprivileged user namespace; under `--cap-drop=ALL` + the default
+seccomp profile `unshare -U` returns EPERM, so an unwrapped launch dies (`Target.setDiscoverTargets:
+Target closed`). Restoring it would mean loosening the container's seccomp to permit namespace
+creation — which hands *the agent* a userns primitive, strictly worse for this box's threat model.
+So the inner sandbox is traded away; Docker stays the boundary.
+
+**Keep the scope narrow.** The fix is an `npx` shim written by `docker-entrypoint.sh` that adds the
+flags only when `chrome-devtools-mcp` is the package being run, so the plugin's stock, unmodified
+manifest (`{"command":"npx","args":["chrome-devtools-mcp@…"]}`) works with no per-project MCP
+config. It appends nothing the caller already passed, so `--headless=false` / a custom
+`--executable-path` still win. **Do not "generalise" this into `--no-sandbox` wrapper scripts over
+`google-chrome`/`google-chrome-stable` in the Dockerfile** — that was tried, is redundant with the
+shim (verified: the shim alone makes the stock plugin launch a page), needs a full image rebuild,
+and silently disarms every *other* Chrome caller too. `/dev/shm` is 64 MB here, but
+chrome-devtools-mcp's vendored puppeteer already passes `--disable-dev-shm-usage`.

@@ -25,9 +25,11 @@ Enforced by a FUSE layer over the project. Deliberate policy, not bugs — **not
   `.env.dist`) are exempt and work normally — they hold no secrets.
 - **Protected** (`.git/config`, `.git/hooks`, `.vscode/`, `.devcontainer/`, `.idea/`, `.envrc`, and submodule/worktree equivalents) — reads work, writes fail EACCES. The **host** executes these later, so writing one is host code execution from inside the sandbox. `git config` is content-checked: ordinary keys are fine; `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`, `core.pager`, `alias.*`, `filter.*.clean` are refused.
 
-- **Shared assets** (`~/.claude-shared/CLAUDE.md`, `hooks/`, `plugins/`, `skills/`, `agents/`,
-  `commands/`) — read-only. They auto-load in **every** project's next session, so one poisoned
-  repo would pivot into all of them. Skills, agents, commands and plugins you create or install
+- **Shared assets** (`~/.claude-shared/hooks/`, `plugins/`, `skills/`, `agents/`, `commands/`)
+  — read-only. They auto-load in **every** project's next session, so one poisoned
+  repo would pivot into all of them. (This CLAUDE.md is *not* one of them: cc assembles it into
+  `$CLAUDE_CONFIG_DIR` per launch, so edits to it are transient — put durable memory in the
+  user's own `~/.claude/CLAUDE.md` via a host terminal.) Skills, agents, commands and plugins you create or install
   in-session land in `$CLAUDE_CONFIG_DIR` and work normally — that is the intended path, not a
   fallback. On EACCES here, stop and print exactly:
 

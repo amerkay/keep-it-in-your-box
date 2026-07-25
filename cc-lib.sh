@@ -7,7 +7,8 @@
 # `cc` itself keeps the launch flow: identity, locks, container lifecycle, exec.
 #
 # Runs in cc's shell, so it shares cc's `set -euo pipefail` and its globals:
-#   SCRIPT_DIR IMAGE_NAME PWD CLAUDE_SHARED
+#   SCRIPT_DIR IMAGE_NAME PWD
+#   CLAUDE_HOME CLAUDE_JSON SESSION_BASE SHARED_BASE   (canonical ~/.claude + per-launch scratch)
 #   FUSE_CNAME FUSE_ROOT
 #   PROJECT_MOUNT_SRC PROJECT_MOUNT_OPTS ARGS
 #
@@ -79,35 +80,33 @@ check_for_updates() {
     echo "   To cancel: kill -TERM -$(cat "$BUILD_PID")" >&2
 }
 
-# ── Shared sandbox policy (secrets hard-stop, .ccignore rules) ────
-# Kept in a marker-delimited block at the top of the shared CLAUDE.md, so it always
-# tracks this repo's shared-CLAUDE.md while anything the user (or Claude's `#`
-# shortcut) writes below the block survives.
-sync_shared_claude_md() {
+# ── Sandbox policy CLAUDE.md (secrets hard-stop, .ccignore rules) ─
+# The sandbox policy loads ONLY in-box: it is assembled fresh each launch into this
+# session's config dir as `policy block + the user's canonical ~/.claude/CLAUDE.md`.
+# Canonical ~/.claude/CLAUDE.md stays purely the user's — a plain host `claude` never
+# sees the policy block — so switching between host claude and cc is seamless.
+# Regenerated (not merge-preserved): the user's `#` memory lives in canonical and flows
+# in every launch; anything written to the in-box copy is transient by design.
+assemble_sandbox_claude_md() {
     [ -f "$SCRIPT_DIR/shared-CLAUDE.md" ] || return 0
-    local md="$CLAUDE_SHARED/CLAUDE.md" rest=""
+    local md="$SESSION_BASE/CLAUDE.md"
     local b="<!-- >>> cc sandbox policy (auto-synced by cc — do not edit this block) >>> -->"
     local e="<!-- <<< cc sandbox policy (auto-synced by cc) <<< -->"
-
-    [ -f "$md" ] && rest="$(awk -v b="$b" -v e="$e" '
-        $0==b {skip=1; next} $0==e {skip=0; next} !skip {print}' "$md")"
     {
         printf '%s\n' "$b"
         cat "$SCRIPT_DIR/shared-CLAUDE.md"
         printf '%s\n' "$e"
-        # `if`, not `[ -n "$rest" ] && printf`: an AND-list as the group's last command
-        # makes the whole group exit 1 when rest is empty (no user memory yet), which
-        # would skip the `&& mv` below and strand the .cc.tmp file.
-        if [ -n "$rest" ]; then printf '%s\n' "$rest"; fi
+        # The user's own memory, verbatim, below the policy block. Absent on a fresh install.
+        if [ -f "$CLAUDE_HOME/CLAUDE.md" ]; then cat "$CLAUDE_HOME/CLAUDE.md"; fi
     } > "$md.cc.tmp" && mv "$md.cc.tmp" "$md"
 }
 
 # ── Shared settings.json: refuse host-reaching keys ───────────────
-# ~/.claude-shared/settings.json is symlinked into EVERY project and the entrypoint folds
-# in-session edits back into it, so one poisoned session reaches every other project's next
-# session (audit H5). The file has to stay writable — /config and theme changes are normal
-# — so the control lives here instead: cc runs on the host, before any container reads it,
-# on both the create and the attach path.
+# ~/.claude/settings.json is bound writable into EVERY project's box and the entrypoint folds
+# in-session edits back into it (through to canonical), so one poisoned session reaches every
+# other project's next session AND the host claude (audit H5). The file has to stay writable —
+# /config and theme changes are normal — so the control lives here instead: cc runs on the
+# host, before any container reads it, on both the create and the attach path.
 #
 # Refused are the key classes whose value is a command the agent runs, or which redirect
 # auth traffic. Inline hooks[].command is the one that matters most: it is exactly how a
@@ -117,15 +116,13 @@ sync_shared_claude_md() {
 # Prevention at launch, not at write: a poisoned file is caught before the *next* session
 # loads it, which is the propagation step. Broken JSON warns rather than refuses (Claude
 # ignores an unparseable settings file anyway); an unreadable one fails closed.
-validate_shared_settings() {
-    local f="$CLAUDE_SHARED/settings.json"
-    [ -e "$f" ] || return 0
-    command -v python3 >/dev/null 2>&1 || {
-        warn "python3 not found on the host — cannot validate the shared settings.json."
-        return 0
-    }
-    local bad
-    bad="$(python3 - "$f" <<'PY'
+
+# Scan one settings.json for keys whose value is a command Claude runs, or which redirect auth
+# traffic. Prints the offending "key = value" lines. Exit: 0 clean, 1 bad, 3 not JSON, 4
+# unreadable. Shared by the launch-time gate on canonical (validate_shared_settings) and the
+# exit-time gate on this session's copy (merge_out_shared_settings).
+_settings_bad_keys() {
+    python3 - "$1" <<'PY'
 import json, sys
 
 # key path -> why it is refused
@@ -167,32 +164,43 @@ if isinstance(hooks, dict):
 print("\n".join(bad))
 sys.exit(1 if bad else 0)
 PY
-)" && return 0
+}
+
+validate_shared_settings() {
+    local f="$CLAUDE_HOME/settings.json"
+    [ -e "$f" ] || return 0
+    command -v python3 >/dev/null 2>&1 || {
+        warn "python3 not found on the host — cannot validate the shared settings.json."
+        return 0
+    }
+    local bad
+    bad="$(_settings_bad_keys "$f")" && return 0
 
     case "$?" in
-        3) warn "~/.claude-shared/settings.json is not valid JSON — skipping validation." \
+        3) warn "~/.claude/settings.json is not valid JSON — skipping validation." \
                 "Claude ignores an unparseable settings file, so this is not fatal."
            return 0 ;;
-        4) die "cannot read ~/.claude-shared/settings.json. Refusing to launch:" \
-               "an unreadable shared settings file cannot be checked for keys that" \
+        4) die "cannot read ~/.claude/settings.json. Refusing to launch:" \
+               "an unreadable settings file cannot be checked for keys that" \
                "run commands on your behalf." ;;
     esac
 
     printf '\n' >&2
-    die "~/.claude-shared/settings.json contains a key that runs a command or" \
+    die "~/.claude/settings.json contains a key that runs a command or" \
         "redirects your credentials:" \
         "" \
         "$(printf '%s\n' "$bad" | sed 's/^/    /')" \
         "" \
-        "A sandboxed session can write this file, and it loads in EVERY project." \
-        "Remove the key, then relaunch:" \
-        "    \$EDITOR ~/.claude-shared/settings.json"
+        "A sandboxed session can write this file, and it loads in EVERY project (and the" \
+        "host claude). Remove the key, then relaunch:" \
+        "    \$EDITOR ~/.claude/settings.json"
 }
 
 # ── Global-config pins (.claude.json) ────────────────────────────
 # Keys Claude reads from its *global config* rather than settings.json. That file is
-# per-project here, and claude-json.seed only lands on a project's FIRST run — so a pin
-# added later never reaches a project that already exists. Re-assert them every launch.
+# assembled per-project from canonical each cold start (scope-in), and Claude may rewrite it
+# wholesale mid-session — so re-assert the pins every launch. They stay in-box: merge-out
+# pushes back only the projects[path] subtree, never these global keys, so canonical stays pure.
 #
 # leftArrowOpensAgents=false: from a foreground session `←` means "background this
 # session", not "go back". With a turn in flight it aborts the running Workflow and
@@ -719,7 +727,7 @@ stop_clipboard_bridge() {
 }
 
 # ── Credential broker: keep the real token OUT of the sandbox ─────
-# The agent used to get ~/.claude-shared/.credentials.json mounted read-write, so a
+# The agent used to get the real ~/.claude/.credentials.json mounted read-write, so a
 # compromised session could exfiltrate the account OAuth token under open egress (audit
 # H3/H4 — the single widest hole). Instead: a host-side broker sidecar holds the real
 # token; the agent gets a base-URL env var (ANTHROPIC_BASE_URL) pointed at the broker, a
@@ -733,7 +741,7 @@ stop_clipboard_bridge() {
 # ── THE BROKERED CREDENTIAL IS STATIC ─────────────────────────────────────────
 # It is a long-lived token minted by `cc --broker-login` (which wraps `claude setup-token`)
 # and stored HOST-ONLY at ~/.keep-it-in-your-box/claude-token, mounted READ-ONLY into the
-# broker. It is NOT ~/.claude-shared/.credentials.json, and the broker never writes any
+# broker. It is NOT ~/.claude/.credentials.json, and the broker never writes any
 # credential. Brokering the live credentials file logged the account out: Anthropic's
 # subscription refresh tokens are single-use and rotate, so the broker's refresh loop
 # invalidated the token family for the host CLI and every other project's sidecar, and the
@@ -746,12 +754,18 @@ stop_clipboard_bridge() {
 # container→container works under Portmaster). Net-new infra — nothing else here uses a
 # user-defined network.
 #
-# OPT-IN, off by default: enable with `broker = on` in ~/.keep-it-in-your-box/config, or
-# CC_BROKER=1; CC_BROKER=0 forces it off. When off, nothing changes — the real credential is
-# mounted exactly as before.
+# ON BY DEFAULT: keeping the real token out of the sandbox is the safe default for a solo
+# user. Disable with `broker = off` in ~/.keep-it-in-your-box/config, or CC_BROKER=0;
+# CC_BROKER=1 forces it on. When off (or when on but there is no token and the login is
+# declined/headless), the real ~/.claude/.credentials.json is exposed to the box instead —
+# see start_broker's fallback. The static broker token never enters the box either way.
+# Stock host `claude` is unaffected: it reads its own ~/.claude/.credentials.json.
 broker_wanted() {
     case "${CC_BROKER:-}" in 1) return 0 ;; 0) return 1 ;; esac
-    [ "${KIB_BROKER:-off}" = on ]
+    # Any recognised "off" spelling disables it; anything else (including a typo) keeps the
+    # SAFE default on. `!= off` alone would have silently enabled the broker for `broker = false`.
+    case "${KIB_BROKER:-on}" in off|Off|OFF|0|no|No|NO|false|False|FALSE) return 1 ;; esac
+    return 0
 }
 
 # Host-only token store, alongside ~/.keep-it-in-your-box/config and never bind-mounted into
@@ -887,17 +901,26 @@ start_broker_notifier() {
 start_broker() {
     broker_wanted || return 0
     if ! broker_has_token; then
-        # Fail hard rather than silently falling back: "carry on without the broker" means
-        # mounting the real credential into the container, which is the exact exposure the
-        # user opted out of. Refusing is the safe direction, and the fix is one command.
-        die "the credential broker is enabled, but there is no token at" \
-            "  $BROKER_TOKEN_FILE" \
-            "" \
-            "Mint one on the host (it never enters the sandbox):" \
-            "  cc --broker-login" \
-            "" \
-            "Or set CC_BROKER=0 for this launch to run WITHOUT the broker (the pre-broker" \
-            "behaviour: the real token is mounted into the container)."
+        # Broker is on by default, so a first launch with no token is the common case — not an
+        # error. Seamless path: if interactive, run the one-time login here (it wraps `claude
+        # setup-token`; the static token lands host-only). Subshell isolates provider_login's
+        # own `exit` on aborted/empty input, so a declined login falls through to the fallback
+        # instead of killing the launch; the token file it writes persists past the subshell.
+        if [ -t 0 ]; then
+            echo "🔐 credential broker is on, but no token is stored yet." >&2
+            echo "   Starting a one-time login so the real token never enters the sandbox…" >&2
+            echo >&2
+            ( provider_login claude ) || true
+            echo >&2
+        fi
+        if ! broker_has_token; then
+            # Headless, or the login was declined: fall back to the pre-broker path. Because
+            # BROKER_ENABLED stays 0, stage_credential exposes the real ~/.claude/.credentials.json
+            # to the box. The STATIC broker token still never enters the sandbox.
+            warn "credential broker: no token — this session uses the real credential instead." \
+                 "Mint a broker token any time so the real one stays host-only: cc --broker-login"
+            return 0
+        fi
     fi
     _write_broker_config                       # creates $BROKER_OUT / $BROKER_DIR (chmod 700)
     rm -f "$BROKER_OUT/ready" 2>/dev/null || true
@@ -1035,7 +1058,7 @@ start_hosted_mcp() {
 inject_brokered_mcps() {
     [ "$BROKER_ENABLED" = 1 ] || return 0
     command -v python3 >/dev/null 2>&1 || return 0
-    local cfg="$SESSION_DIR/.claude.json"
+    local cfg="$SESSION_BASE/.claude.json"
 
     # Build the desired entry set as `name<TAB>type<TAB>url` lines from the registry.
     local specs="" id delivery kind basename
@@ -1090,10 +1113,11 @@ PY
 #   1. the base URL, so the SDK talks to the broker instead of api.anthropic.com;
 #   2. a PLACEHOLDER token in CLAUDE_CODE_OAUTH_TOKEN, which takes precedence over the
 #      credentials file, so the agent authenticates through the broker;
-#   3. a synthetic .credentials.json shadowing the real one. (2) alone would leave the real
-#      file readable inside $CLAUDE_SHARED, which is the whole exposure. It lands AFTER the
-#      $CLAUDE_SHARED mount so it overlays the file inside it (Docker applies mounts
-#      parent-first by destination depth).
+#   3. a synthetic .credentials.json shadowing the real one. (2) alone would leave a real
+#      file readable inside the shared-assembly dir, which is the whole exposure. It lands
+#      AFTER the $SHARED_BASE mount so it overlays the file inside it (Docker applies mounts
+#      parent-first by destination depth). When the broker is on, stage_credential copies no
+#      real credential in, so this synthetic file is all the box ever sees.
 add_broker_env_args() {
     [ "$BROKER_ENABLED" = 1 ] || return 0
     # Loop the sidecar-served routes. base_url_env rows (claude/codex/gemini) need the agent's
@@ -1117,6 +1141,119 @@ add_broker_env_args() {
         # Only claude shadows a real credential file; codex/gemini have no file to overlay.
         [ -n "$CCB_PLACEHOLDER_CONTAINER_PATH" ] \
             && ARGS+=( -v "$BROKER_OUT/$id.cred.json:$CCB_PLACEHOLDER_CONTAINER_PATH:ro" )
+    done
+}
+
+# ── Fallback credential (broker off, or on-but-no-token) ──────────
+# When the broker is NOT shadowing a synthetic file, in-sandbox Claude needs the real
+# ~/.claude/.credentials.json to authenticate (and refresh) — the pre-broker behaviour. COPY it
+# into the shared-assembly DIRECTORY, never a single-file bind: rename(2) onto a single-file
+# bind fails EBUSY, and a torn in-place write to a rotating OAuth credential logs the account
+# out (docs/design-notes/credential-broker.md). $SHARED_BASE is a real dir, so Claude's atomic
+# rename works; the copy is folded back to canonical on exit only if it changed. The STATIC
+# broker token is never involved here. The staged/not-staged state is recorded in $CRED_WITNESS
+# (a host-side file, see cc) so ANY terminal can fold back, not just the one that staged.
+stage_credential() {
+    if [ "$BROKER_ENABLED" = 1 ]; then
+        # Broker shadows a synthetic file — drop any real credential a previous broker-off
+        # session left in this scratch dir so none lingers (shadowed) under the synthetic mount.
+        rm -f "$SHARED_BASE/.credentials.json" "$CRED_WITNESS" 2>/dev/null || true
+        return 0
+    fi
+    # Mark the fallback path BEFORE the copy: even with nothing to copy (never logged in), an
+    # in-box login writes the credential here and still has to be folded back out on exit.
+    : > "$CRED_WITNESS" 2>/dev/null || true
+    [ -f "$CLAUDE_HOME/.credentials.json" ] || return 0    # never logged in — nothing to copy
+    # Unlink first, same as stage_shared_settings: the broker-on path binds a synthetic file
+    # here, so switching the broker off leaves a root-owned Docker mountpoint that cp cannot
+    # overwrite — the symptom would be a login prompt with no explanation.
+    rm -f "$SHARED_BASE/.credentials.json" 2>/dev/null || true
+    ( umask 077; cp "$CLAUDE_HOME/.credentials.json" "$SHARED_BASE/.credentials.json" ) \
+        || warn "could not stage the real credential into the session (login may be needed in-box)."
+}
+
+# Fold a fallback-staged credential back to canonical on exit, if an in-box OAuth refresh
+# rewrote it. Under the caller's flock on ~/.claude.json.lock. No-op unless staged/unchanged.
+merge_out_credential() {
+    [ -f "${CRED_WITNESS:-}" ] || return 0
+    local src="$SHARED_BASE/.credentials.json" dst="$CLAUDE_HOME/.credentials.json"
+    [ -f "$src" ] || return 0
+    cmp -s "$src" "$dst" 2>/dev/null && return 0           # unchanged — don't touch canonical
+    ( umask 077; cp "$src" "$dst.cc.tmp" ) && mv -f "$dst.cc.tmp" "$dst" \
+        || { rm -f "$dst.cc.tmp" 2>/dev/null || true
+             warn "could not fold the refreshed credential back to ~/.claude/.credentials.json."; }
+}
+
+# ── Shared settings: copy in, validate, fold out ──────────────────
+# settings.json/keybindings.json used to be bind-mounted rw straight from canonical ~/.claude,
+# so a sandboxed session could write the exact file a HOST `claude` later loads — and
+# `hooks[].command` / `apiKeyHelper` in it are host code execution, the very class the
+# protected-path rules exist to stop. validate_shared_settings only runs at the NEXT launch, so
+# it neither blocked the write nor protected a host `claude` run in between.
+#
+# So the box gets a COPY instead. It lands in $SHARED_BASE, which is already mounted as a whole
+# directory — no single-file bind, so Claude's atomic rename works (the EBUSY footgun that made
+# the credential dir-backed) — and on exit the copy is vetted host-side before it may re-enter
+# canonical. Same shape as stage_credential/merge_out_credential. In-session `/config` edits
+# still persist; what cannot survive is a settings.json that grew a command-running key.
+stage_shared_settings() {
+    local f
+    for f in settings.json keybindings.json; do
+        # Always unlink first, never cp over what is there. Two reasons: a file deleted
+        # canonically since the last launch must not be resurrected by a stale copy, and — the
+        # one that bit — these used to be single-file bind mounts, so Docker created the
+        # mountpoint under $SHARED_BASE itself, ROOT-owned and empty. cp onto that fails EACCES
+        # (box starts from defaults, /config read-only, and the empty file is then unvettable on
+        # the way out); unlink succeeds, because $SHARED_BASE is ours. Fresh file also means the
+        # copy is 0600 instead of inheriting whatever mode was already there.
+        rm -f "$SHARED_BASE/$f" 2>/dev/null || true
+        [ -f "$CLAUDE_HOME/$f" ] || continue
+        ( umask 077; cp "$CLAUDE_HOME/$f" "$SHARED_BASE/$f" ) \
+            || warn "could not stage $f into this session — the box starts from defaults."
+    done
+}
+
+# Fold this session's settings/keybindings back to canonical, under the caller's flock on
+# ~/.claude.json.lock. A settings.json that gained a command-running key is REFUSED: canonical
+# stays untouched and the rejected copy is left in $SHARED_BASE, named, for inspection.
+# keybindings.json has no command-valued keys, so it folds back unvetted.
+merge_out_shared_settings() {
+    local f src bad rc
+    for f in settings.json keybindings.json; do
+        src="$SHARED_BASE/$f"
+        [ -f "$src" ] || continue
+        cmp -s "$src" "$CLAUDE_HOME/$f" 2>/dev/null && continue      # unchanged — leave canonical alone
+        if [ "$f" = settings.json ]; then
+            # No vet, no fold-back — an unvetted settings.json is exactly what this closes.
+            command -v python3 >/dev/null 2>&1 || {
+                warn "python3 not found on the host — cannot vet this session's settings.json," \
+                     "so it was NOT merged back into ~/.claude/settings.json."
+                continue
+            }
+            rc=0; bad="$(_settings_bad_keys "$src")" || rc=$?
+            case "$rc" in
+                0) ;;
+                1) # Move it aside, don't just name it in place: the next launch re-stages
+                   # canonical over $src, so a path we told the user to go and look at would
+                   # be gone by the time they looked. Not farmed by the entrypoint (its asset
+                   # list is explicit), so the extra file is inert.
+                   mv -f "$src" "$src.rejected" 2>/dev/null || true
+                   warn "this session's settings.json added a key that runs a command or" \
+                        "redirects your credentials:" \
+                        "" \
+                        "$(printf '%s\n' "$bad" | sed 's/^/    /')" \
+                        "" \
+                        "NOT merged back — ~/.claude/settings.json is unchanged. The rejected" \
+                        "copy is kept at $src.rejected if you want to look at it."
+                   continue ;;
+                *) warn "this session's settings.json is unreadable or not valid JSON —" \
+                        "not merging it back into ~/.claude/settings.json."
+                   continue ;;
+            esac
+        fi
+        ( umask 077; cp "$src" "$CLAUDE_HOME/$f.cc.tmp" ) && mv -f "$CLAUDE_HOME/$f.cc.tmp" "$CLAUDE_HOME/$f" \
+            || { rm -f "$CLAUDE_HOME/$f.cc.tmp" 2>/dev/null || true
+                 warn "could not fold $f back to ~/.claude/$f."; }
     done
 }
 
@@ -1354,9 +1491,13 @@ broker_status() { provider_status; }
 # credential lands in the sandbox, so the agent can read it (and it's already on its way to the
 # API). warn_inline_mcp_secrets flags it on every launch (WARN only, never blocks); mcp_adopt
 # migrates it into the broker. Neither ever prints the secret value.
+# Both read CANONICAL ~/.claude.json, not the session copy: the session copy is rebuilt from
+# canonical on every cold start, so a warning would be raised off a stale file and — worse —
+# mcp_adopt's strip would be silently undone by the next launch's re-assembly, letting the
+# inline secret back into the box after cc reported it removed.
 warn_inline_mcp_secrets() {
     command -v python3 >/dev/null 2>&1 || return 0
-    CC_MCP_JSON="$PWD/.mcp.json" CC_CLAUDE_JSON="$SESSION_DIR/.claude.json" \
+    CC_MCP_JSON="$PWD/.mcp.json" CC_CLAUDE_JSON="$CLAUDE_JSON" \
     CC_WARN_BROKER_PY="$SCRIPT_DIR/cc-broker.py" \
         python3 - <<'PY' || true
 import importlib.util, json, os, sys
@@ -1366,7 +1507,7 @@ import importlib.util, json, os, sys
 _spec = importlib.util.spec_from_file_location("ccbroker", os.environ["CC_WARN_BROKER_PY"])
 ccb = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(ccb)
 files = [("project .mcp.json",  os.environ.get("CC_MCP_JSON", "")),
-         ("session .claude.json", os.environ.get("CC_CLAUDE_JSON", ""))]
+         ("~/.claude.json", os.environ.get("CC_CLAUDE_JSON", ""))]
 for label, path in files:
     if not path:
         continue
@@ -1407,7 +1548,7 @@ mcp_adopt() {
     _broker_need_python
     CC_ADOPT_NAME="$name" CC_KIB_DIR="$KIB_DIR" CC_BROKER_PY="$SCRIPT_DIR/cc-broker.py" \
     CC_PROVIDERS_DIR="$PROVIDERS_DIR" \
-    CC_MCP_JSON="$PWD/.mcp.json" CC_CLAUDE_JSON="$SESSION_DIR/.claude.json" \
+    CC_MCP_JSON="$PWD/.mcp.json" CC_CLAUDE_JSON="$CLAUDE_JSON" \
         python3 - <<'PY' || return $?
 import importlib.util, json, os, sys
 name    = os.environ["CC_ADOPT_NAME"]

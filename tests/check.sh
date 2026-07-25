@@ -25,13 +25,13 @@ warn() { printf '  %s!%s %s\n' "$Y" "$N" "$1"; [ -n "${2:-}" ] && printf '      
 sec()  { printf '\n%s%s%s\n' "$B" "$1" "$N"; }
 
 # Host-side (run on the user's Mac/Linux): must obey the portability contract.
-HOST_BASH=(cc cc-lib.sh cc-portable.sh sleep-guard.sh build-bg.sh migrate-sessions.sh tests/check.sh)
+HOST_BASH=(cc cc-lib.sh cc-portable.sh sleep-guard.sh build-bg.sh tests/check.sh)
 # Host-side POSIX sh.
 HOST_SH=(clipboard-bridge.sh)
 # Container-side (always Linux): linted for syntax only, exempt from the portability contract.
 CONT_SH=(docker-entrypoint.sh entrypoint-fuse.sh resolv-sync.sh)
 CONT_BASH=(tests/security-test.sh)
-PY=(ccignore-fuse.py wayland-guard.py ccignore-precommit.py cc-broker.py tests/broker-test.py)
+PY=(ccignore-fuse.py wayland-guard.py ccignore-precommit.py cc-broker.py claude-config-scope.py tests/broker-test.py tests/config-scope-test.py)
 
 # ── 1. syntax + shellcheck ───────────────────────────────────────
 sec "Syntax (bash -n / sh -n)"
@@ -180,6 +180,16 @@ else
     bad "tests/broker-test.py" "$(printf '%s\n' "$out" | grep -E '^FAIL|Error|Traceback' | head -6)"
 fi
 
+# ── 4a. config-scope tests (per-project ~/.claude assembly seam) ──
+# Pure-stdlib, against a fake $HOME: scope-in exposes only this project, merge-out writes only
+# its subtree (fail-closed on corruption), history filters/dedups, classify flags drift.
+sec "Config-scope tests (claude-config-scope.py)"
+if out="$(python3 tests/config-scope-test.py 2>&1)"; then
+    ok "tests/config-scope-test.py — scope-in/merge-out/history/classify are project-isolated"
+else
+    bad "tests/config-scope-test.py" "$(printf '%s\n' "$out" | grep -E '✗|FAIL|Error|Traceback' | head -8)"
+fi
+
 # ── 4b. broker bash wiring (cc / cc-lib.sh) ──────────────────────
 # The Python broker is covered above; these guard the SHELL glue that only ever ran manually.
 sec "Broker bash wiring (cc / cc-lib.sh)"
@@ -235,7 +245,7 @@ esac
 sec "MCP brokering (registry / enabled / inject / adopt / detector)"
 
 _mcp_tmp="$(mktemp -d)"
-mkdir -p "$_mcp_tmp/kib" "$_mcp_tmp/sess" "$_mcp_tmp/proj"
+mkdir -p "$_mcp_tmp/kib" "$_mcp_tmp/sess" "$_mcp_tmp/proj" "$_mcp_tmp/claude"
 # Run a snippet with cc-lib.sh sourced and a fake KIB_DIR/SESSION_DIR; cwd is the fake project.
 _mcp_run() {
     (
@@ -243,7 +253,12 @@ _mcp_run() {
         export SCRIPT_DIR="$REPO_ROOT" KIB_CONFIG="$_mcp_tmp/kib/config"
         . "$REPO_ROOT/cc-portable.sh" >/dev/null 2>&1
         . "$REPO_ROOT/cc-lib.sh"
-        export SESSION_DIR="$_mcp_tmp/sess"
+        # cc-lib.sh reads $SESSION_BASE; the fixtures below write via $SESSION_DIR — point both
+        # at the same dir so the function under test reads exactly what the fixture wrote.
+        export SESSION_BASE="$_mcp_tmp/sess" SESSION_DIR="$_mcp_tmp/sess"
+        # Canonical ~/.claude stand-ins: mcp_adopt / warn_inline_mcp_secrets read the CANONICAL
+        # .claude.json (the session copy is rebuilt from it every cold start). Fake, never real.
+        export CLAUDE_HOME="$_mcp_tmp/claude" CLAUDE_JSON="$_mcp_tmp/claude.json"
         cd "$_mcp_tmp/proj" || exit 1
         eval "$1"
     )
@@ -410,6 +425,33 @@ rm -rf "$_mcp_tmp"
 
 # ── 5. regression guards for recent fixes ────────────────────────
 sec "Regression guards"
+
+# settings.json must never be bind-mounted from canonical ~/.claude: it is the file a HOST
+# `claude` loads, and hooks[].command / apiKeyHelper in it are host code execution from inside
+# the sandbox. The box gets a vetted COPY in $SHARED_BASE instead (stage_shared_settings →
+# merge_out_shared_settings). Guard the mount line and the fold-back gate together.
+# Match on the BIND rather than the filename: the old code took the name from a loop variable
+# ($_f), so grepping for "settings.json:" silently never fired. Allow exactly the two legitimate
+# $CLAUDE_HOME binds — this project's transcripts, and the ro-by-default asset loop ($_entry) —
+# and treat any other as the regression.
+stray_home_binds="$(grep -E '^[[:space:]]*ARGS\+=\(-v "\$CLAUDE_HOME/' cc \
+    | grep -vE '\$CLAUDE_HOME/projects/\$SLUG:' | grep -vE '\$CLAUDE_HOME/\$_entry:' || true)"
+if [ -n "$stray_home_binds" ]; then
+    bad "cc bind-mounts canonical ~/.claude content into the container: $(printf '%s' "$stray_home_binds" | tr -s ' ')" \
+        "a sandboxed session could then write the settings.json the host claude loads"
+elif ! grep -q 'merge_out_shared_settings' cc; then
+    bad "merge_out_shared_settings is not called from cc" \
+        "in-session settings edits would silently never reach ~/.claude"
+else
+    ok "settings.json is staged as a vetted copy, never bound from canonical"
+fi
+# The fold-back must refuse an unvettable file rather than fold it unchecked.
+if sed -n '/^merge_out_shared_settings()/,/^}$/p' cc-lib.sh | grep -q 'command -v python3'; then
+    ok "settings fold-back refuses to merge when it cannot vet the file"
+else
+    bad "merge_out_shared_settings folds settings.json back without a python3 vet" \
+        "no vet, no fold-back — otherwise a host without python3 loses the protection"
+fi
 
 # THE logout regression. The broker must never be handed the live credentials file: Anthropic
 # refresh tokens are single-use and rotate, so a broker that reads (let alone refreshes) it

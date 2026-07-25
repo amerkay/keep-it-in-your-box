@@ -265,17 +265,21 @@ for d in skills agents commands plugins hooks; do
         skip "shared $d/ is read-only" "not present"
     fi
 done
-deny "shared CLAUDE.md is read-only" bash -c "echo x >> '$SHARED/CLAUDE.md'"
+# CLAUDE.md is no longer a shared file — cc assembles it (policy + the user's canonical memory)
+# straight into the per-project config dir. Assert the sandbox policy actually loaded in-box.
+_cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude-session}"
+is "sandbox policy is assembled into the in-box CLAUDE.md" "present" \
+   "$(grep -q 'cc sandbox policy' "$_cfg/CLAUDE.md" 2>/dev/null && echo present || echo missing)"
 
 # settings.json is deliberately still writable — locking it would break /config.
 is "settings.json stays writable (/config must work)" "writable" \
    "$([ -w "$SHARED/settings.json" ] && echo writable || echo 'read-only ***')"
-# .credentials.json depends on the broker. Broker OFF (default): the real token is mounted
-# writable so in-sandbox Claude can refresh it. Broker ON: the real token is gone — a read-only
-# SYNTHETIC placeholder shadows it, and the agent authenticates via a placeholder
+# .credentials.json depends on the broker. Broker ON (default): the real token is gone — a
+# read-only SYNTHETIC placeholder shadows it, and the agent authenticates via a placeholder
 # CLAUDE_CODE_OAUTH_TOKEN instead, so read-only is the correct, desired state (never re-mount
 # the real token writable, and never make this writable to "let refresh work" — under the
-# broker nothing refreshes, by design). Detect the broker via ANTHROPIC_BASE_URL.
+# broker nothing refreshes, by design). Broker OFF / no-token fallback: the real credential is
+# copied in writable so in-sandbox Claude can refresh it. Detect the broker via ANTHROPIC_BASE_URL.
 _cred_state="$([ ! -e "$SHARED/.credentials.json" ] || [ -w "$SHARED/.credentials.json" ] && echo writable || echo read-only)"
 if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
     is ".credentials.json is a read-only synthetic placeholder (broker holds a static token)" "read-only" "$_cred_state"
@@ -300,15 +304,79 @@ else
 fi
 rm -rf "$CFG/skills/.sectest" "$CFG/agents/.sectest.md" 2>/dev/null
 
+# ── Cross-project isolation: the assembled config is THIS project only ──────────
+# canonical ~/.claude holds every project's transcripts, ↑ history and .claude.json entries.
+# cc assembles each box from only this project's slice; a leak would surface another project's
+# data here. Compared, NEVER printed (other project paths are PII) — same discipline as .env.
+# On a machine with several projects, the user's real config IS the cross-project fixture: if
+# scoping leaked, other projects' entries would appear below.
+MINE="${HOST_PWD:-$PWD}"
+
+if command -v python3 >/dev/null 2>&1 && [ -f "$CFG/.claude.json" ]; then
+    _proj="$(MINE="$MINE" python3 - "$CFG/.claude.json" <<'PY'
+import json, os, sys
+mine = os.environ["MINE"]
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    print("unreadable"); sys.exit()
+keys = list((data.get("projects") or {}).keys())
+print("ok" if keys == [mine] else ("leak:%d" % len(keys) if mine in keys else "missing"))
+PY
+)"
+    is ".claude.json exposes only this project (no other project entries)" "ok" "$_proj"
+else
+    skip ".claude.json exposes only this project" "no python3 or no .claude.json"
+fi
+
+_slug="$(printf '%s' "$MINE" | sed 's/[^a-zA-Z0-9]/-/g')"
+_others=0
+if [ -d "$CFG/projects" ]; then
+    for _d in "$CFG/projects"/*; do
+        [ -e "$_d" ] || continue
+        [ "$(basename "$_d")" = "$_slug" ] || _others=$((_others + 1))
+    done
+fi
+is "projects/ holds only this project's transcripts (no cross-project dirs)" "0" "$_others"
+
+if [ -f "$CFG/history.jsonl" ] && command -v python3 >/dev/null 2>&1; then
+    _hbad="$(MINE="$MINE" python3 - "$CFG/history.jsonl" <<'PY'
+import json, os, sys
+mine = os.environ["MINE"]; bad = 0
+for line in open(sys.argv[1], errors="replace"):
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        if json.loads(line).get("project") != mine:
+            bad += 1
+    except Exception:
+        pass
+print(bad)
+PY
+)"
+    is "history.jsonl holds only this project's ↑ lines (no cross-project prompts)" "0" "$_hbad"
+else
+    skip "history.jsonl holds only this project's lines" "no history file or python3"
+fi
+
+# The top-level canonical store (which holds every project's data) is not mounted at all — only
+# this project's nested binds are — so a cross-project pivot has nothing to read. Probe every
+# place a wholesale canonical mount would surface: the stock config path AND the shared-assembly
+# dir (canonical's per-project stores must never appear there).
+is "canonical ~/.claude is not mounted into the sandbox" "absent" \
+   "$([ -e "$HOME/.claude/projects" ] || [ -e "$SHARED/projects" ] || [ -e "$SHARED/history.jsonl" ] \
+        && echo present || echo absent)"
+
 # ═════════════════════════════════════════════════════════════════
 section "Shared settings validator (H5) — host-side, exercised here"
 
 if [ -f "$SCRIPT_DIR/cc-lib.sh" ] && command -v python3 >/dev/null; then
-    # Against a throwaway shared dir; the real ~/.claude-shared is never touched.
+    # Against a throwaway ~/.claude; the real canonical config is never touched.
     validator() {   # validator <json> — 0 accepted, 1 refused
         local d; d="$(mktemp -d)"
         printf '%s' "$1" > "$d/settings.json"
-        ( CLAUDE_SHARED="$d"; . "$SCRIPT_DIR/cc-lib.sh"; validate_shared_settings ) >/dev/null 2>&1
+        ( CLAUDE_HOME="$d"; . "$SCRIPT_DIR/cc-lib.sh"; validate_shared_settings ) >/dev/null 2>&1
         local rc=$?; rm -rf "$d"; return $rc
     }
     deny  "refuses apiKeyHelper"            validator '{"apiKeyHelper":"/tmp/x.sh"}'

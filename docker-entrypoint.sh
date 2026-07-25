@@ -159,11 +159,11 @@ chown -h "$HOST_UID:$HOST_GID" "$USER_HOME/.local/bin/claude" 2>/dev/null || tru
 
 # ── Claude config: per-project session dir + shared assets ────────────────
 # cc points Claude at two mounted dirs: CLAUDE_CONFIG_DIR (this project's private state
-# — daemon, sessions, jobs, transcripts, history, .claude.json) and
-# CLAUDE_SECURESTORAGE_CONFIG_DIR (shared across every project — the login token).
-# The shared dir also holds the assets that *should* be common (settings, plugins,
-# skills, agents, commands, hooks, CLAUDE.md), but Claude only looks for those inside
-# CLAUDE_CONFIG_DIR — so symlink them across, making both true at once.
+# — daemon, sessions, jobs, transcripts, history, .claude.json, and the assembled CLAUDE.md
+# placed there directly by cc) and CLAUDE_SECURESTORAGE_CONFIG_DIR (the shared-assembly dir
+# — the login token + the shared assets nest-bound from canonical ~/.claude). Claude only
+# looks for the shared assets inside CLAUDE_CONFIG_DIR, so symlink them across. CLAUDE.md is
+# NOT farmed here: cc assembles it (policy + user memory) straight into CLAUDE_CONFIG_DIR.
 CLAUDE_SESSION_DIR="${CLAUDE_CONFIG_DIR:-}"
 CLAUDE_SHARED_DIR="${CLAUDE_SECURESTORAGE_CONFIG_DIR:-}"
 
@@ -174,8 +174,9 @@ if [ -n "$CLAUDE_SESSION_DIR" ] && [ -d "$CLAUDE_SHARED_DIR" ]; then
 		mkdir -p "$CLAUDE_SHARED_DIR/plugins/marketplaces" 2>/dev/null || true
 	fi
 
-	# Whole-file assets: one symlink each, as before.
-	for entry in settings.json keybindings.json CLAUDE.md hooks; do
+	# Whole-file assets: one symlink each, as before. CLAUDE.md is deliberately absent —
+	# cc assembles it (policy + user memory) straight into CLAUDE_CONFIG_DIR.
+	for entry in settings.json keybindings.json hooks; do
 		src="$CLAUDE_SHARED_DIR/$entry"
 		dst="$CLAUDE_SESSION_DIR/$entry"
 		[ -e "$src" ] || continue
@@ -271,23 +272,80 @@ if [ -n "${HOST_HOME:-}" ] && [ "$HOST_HOME" != "$USER_HOME" ] && [ ! -e "$HOST_
 	ln -sf "$USER_HOME" "$HOST_HOME"
 fi
 
-# Symlink Playwright's Chromium to where Chrome DevTools MCP expects stable Chrome
+# When $HOST_HOME already exists the block above is skipped — and it normally DOES exist,
+# because the project bind mount creates it (/home/kay for /home/kay/myrepo). Plant the one
+# entry that still has to resolve: Claude's plugin state records ABSOLUTE host paths
+# ("installPath": "$HOST_HOME/.claude/plugins/cache/<mp>/<plugin>/<ver>" in
+# installed_plugins.json, "installLocation" in known_marketplaces.json) and both files are
+# farmed from the READ-ONLY shared mount, so Claude cannot rewrite them to container paths.
+# Without this link every host-installed plugin dangles and its MCP servers silently never
+# start — `enabledPlugins: true` in settings.json but nothing in /mcp. Point it at this
+# project's config dir and each recorded path resolves back through the farmed tree.
+# Skipped when $HOST_HOME is our own symlink from above (its /.claude would be the stock
+# config dir Claude looks for by default).
+if [ -n "${HOST_HOME:-}" ] && [ "$HOST_HOME" != "$USER_HOME" ] && [ -d "$HOST_HOME" ] \
+	&& [ ! -L "$HOST_HOME" ] && [ ! -e "$HOST_HOME/.claude" ] && [ -n "$CLAUDE_SESSION_DIR" ]; then
+	ln -s "$CLAUDE_SESSION_DIR" "$HOST_HOME/.claude" 2>/dev/null || true
+	chown -h "$HOST_UID:$HOST_GID" "$HOST_HOME/.claude" 2>/dev/null || true
+fi
+
+# Playwright's Chromium, parked where Puppeteer's `--channel stable` resolution looks. Still
+# load-bearing after the shim below: a caller who passes their own `--channel` gets no
+# `--executable-path` from us, and this is what that resolution then finds.
 mkdir -p /opt/google/chrome 2>/dev/null || true
 ln -sf "$(readlink -f /usr/local/bin/google-chrome-stable)" /opt/google/chrome/chrome 2>/dev/null || true
 
-# npx wrapper: adds Docker-compatible flags when Chrome DevTools MCP is invoked.
-# Lives in /usr/local/bin (before /usr/bin in PATH) so it's container-only,
-# doesn't touch host-mounted plugin configs, and survives plugin updates.
+# npx shim: makes `chrome-devtools-mcp` able to launch a browser at all in this box. Chrome's
+# own sandbox needs an unprivileged user namespace, which --cap-drop=ALL + seccomp deny, so an
+# unflagged launch dies with "Target.setDiscoverTargets: Target closed". Rationale and the
+# rejected "wrap google-chrome image-wide" alternative: docs/design-notes/terminal-and-security.md.
+#
+# Lives in /usr/local/bin (ahead of /usr/bin in PATH) so it is container-only, never touches the
+# host-mounted plugin config, and keeps the plugin's STOCK manifest working across updates.
+# Deliberately conservative: it only fires for that one package, and only appends what the caller
+# did not already pass — so `--headless=false`, a custom `--executable-path`/`--channel`, or a
+# remote `--browser-url` all still win. CC_CHROME_MCP_ARGS=0 disables it outright.
 cat > /usr/local/bin/npx << 'NPXWRAPPER'
 #!/bin/sh
-real_npx="$(which -a npx | grep -v /usr/local/bin/npx | head -1)"
-for arg in "$@"; do
-  case "$arg" in chrome-devtools-mcp@*)
-    exec "$real_npx" "$@" --headless --executable-path=/usr/local/bin/google-chrome-stable --chrome-arg=--no-sandbox --chrome-arg=--disable-setuid-sandbox --no-usage-statistics
-    ;;
-  esac
+# Find the real npx by walking PATH (no `which`: Debian is retiring it, and a bare `command -v`
+# would just find this shim again). Fail loudly rather than exec'ing "".
+real_npx=""
+IFS=:
+for d in $PATH; do
+  [ -n "$d" ] || d=.
+  if [ "$d/npx" != /usr/local/bin/npx ] && [ -x "$d/npx" ]; then real_npx="$d/npx"; break; fi
 done
-exec "$real_npx" "$@"
+unset IFS
+[ -n "$real_npx" ] || { echo "cc: npx shim found no real npx on PATH" >&2; exit 127; }
+
+extra=""
+if [ "${CC_CHROME_MCP_ARGS:-1}" != 0 ]; then
+  pkg=0 headless=0 exec_path=0 sandbox=0 stats=0 remote=0
+  for arg in "$@"; do
+    case "$arg" in
+      # With or without @version, and npx's --package= form: a plugin bump that drops the
+      # pin must not silently take Chrome down with it.
+      chrome-devtools-mcp|chrome-devtools-mcp@*|--package=chrome-devtools-mcp|--package=chrome-devtools-mcp@*) pkg=1 ;;
+      --headless|--headless=*) headless=1 ;;
+      --executable-path|--executable-path=*|--channel|--channel=*) exec_path=1 ;;
+      # Exactly the two flags we would add — NOT a glob on *sandbox*, which also matches
+      # --chrome-arg=--disable-gpu-sandbox and would leave Chrome unable to start at all.
+      --chrome-arg=--no-sandbox|--chrome-arg=--disable-setuid-sandbox) sandbox=1 ;;
+      --usage-statistics|--usage-statistics=*|--no-usage-statistics) stats=1 ;;
+      # Attaching to an already-running browser: our launch flags would be rejected as
+      # conflicting options, so add nothing at all.
+      --browser-url|--browser-url=*) remote=1 ;;
+    esac
+  done
+  if [ "$pkg" = 1 ] && [ "$remote" = 0 ]; then
+    [ "$headless" = 1 ] || extra="$extra --headless"
+    [ "$exec_path" = 1 ] || extra="$extra --executable-path=/usr/local/bin/google-chrome-stable"
+    [ "$sandbox" = 1 ] || extra="$extra --chrome-arg=--no-sandbox --chrome-arg=--disable-setuid-sandbox"
+    [ "$stats" = 1 ] || extra="$extra --no-usage-statistics"
+  fi
+fi
+# $extra unquoted on purpose — it is a word list built only from the space-free literals above.
+exec "$real_npx" "$@" $extra
 NPXWRAPPER
 chmod +x /usr/local/bin/npx
 

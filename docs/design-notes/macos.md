@@ -16,7 +16,7 @@ Header of `cc-portable.sh`, enforced by `check.sh`: host-side scripts are bash-3
 
 macOS clipboard: `clipboard-bridge.sh` (host, POSIX sh) watches a spool dir at `/cc/clip`; the entrypoint installs `wl-paste`/`xclip` reader shims and `wl-copy`/`pbcopy` deny-marker shims; the host answers with `pbpaste`/osascript PNG extraction and **never calls `pbcopy`**. Started/stopped like the Wayland notifier including the `200>&- 201>&-`.
 
-DNS sync is skipped on macOS (the engine VM tracks the host resolver). Fresh install: `migrate-sessions.sh --apply` on a Mac with no legacy `~/.claude` bootstraps the skeleton + `.migrated` directly.
+DNS sync is skipped on macOS (the engine VM tracks the host resolver). No migration step: on a fresh Mac `ensure_claude_home` creates a minimal `~/.claude` skeleton on first launch (first login populates it); nothing to bootstrap.
 
 ## Still open — on-hardware VERIFY (Mac only)
 
