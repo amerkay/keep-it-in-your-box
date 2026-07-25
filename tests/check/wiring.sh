@@ -5,6 +5,9 @@
 # the host-config contract the launch path evals, the login exit-status truth table, and the
 # sensitive-directory guard's exemption for host-global verbs.
 
+# shellcheck source=SCRIPTDIR/_guard.sh
+. "${BASH_SOURCE%/*}/_guard.sh" # sourced by tests/check.sh, never run directly
+
 section "Broker bash wiring (bin/kib, host/broker.sh)"
 
 # host-config is the single source of truth add_broker_env_args reads. If any key it needs
@@ -112,3 +115,159 @@ if [ "$verb_rc" = 2 ] && printf '%s' "$verb_out" | grep -q 'kib exec bash'; then
 else
     fail "unknown verb handling wrong" "rc=$verb_rc: $(printf '%s' "$verb_out" | head -2 | tr '\n' ' ')"
 fi
+
+# ── Host key vs box key (single mode) ────────────────────────────
+# Claude keys projects/, .claude.json and ↑ history by its RESOLVED cwd. Single mode adds no
+# $PWD bind and $HOST_HOME is a symlink to the container home, so a project under $HOME
+# resolves to $CONTAINER_HOME/<rel> in the box. kib_box_pwd is what keeps canonical host-keyed
+# and the session box-keyed; getting it wrong splits a project's history in two.
+(
+    # shellcheck source=SCRIPTDIR/../../host/config.sh
+    . "$KIB_ROOT/host/config.sh"
+    HOME=/Users/veronica
+
+    KIB_FUSE_MODE=sidecar PWD=/Users/veronica/proj
+    is "box path == host path in sidecar mode" "/Users/veronica/proj" "$(kib_box_pwd)"
+
+    KIB_FUSE_MODE=single PWD=/Users/veronica/proj
+    is "single mode remaps a project under \$HOME to the container home" \
+        "/home/hostuser/proj" "$(kib_box_pwd)"
+
+    KIB_FUSE_MODE=single PWD=/Users/veronica/code/nested/proj
+    is "single mode keeps the path below \$HOME intact" \
+        "/home/hostuser/code/nested/proj" "$(kib_box_pwd)"
+
+    KIB_FUSE_MODE=single PWD=/Users/veronica
+    is "single mode maps \$HOME itself" "/home/hostuser" "$(kib_box_pwd)"
+
+    # Outside $HOME the entrypoint mkdirs the real path, so it resolves to itself — remapping
+    # there would invent a directory that does not exist in the box.
+    KIB_FUSE_MODE=single PWD=/opt/work/proj
+    is "single mode leaves a project outside \$HOME alone" "/opt/work/proj" "$(kib_box_pwd)"
+
+    # The near-miss: a sibling whose name merely starts with $HOME must not be rewritten.
+    KIB_FUSE_MODE=single PWD=/Users/veronica-backup/proj
+    is "single mode does not remap a \$HOME prefix that is not a path boundary" \
+        "/Users/veronica-backup/proj" "$(kib_box_pwd)"
+)
+
+# $SESSION_BASE outlives the container, so a transcripts link keyed by a name kib no longer uses
+# is never reaped — renaming it $SLUG → $BOX_SLUG stranded the old one, and a stray dir in
+# projects/ reads to an auditor as ANOTHER project's transcripts (security-test.sh checks
+# exactly this). start_container must sweep its own links before relinking. Only links into
+# $TRANSCRIPTS_CPATH are ours; a real dir is Claude's and must survive.
+tl_tmp="$(mktemp -d)"
+mkdir -p "$tl_tmp/projects/-a-real-transcript-dir"
+ln -s /run/kib/transcripts "$tl_tmp/projects/-Users-veronica-proj" # stale: the old slug
+ln -s /run/kib/transcripts "$tl_tmp/projects/-home-hostuser-proj"  # current
+ln -s /somewhere/else "$tl_tmp/projects/-not-ours"                 # not ours: leave it
+(
+    SESSION_BASE="$tl_tmp" TRANSCRIPTS_CPATH=/run/kib/transcripts
+    for _t in "$SESSION_BASE"/projects/*; do
+        [ -L "$_t" ] || continue
+        [ "$(readlink "$_t" 2>/dev/null)" = "$TRANSCRIPTS_CPATH" ] || continue
+        rm -f "$_t" 2>/dev/null || true
+    done
+)
+is "the transcripts sweep drops every link of ours, whatever its slug" "" \
+    "$(find "$tl_tmp/projects" -lname /run/kib/transcripts -exec basename {} \; | sort | tr '\n' ' ' | sed 's/ $//')"
+is "the sweep keeps a real dir and a link that is not ours" "-a-real-transcript-dir -not-ours" \
+    "$(find "$tl_tmp/projects" -mindepth 1 -maxdepth 1 -exec basename {} \; | sort | tr '\n' ' ' \
+        | sed 's/ $//')"
+
+# The sweep must be the one start_container actually runs, not a copy that drifted from it.
+# shellcheck disable=SC2016  # matching lifecycle.sh's own source text: $_t must stay literal
+if grep -q 'readlink "\$_t"' "$KIB_ROOT/host/lifecycle.sh"; then
+    pass "start_container sweeps its own transcripts links before relinking"
+else
+    fail "start_container no longer sweeps stale transcripts links" \
+        "a slug rename will strand one in \$SESSION_BASE and it reads as a cross-project dir"
+fi
+rm -rf "$tl_tmp"
+unset tl_tmp
+
+# On the first launch after the link moved from $SLUG to $BOX_SLUG, a REAL directory sits at the
+# box slug: Claude keys by its resolved cwd, so in single mode it had been writing its transcripts
+# there all along while the link pointed at $SLUG. bind_via_link `rm -rf`s a non-symlink, so
+# relinking without migrating first destroys every prior in-box session — silently, and they were
+# never in canonical to begin with. Fold them out, and NEVER relink if the fold did not complete.
+tm_tmp="$(mktemp -d)"
+mkdir -p "$tm_tmp/session/projects/-box-slug" "$tm_tmp/canonical/projects/-host-slug"
+printf 'old\n' >"$tm_tmp/session/projects/-box-slug/a.jsonl"
+printf 'hidden\n' >"$tm_tmp/session/projects/-box-slug/.b.jsonl"
+(
+    EPHEMERAL=0 CLAUDE_HOME="$tm_tmp/canonical" SLUG=-host-slug
+    _bt="$tm_tmp/session/projects/-box-slug" _bt_ok=1
+    if [ -d "$_bt" ] && [ ! -L "$_bt" ]; then
+        _bt_ok=0
+        if [ "$EPHEMERAL" != 1 ] && mkdir -p "$CLAUDE_HOME/projects/$SLUG" 2>/dev/null; then
+            for _f in "$_bt"/* "$_bt"/.[!.]*; do
+                [ -e "$_f" ] || continue
+                mv -n "$_f" "$CLAUDE_HOME/projects/$SLUG/" 2>/dev/null || true
+            done
+            rmdir "$_bt" 2>/dev/null && _bt_ok=1
+        fi
+    fi
+    printf '%s' "$_bt_ok"
+) >"$tm_tmp/ok"
+is "a pre-existing in-box transcripts dir is folded into canonical, not deleted" ".b.jsonl a.jsonl" \
+    "$(find "$tm_tmp/canonical/projects/-host-slug" -mindepth 1 -exec basename {} \; \
+        | sort | tr '\n' ' ' | sed 's/ $//')"
+is "the fold reports success, so the relink may proceed" "1" "$(cat "$tm_tmp/ok")"
+rm -rf "$tm_tmp"
+unset tm_tmp
+
+# The migration must sit BEFORE the relink, or bind_via_link destroys the dir first.
+if awk '/_bt_ok=1/{m=NR} /bind_via_link "\$CLAUDE_HOME\/projects\/\$SLUG"/{b=NR} END{exit !(m && b && m < b)}' \
+    "$KIB_ROOT/host/lifecycle.sh"; then
+    pass "start_container migrates old in-box transcripts before relinking over them"
+else
+    fail "the transcripts migration is missing or runs after the relink" \
+        "bind_via_link rm -rf's a non-symlink — every prior in-box session would be lost"
+fi
+
+# A repo script that is EXEC'd (not sourced) must carry the exec bit IN GIT — the worktree bit
+# is the developer's, the index mode is what every other checkout gets. clipboard-bridge.sh
+# shipped 100644, so `detach_pgrp` (perl `exec` on darwin, setsid on linux) hit EACCES and the
+# macOS clipboard bridge died at every launch, silently: image paste never worked, and text
+# paste kept working because a terminal pastes over the pty without ever calling a reader.
+# Discovered, not listed, so a new exec'd script is covered the day it is added.
+xb_bad=""
+# shellcheck disable=SC2016  # both are literal patterns matching the source's own "$KIB_ROOT/…"
+xb_found="$(grep -rhoE '(detach_pgrp|exec) "\$KIB_ROOT/[a-zA-Z0-9_./-]+\.sh"' \
+    "$KIB_ROOT/bin" "$KIB_ROOT/host" | sed 's#.*\$KIB_ROOT/##; s/"$//' | sort -u)"
+while IFS= read -r xb_f; do
+    if [ -z "$xb_f" ] || [ ! -f "$KIB_ROOT/$xb_f" ]; then continue; fi
+    case "$(git -C "$KIB_ROOT" ls-files -s -- "$xb_f" 2>/dev/null | awk '{print $1}')" in
+        100755 | '') ;; # 755 is right; empty means untracked, which git mode cannot speak to
+        *) xb_bad="$xb_bad $xb_f" ;;
+    esac
+done <<EOF
+$xb_found
+EOF
+if [ -z "$xb_bad" ]; then
+    pass "every exec'd host script is executable in git (not just in this worktree)"
+else
+    fail "an exec'd host script is not 100755 in git:$xb_bad" \
+        "detach_pgrp/exec will hit EACCES and the feature dies silently on a fresh clone"
+fi
+unset xb_bad xb_f xb_found
+
+# `kib sleep-monitor` is a host-global verb, so it execs BEFORE preflight_platform could refuse
+# it — and every source it samples (systemd-inhibit, KDE qdbus, /proc) is Linux-only. Without
+# its own guard it ran to completion on macOS and wrote an EMPTY log, which reads as "nothing is
+# holding the machine awake" rather than "this tool does not apply here". Proven by stubbing
+# uname, which is what portable.sh branches on.
+sm_stub="$(mktemp -d)"
+# shellcheck disable=SC2016  # the stub's own source text: $1/$@ must reach it unexpanded
+printf '#!/bin/sh\n[ "$1" = -s ] && { echo Darwin; exit 0; }\nexec /usr/bin/uname "$@"\n' >"$sm_stub/uname"
+chmod +x "$sm_stub/uname"
+sm_out="$(PATH="$sm_stub:$PATH" bash "$KIB_ROOT/host/sleep-monitor.sh" 2>&1)" && sm_rc=0 || sm_rc=$?
+if [ "$sm_rc" = 2 ] && printf '%s' "$sm_out" | grep -q 'Linux-only'; then
+    pass "kib sleep-monitor refuses on macOS instead of writing an empty log"
+else
+    fail "sleep-monitor has no darwin guard" \
+        "rc=$sm_rc: $(printf '%s' "$sm_out" | head -1)"
+fi
+rm -rf "$sm_stub"
+unset sm_stub sm_out sm_rc

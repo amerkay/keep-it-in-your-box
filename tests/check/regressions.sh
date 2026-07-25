@@ -4,6 +4,9 @@
 # Every check here corresponds to a failure that actually shipped. Do not relax one to make a
 # refactor pass; the bug is what the assertion is for.
 
+# shellcheck source=SCRIPTDIR/_guard.sh
+. "${BASH_SOURCE%/*}/_guard.sh" # sourced by tests/check.sh, never run directly
+
 section "Regression guards"
 
 # settings.json must never be bind-mounted from canonical: it is the file a HOST `claude` loads,
@@ -90,6 +93,58 @@ elif grep -q 'os.pread(' "$KIB_ROOT/kib/guest/fuse.py" && grep -q 'os.pwrite(' "
     pass "FUSE passthrough reads/writes are offset-atomic (pread/pwrite, no shared fd offset)"
 else
     fail "kib/guest/fuse.py lost its pread/pwrite passthrough" "expected os.pread + os.pwrite"
+fi
+
+# Every host process backgrounded from the launch path must close fds 200/201. One miss and the
+# child holds the project's SHARED lock, so the last terminal out cannot take it exclusively —
+# teardown never runs and the containers are stranded. Shipped that way in the background image
+# rebuild, which outlives the session by minutes. Background JOBS are discovered, not listed, so
+# a new one is covered the day it is added — but only fds 200/201 are asserted. 202 (teardown's
+# exclusive retry) and 203 (the canonical .claude.json lock) are held only while tearing down,
+# where nothing is backgrounded today; a background job added THERE would need them too.
+# portable.sh is excluded — it DEFINES detach_pgrp, and closes every fd >=2 itself on darwin.
+fd_bad=""
+for fd_f in bin/kib host/lifecycle.sh host/desktop.sh host/broker.sh host/image.sh \
+    host/redaction.sh host/net.sh host/config.sh; do
+    [ -f "$KIB_ROOT/$fd_f" ] || continue
+    while IFS= read -r fd_line; do
+        # A file with no background job yields one empty line from the heredoc below.
+        if [ -z "$fd_line" ]; then continue; fi
+        case "$fd_line" in
+            *'200>&-'*'201>&-'*) ;;
+            *) fd_bad="$fd_bad $fd_f:$(printf '%s' "$fd_line" | sed 's/^ *//' | cut -c1-40)" ;;
+        esac
+    done <<EOF
+$(grep -hE '(detach_pgrp |[^&>]& *$)' "$KIB_ROOT/$fd_f" | grep -v '&&')
+EOF
+done
+if [ -z "$fd_bad" ]; then
+    pass "every backgrounded host process closes the lock fds (200/201)"
+else
+    fail "a backgrounded host process inherits the project lock:$fd_bad" \
+        "it holds the shared lock, so the last session out cannot tear the containers down"
+fi
+unset fd_bad fd_f fd_line
+
+# The synthetic placeholder credential is held read-only by a :ro MOUNT, never by chmod.
+# Docker Desktop's `fakeowner` bind layer records the mode but ignores it in access(2), so a
+# 0400 copy is writable inside the box on macOS — the control silently did nothing there.
+if awk '/^_stage_placeholder_credential\(\)/,/^}/' "$KIB_ROOT/host/broker.sh" \
+    | grep -q 'bind_via_link .* :ro'; then
+    pass "the placeholder credential is read-only by mount, not by mode bit (fakeowner)"
+else
+    fail "the placeholder credential lost its :ro mount" \
+        "chmod alone is a no-op on Docker Desktop's fakeowner binds"
+fi
+
+# Single mode must squash ownership: the project arrives over virtiofs as root:root, and
+# without --uid/--gid git reads the whole tree as another user's and refuses it.
+if grep -q -- '--uid' "$KIB_ROOT/guest/entrypoint/entrypoint-fuse.sh" \
+    && grep -q -- '--gid' "$KIB_ROOT/guest/entrypoint/entrypoint-fuse.sh"; then
+    pass "single mode squashes FUSE ownership to the agent (git 'dubious ownership')"
+else
+    fail "entrypoint-fuse.sh lost its --uid/--gid squash" \
+        "virtiofs reports root:root; git then refuses the whole tree"
 fi
 
 # The pre-commit hook kib used to install into every project is gone, and the marker it left

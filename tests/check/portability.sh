@@ -11,9 +11,14 @@
 #
 # Comments are stripped naively first; no flagged token appears inside a string in this repo.
 
+# shellcheck source=SCRIPTDIR/_guard.sh
+. "${BASH_SOURCE%/*}/_guard.sh" # sourced by tests/check.sh, never run directly
+
 section "Portability contract (host-side scripts, bash-3.2/BSD-clean)"
 
-FATAL_RE='(declare[[:space:]]+-A|[[:space:]]mapfile[[:space:]]|[[:space:]]readarray[[:space:]]|\$\{[A-Za-z_][A-Za-z0-9_]*(,,|\^\^|,|\^)[}:/]|(^|[^_.])\bflock\b|\bsha256sum\b|grep[[:space:]]+-[a-zA-Z]*P)'
+# `flock` banned as a COMMAND (GNU-only); `flock(` is perl's builtin, which is the portable
+# binding both the darwin shim and shims.sh's oracle are built on.
+FATAL_RE='(declare[[:space:]]+-A|[[:space:]]mapfile[[:space:]]|[[:space:]]readarray[[:space:]]|\$\{[A-Za-z_][A-Za-z0-9_]*(,,|\^\^|,|\^)[}:/]|(^|[^_.])\bflock\b($|[^(])|\bsha256sum\b|grep[[:space:]]+-[a-zA-Z]*P)'
 ADVISORY_RE='(\bsetsid\b|\bnotify-send\b)'
 
 # bash 3.2 expands "${arr[@]}" of an EMPTY array as an *unbound variable* under `set -u`
@@ -38,9 +43,13 @@ EOF
 
 for f in "${HOST_BASH[@]}" "${HOST_SH[@]}"; do
     [ -f "$f" ] || continue
-    # host/portable.sh is the shim home; the check suite is a Linux-only dev harness that
-    # uses raw flock to *test* lock_fd. Both are exempt from the contract by design.
-    case "$f" in host/portable.sh | tests/check.sh | tests/check/*.sh)
+    # host/portable.sh is the shim home. The rest of the check suite is a dev harness and is
+    # exempt — EXCEPT shims.sh, which exists to prove the darwin paths and is therefore run on
+    # macOS too. It used raw flock(1) as its oracle under this exemption; on a real Mac every
+    # such call died "command not found", which the tests read as "the lock is held" — two
+    # assertions became false passes and three false failures. Held to the contract now.
+    case "$f" in tests/check/shims.sh) ;;
+    host/portable.sh | tests/check.sh | tests/check/*.sh)
         pass "$f (shim home / dev tool — exempt)"
         continue
         ;;
