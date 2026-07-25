@@ -4,6 +4,9 @@
 # The bash glue over the Python registry, exercised against a throwaway $KIB_DIR / session
 # dir / project so no real credential is touched. Everything here is host-side and
 # docker-free.
+#
+# shellcheck disable=SC2016  # every _mcp_run argument is a script body for the inner shell,
+# so its $vars must survive this shell unexpanded. Single quotes are the point, not a slip.
 
 section "MCP brokering (registry / enabled / inject / adopt / detector / intercept)"
 
@@ -17,7 +20,7 @@ _mcp_run() {
     (
         set +e
         export KIB_ROOT="$KIB_ROOT" KIB_CONFIG="$_mcp_tmp/kib/config"
-        # shellcheck source=../../host/_load.sh
+        # shellcheck source=SCRIPTDIR/../../host/_load.sh
         . "$KIB_ROOT/host/_load.sh"
         export SESSION_BASE="$_mcp_tmp/sess"
         export CLAUDE_HOME="$_mcp_tmp/claude" CLAUDE_JSON="$_mcp_tmp/claude.json"

@@ -34,12 +34,12 @@ SETTLE="${SLEEP_GUARD_SETTLE:-15}" # (LINUX) after a resume, stay awake this lon
 # KIB_OS / is_macos come from host/portable.sh; the fallback keeps the guard starting even if
 # that source fails.
 HOST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=portable.sh
+# shellcheck source=SCRIPTDIR/portable.sh
 . "$HOST_DIR/portable.sh" 2>/dev/null || {
     case "$(uname -s)" in Darwin) KIB_OS=darwin ;; *) KIB_OS=linux ;; esac
     is_macos() { [ "$KIB_OS" = darwin ]; }
 }
-# shellcheck source=sleep-sample.sh
+# shellcheck source=SCRIPTDIR/sleep-sample.sh
 . "$HOST_DIR/sleep-sample.sh"
 
 INHIBIT_PID=""

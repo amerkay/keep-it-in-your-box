@@ -42,6 +42,7 @@ _is_uint() { case "$1" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac }
 # into perl's STDIN so both share one open file description, which is what makes the lock
 # outlive perl and release only on close or `lock_fd -u`, exactly like flock(1). Forms used:
 #   -w N -s FD | -x FD | -n -x FD | -n FD | -u FD | -n FILE CMD...
+# shellcheck disable=SC2016  # perl source, not shell — $sigils belong to perl
 _KIB_FLOCK_PL='
 use Fcntl qw(:flock);
 my ($mode, $nb, $to) = (shift, shift, shift);
@@ -217,10 +218,10 @@ read_kib_config() {
         val="${val#"${val%%[![:space:]]*}"}" # ltrim val
         val="${val%"${val##*[![:space:]]}"}" # rtrim val
         case "$key" in
-            broker) KIB_CFG_BROKER="$(printf '%s' "$val" | tr 'A-Z' 'a-z')" ;;
-            egress) KIB_CFG_EGRESS="$(printf '%s' "$val" | tr 'A-Z' 'a-z')" ;;
-            allow_host_services) KIB_CFG_ALLOW_HOST="$(printf '%s' "$val" | tr 'A-Z' 'a-z')" ;;
-            allow_lan) KIB_CFG_ALLOW_LAN="$(printf '%s' "$val" | tr 'A-Z' 'a-z')" ;;
+            broker) KIB_CFG_BROKER="$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" ;;
+            egress) KIB_CFG_EGRESS="$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" ;;
+            allow_host_services) KIB_CFG_ALLOW_HOST="$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" ;;
+            allow_lan) KIB_CFG_ALLOW_LAN="$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" ;;
             lan_cidrs) KIB_CFG_LAN_CIDRS="$val" ;;
         esac
     done <"$KIB_CONFIG"

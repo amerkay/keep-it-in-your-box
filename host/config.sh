@@ -168,14 +168,13 @@ merge_out_shared_settings() {
                     ;;
             esac
         fi
-        (
+        if ! (
             umask 077
             cp "$src" "$CLAUDE_HOME/$f.kib.tmp"
-        ) && mv -f "$CLAUDE_HOME/$f.kib.tmp" "$CLAUDE_HOME/$f" \
-            || {
-                rm -f "$CLAUDE_HOME/$f.kib.tmp" 2>/dev/null || true
-                warn "could not fold $f back to ~/.claude/$f."
-            }
+        ) || ! mv -f "$CLAUDE_HOME/$f.kib.tmp" "$CLAUDE_HOME/$f"; then
+            rm -f "$CLAUDE_HOME/$f.kib.tmp" 2>/dev/null || true
+            warn "could not fold $f back to ~/.claude/$f."
+        fi
     done
 }
 

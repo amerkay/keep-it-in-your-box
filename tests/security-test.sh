@@ -51,7 +51,7 @@ if [ "$LIST_ONLY" = 1 ]; then
 fi
 
 export KIB_TEST_FILTER
-# shellcheck source=lib.sh
+# shellcheck source=SCRIPTDIR/lib.sh
 . "$KIB_ROOT/tests/lib.sh"
 
 # An exploit is dead only if the value ALSO resolves to nothing — the write being refused is
@@ -100,9 +100,9 @@ is "seccomp in filter mode" "2" "$(awk '/^Seccomp:/{print $2}' /proc/self/status
 if [ "$SINGLE_FUSE" = 1 ]; then
     # Single mode drops apparmor confinement so the in-container FUSE mount is permitted;
     # SYS_ADMIN is dropped from the bounding set instead (asserted just above + below).
-    is "AppArmor unconfined (single-container FUSE mount needs it)" "unconfined" "$(cat /proc/self/attr/current 2>/dev/null | tr -d '\0')"
+    is "AppArmor unconfined (single-container FUSE mount needs it)" "unconfined" "$(tr -d '\0' </proc/self/attr/current 2>/dev/null)"
 else
-    is "AppArmor confined" "docker-default (enforce)" "$(cat /proc/self/attr/current 2>/dev/null | tr -d '\0')"
+    is "AppArmor confined" "docker-default (enforce)" "$(tr -d '\0' </proc/self/attr/current 2>/dev/null)"
 fi
 is "/proc/sys mounted read-only" "ro" "$(awk '$5=="/proc/sys"{split($6,o,",");print o[1]}' /proc/self/mountinfo | head -1)"
 is "/sys mounted read-only" "ro" "$(awk '$5=="/sys"{split($6,o,",");print o[1]}' /proc/self/mountinfo | head -1)"
@@ -167,13 +167,14 @@ resolves_to_nothing "    core.fsmonitor resolves to nothing" "$REPO" core.fsmoni
 
 # C3: the write IS the rename — git never edits config in place, so the validator runs there.
 # The inline form is the one a header-only parser misses.
+# shellcheck disable=SC2317,SC2329  # invoked indirectly — `deny` runs it via "$@"
 config_rename() { # config_rename <repo> <config body>
     local tmp="$1/.git/cfg.candidate"
     printf '%s\n' "$2" >"$tmp" 2>/dev/null || return 1
     mv -f "$tmp" "$1/.git/config" 2>/dev/null
     local rc=$?
     rm -f "$tmp" 2>/dev/null
-    return $rc
+    return "$rc"
 }
 deny "C3  inline [core]hooksPath = … (one-line form)" \
     config_rename "$REPO" '[core]hooksPath = /tmp/evilhooks'
@@ -348,13 +349,14 @@ section "Shared settings validator (H5) — host-side, exercised here"
 
 if [ -f "$KIB_ROOT/host/config.sh" ] && command -v python3 >/dev/null; then
     # Against a throwaway ~/.claude; the real canonical config is never touched.
+    # shellcheck disable=SC2317,SC2329  # invoked indirectly — `deny` runs it via "$@"
     validator() { # validator <json> — 0 accepted, 1 refused
         local d rc
         d="$(mktemp -d)"
         printf '%s' "$1" >"$d/settings.json"
         (
             export KIB_ROOT
-            # shellcheck source=../host/_load.sh
+            # shellcheck source=SCRIPTDIR/../host/_load.sh
             . "$KIB_ROOT/host/_load.sh"
             # shellcheck disable=SC2034  # host/config.sh reads it across the source boundary
             CLAUDE_HOME="$d"
@@ -362,7 +364,7 @@ if [ -f "$KIB_ROOT/host/config.sh" ] && command -v python3 >/dev/null; then
         ) >/dev/null 2>&1
         rc=$?
         rm -rf "$d"
-        return $rc
+        return "$rc"
     }
     deny "refuses apiKeyHelper" validator '{"apiKeyHelper":"/tmp/x.sh"}'
     deny "refuses awsAuthRefresh" validator '{"awsAuthRefresh":"aws sso login"}'

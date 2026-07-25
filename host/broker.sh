@@ -134,6 +134,7 @@ _broker_abort() {
 start_broker_notifier() {
     is_macos && return 0
     command -v notify-send >/dev/null 2>&1 || return 0
+    # shellcheck disable=SC2016  # the body is the inner sh's script — its $vars are its own
     setsid sh -c '
         last=0; count=0
         docker logs -f "$1" 2>&1 | while IFS= read -r line; do
@@ -258,19 +259,19 @@ start_hosted_mcp() {
             warn "hosted MCP '$id': could not read its host-config — skipping."
             continue
         fi
-        [ -n "$KIB_BROKER_HOST_RUN" ] && [ -n "$KIB_BROKER_MCP_PORT" ] \
-            && [ -n "$KIB_BROKER_TOKEN_BASENAME" ] || {
+        if [ -z "$KIB_BROKER_HOST_RUN" ] || [ -z "$KIB_BROKER_MCP_PORT" ] \
+            || [ -z "$KIB_BROKER_TOKEN_BASENAME" ]; then
             warn "hosted MCP '$id': incomplete registry entry — skipping."
             continue
-        }
+        fi
 
-        local cname="${CNAME}-hmcp-${id}"
-        docker rm -f "$cname" >/dev/null 2>&1 || true # clear a crashed leftover
+        local hmcp_cname="${CNAME}-hmcp-${id}"
+        docker rm -f "$hmcp_cname" >/dev/null 2>&1 || true # clear a crashed leftover
         # extra_env (KEY=VAL, constants) → -e flags; word-split is safe (no metacharacters).
         local -a env_args=() kv
         for kv in $KIB_BROKER_EXTRA_ENV; do env_args+=(-e "$kv"); done
         local -a run=(
-            docker run -d --name "$cname"
+            docker run -d --name "$hmcp_cname"
             --cap-drop=ALL --security-opt no-new-privileges
             --user "$(id -u):$(id -g)" --userns=host
             --network "$BROKER_NET" --network-alias "$id"
@@ -284,7 +285,7 @@ start_hosted_mcp() {
         )
         if "${run[@]}" >/dev/null 2>&1; then
             HOSTED_MCP_UP="${HOSTED_MCP_UP:+$HOSTED_MCP_UP }$id"
-            echo "🔐 hosted MCP '$id': sidecar up (cred stays host-side: $cname)." >&2
+            echo "🔐 hosted MCP '$id': sidecar up (cred stays host-side: $hmcp_cname)." >&2
         else
             warn "hosted MCP '$id': sidecar failed to start — the agent will launch without it."
         fi
@@ -321,9 +322,10 @@ add_broker_env_args() {
         _broker_host_config "$id" \
             || _broker_abort "could not read the broker's host-config for '$id'."
         [ "$KIB_BROKER_DELIVERY" = base_url_env ] || continue
-        [ -n "$KIB_BROKER_BASE_URL_ENV" ] && [ -n "$KIB_BROKER_TOKEN_ENV" ] \
-            && [ -n "$KIB_BROKER_PLACEHOLDER_TOKEN" ] && [ -n "$KIB_BROKER_LISTEN_PORT" ] \
-            || _broker_abort "the broker's host-config for '$id' is incomplete."
+        if [ -z "$KIB_BROKER_BASE_URL_ENV" ] || [ -z "$KIB_BROKER_TOKEN_ENV" ] \
+            || [ -z "$KIB_BROKER_PLACEHOLDER_TOKEN" ] || [ -z "$KIB_BROKER_LISTEN_PORT" ]; then
+            _broker_abort "the broker's host-config for '$id' is incomplete."
+        fi
         ARGS+=(
             -e "$KIB_BROKER_BASE_URL_ENV=http://$BROKER_ALIAS:$KIB_BROKER_LISTEN_PORT"
             -e "$KIB_BROKER_TOKEN_ENV=$KIB_BROKER_PLACEHOLDER_TOKEN"
@@ -368,14 +370,13 @@ merge_out_credential() {
     local src="$SHARED_BASE/.credentials.json" dst="$CLAUDE_HOME/.credentials.json"
     [ -f "$src" ] || return 0
     cmp -s "$src" "$dst" 2>/dev/null && return 0 # unchanged — do not touch canonical
-    (
+    if ! (
         umask 077
         cp "$src" "$dst.kib.tmp"
-    ) && mv -f "$dst.kib.tmp" "$dst" \
-        || {
-            rm -f "$dst.kib.tmp" 2>/dev/null || true
-            warn "could not fold the refreshed credential back to ~/.claude/.credentials.json."
-        }
+    ) || ! mv -f "$dst.kib.tmp" "$dst"; then
+        rm -f "$dst.kib.tmp" 2>/dev/null || true
+        warn "could not fold the refreshed credential back to ~/.claude/.credentials.json."
+    fi
 }
 
 # ── Container-level broker wiring ────────────────────────────────
@@ -411,7 +412,9 @@ stop_broker() {
     pid="$(cat "$BROKER_DIR/notify.pid" 2>/dev/null || true)"
     case "$pid" in '' | *[!0-9]*) pid="" ;; esac
     # Negative pid: the notifier is a setsid'd pipeline — kill the whole process group.
-    [ -n "$pid" ] && kill -TERM "-$pid" 2>/dev/null || true
+    if [ -n "$pid" ]; then
+        kill -TERM "-$pid" 2>/dev/null || true
+    fi
     docker rm -f "$BROKER_CNAME" >/dev/null 2>&1 || true
     # Hosted-MCP sidecars share the broker net and must go before `network rm`. Match by the
     # ${CNAME}-hmcp-* name prefix so we get every one without tracking their ids here.
@@ -467,10 +470,10 @@ _store_secret_file() {
         umask 077
         printf '%s\n' "$2" >"$tmp"
     ) || die "could not write $1"
-    chmod 600 "$tmp" && mv -f "$tmp" "$1" || {
+    if ! chmod 600 "$tmp" || ! mv -f "$tmp" "$1"; then
         rm -f "$tmp"
         die "could not install $1"
-    }
+    fi
 }
 
 # Per-provider "how to obtain it" guidance (human hints, not machine facts — kept here rather
@@ -528,11 +531,10 @@ provider_login() {
             umask 077
             cp "$path" "$_P_FILE.tmp.$$"
         ) || die "could not read $path"
-        chmod 600 "$_P_FILE.tmp.$$" && mv -f "$_P_FILE.tmp.$$" "$_P_FILE" \
-            || {
-                rm -f "$_P_FILE.tmp.$$"
-                die "could not install $_P_FILE"
-            }
+        if ! chmod 600 "$_P_FILE.tmp.$$" || ! mv -f "$_P_FILE.tmp.$$" "$_P_FILE"; then
+            rm -f "$_P_FILE.tmp.$$"
+            die "could not install $_P_FILE"
+        fi
         echo "   ✅ copied to $_P_FILE (mode 600)."
     else
         local secret=""
@@ -603,6 +605,8 @@ provider_status() {
     while IFS='|' read -r id delivery kind basename; do
         file="$KIB_DIR/$basename"
         if [ -s "$file" ]; then
+            # shellcheck disable=SC2012  # `stat` spells the mode differently on GNU vs BSD;
+            # `ls -l` is the portable read, and $file is ours (no odd names).
             mode="$(ls -l "$file" 2>/dev/null | cut -c1-10)"
             size="$(wc -c <"$file" 2>/dev/null | tr -d ' ')"
             printf '   %-11s stored  (%s bytes, %s) [%s]\n' "$id" "$size" "$mode" "$delivery"

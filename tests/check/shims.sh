@@ -10,9 +10,9 @@ section "Shim unit tests (host/portable.sh, darwin paths forced)"
 
 # shellcheck disable=SC2034  # host/portable.sh's preflight reads it; unused on Linux
 IMAGE_NAME=unused
-# shellcheck source=../../host/core.sh
+# shellcheck source=SCRIPTDIR/../../host/core.sh
 . "$KIB_ROOT/host/core.sh"
-# shellcheck source=../../host/portable.sh
+# shellcheck source=SCRIPTDIR/../../host/portable.sh
 . "$KIB_ROOT/host/portable.sh"
 _saved_os="$KIB_OS"
 KIB_OS=darwin # force the perl/BSD shims
@@ -97,7 +97,7 @@ t_detach() {
 # host/sleep-monitor.sh source — so this covers the diagnostic's copy too, which is the whole
 # reason the sampler was extracted.
 t_busiest() {
-    # shellcheck source=../../host/sleep-sample.sh
+    # shellcheck source=SCRIPTDIR/../../host/sleep-sample.sh
     . "$KIB_ROOT/host/sleep-sample.sh"
     is "busiest_delta: max over pids in both samples" 300 \
         "$(kib_busiest_delta "$(printf '100 1000\n200 2000\n')" "$(printf '100 1300\n200 2050\n300 9999\n')")"

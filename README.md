@@ -185,7 +185,7 @@ code --install-extension timonwong.shellcheck
 code --install-extension EditorConfig.EditorConfig
 ```
 
-Four things that will bite otherwise:
+Five things that will bite otherwise:
 
 - **`.vscode/` is write-denied from inside the box** — it's on the host-executed-config guard list.
   An agent in the sandbox getting EACCES if it edits these files is the guard working, not a bug;
@@ -201,6 +201,11 @@ Four things that will bite otherwise:
   (`shfmt.executablePath` if it isn't on `PATH`); `timonwong.shellcheck` bundles *its own*, which
   drifts from the pinned `v0.10.0` — set `shellcheck.executablePath` at the pinned one if the
   editor and CI ever disagree.
+- **A Flatpak or Snap editor has the sandbox's `PATH`, not yours.** Host-installed shfmt is
+  invisible to it, so `mkhl.shfmt` fails with `command not found` (shellcheck keeps working only
+  because it bundles a binary). Reach the host copy with `"shfmt.executablePath":
+  "/usr/bin/flatpak-spawn"` plus `"shfmt.executableArgs": ["--host", "shfmt"]` — in **user**
+  settings, since it describes the machine rather than the project.
 
 The mypy extension writes a `.mypy_cache/` into the repo. That's gitignored and harmless on the
 host, but it is the reason a bare `mypy` **inside** the box dies with SIGBUS — its cache is mmap'd

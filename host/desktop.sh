@@ -39,6 +39,7 @@ add_wayland_args() {
 # teardown never runs and the container is stranded. Shipped that way once.
 start_wayland_notifier() {
     command -v notify-send >/dev/null 2>&1 || return 0
+    # shellcheck disable=SC2016  # the body is the inner sh's script — its $vars are its own
     setsid sh -c '
         last=0
         docker logs -f "$1" 2>&1 | while IFS= read -r line; do
@@ -97,7 +98,9 @@ stop_wayland_guard() {
     local pid
     pid="$(cat "$WL_ROOT/notify.pid" 2>/dev/null || true)"
     # Negative pid: the notifier is a setsid'd pipeline, so kill the whole process group.
-    [ -n "$pid" ] && kill -TERM "-$pid" 2>/dev/null || true
+    if [ -n "$pid" ]; then
+        kill -TERM "-$pid" 2>/dev/null || true
+    fi
     docker rm -f "$WL_CNAME" >/dev/null 2>&1 || true
     rm -rf "$WL_ROOT" 2>/dev/null || true
 }
@@ -149,7 +152,9 @@ stop_clipboard_bridge() {
     # whole process group, so a non-numeric or empty value must never reach it.
     case "$pid" in '' | *[!0-9]*) pid="" ;; esac
     # Negative pid: the bridge runs in its own process group (detach_pgrp).
-    [ -n "$pid" ] && kill -TERM "-$pid" 2>/dev/null || true
+    if [ -n "$pid" ]; then
+        kill -TERM "-$pid" 2>/dev/null || true
+    fi
     rm -f "${CLIP_STATE}.pid" 2>/dev/null || true
     rm -rf "$CLIP_STATE" 2>/dev/null || true
 }

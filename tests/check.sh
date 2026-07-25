@@ -11,7 +11,7 @@ set -uo pipefail
 KIB_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$KIB_ROOT" || exit 1
 
-# shellcheck source=lib.sh
+# shellcheck source=SCRIPTDIR/lib.sh
 . "$KIB_ROOT/tests/lib.sh"
 
 for _unit in syntax portability wiring mcp regressions shims pytest; do

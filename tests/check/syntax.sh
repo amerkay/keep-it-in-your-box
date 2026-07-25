@@ -65,6 +65,7 @@ _loaded_fns() { # functions defined after running only $1's top-level source lin
         set +eu
         # shellcheck disable=SC2034  # read by the source lines the eval below runs
         HOST_DIR="$KIB_ROOT/host"
+        # shellcheck disable=SC2016  # a literal grep pattern matching the source's own $vars
         eval "$(grep -E '^\. "\$(KIB_ROOT|HOST_DIR)/' "$1")"
         declare -F | sed 's/^declare -f //'
     ) 2>/dev/null | LC_ALL=C sort -u
@@ -93,18 +94,18 @@ for f in bin/kib tools/*.sh host/sleep-monitor.sh; do
 done
 unset _kib_fns _own _have _missing
 
-section "shellcheck (errors are fatal; style/info advisory)"
+# Fatal down to the info tier — the same bar `.vscode/settings.json` gives the editor, so a
+# finding surfaces where you are typing rather than at commit time. A finding that is wrong
+# for this repo gets a targeted `# shellcheck disable=SCxxxx` WITH a reason, never a silence
+# here: SC2004 on host/sleep-monitor.sh's nameref would otherwise become a real bug.
+section "shellcheck (warnings and info are fatal)"
 if command -v shellcheck >/dev/null 2>&1; then
     for f in "${HOST_BASH[@]}" "${HOST_SH[@]}" "${LINUX_BASH[@]}" "${CONT_SH[@]}" "${CONT_BASH[@]}"; do
         [ -f "$f" ] || continue
-        if shellcheck -S error -x "$f" >/dev/null 2>&1; then
-            if out="$(shellcheck -S warning -x "$f" 2>&1)" && [ -z "$out" ]; then
-                pass "shellcheck $f"
-            else
-                warn "shellcheck $f (advisory findings)"
-            fi
+        if out="$(shellcheck -S info -x "$f" 2>&1)" && [ -z "$out" ]; then
+            pass "shellcheck $f"
         else
-            fail "shellcheck $f" "$(shellcheck -S error -x "$f" 2>&1 | head -8)"
+            fail "shellcheck $f" "$(printf '%s' "$out" | head -8)"
         fi
     done
 else

@@ -54,11 +54,19 @@ config above — is in the README's [editor setup](README.md#editor-setup-vs-cod
 
 - **shfmt** with the style in `.editorconfig` (4-space indent, `switch_case_indent`,
   `binary_next_line`). Continuations lead with the operator — `\` then `&& …` on the next line.
-- **shellcheck** clean at warning level, and `bash -n` every script you touch before finishing: a
-  syntax error here leaves the user unable to start the sandbox at all. A `# shellcheck disable=`
-  is per-file and reason-carrying — never a blanket one covering eleven subsystems. Note a
-  directive only applies to the **next complete command**, so a block of cross-unit globals needs
-  it in the file header, and it may never sit in front of a single `case` branch (SC1124).
+- **shellcheck** clean down to the **info** tier (`-S info`, fatal in `tests/check/syntax.sh` and
+  in the editor), and `bash -n` every script you touch before finishing: a syntax error here
+  leaves the user unable to start the sandbox at all. A `# shellcheck disable=` is per-file and
+  reason-carrying — never a blanket one covering eleven subsystems. Note a directive only applies
+  to the **next complete command**, so a block of cross-unit globals needs it in the file header,
+  and it may never sit in front of a single `case` branch (SC1124).
+- **Never silence a finding you have not understood.** SC2004 on `host/sleep-monitor.sh`'s
+  nameref looks like dead syntax and is load-bearing: `_io` points at an *associative* array, so
+  the "unnecessary" `$` is what keeps the subscript from being the literal string `pid`.
+- **`# shellcheck source=` paths take the `SCRIPTDIR/` prefix** (`source=SCRIPTDIR/../host/core.sh`).
+  A bare relative path only resolves when shellcheck's cwd happens to be the repo root, so the
+  editor — which lints on stdin with cwd set to the file's own directory — silently stops
+  following the source and reports SC1091 instead.
 - **Every `host/*.sh` file opens with what it owns and which globals it reads/writes.** That
   header is the contract between the units; shellcheck cannot see across the source boundary.
 - **Host-side scripts must be bash-3.2/BSD-clean** (stock macOS, no brew). GNU-only tools and

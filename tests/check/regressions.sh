@@ -11,6 +11,7 @@ section "Regression guards"
 # Match on the BIND, not the filename — the old code took the name from a loop variable, so
 # grepping "settings.json:" silently never fired. Two $CLAUDE_HOME binds are legitimate (this
 # project's transcripts, the ro-by-default asset loop); anything else is the regression.
+# shellcheck disable=SC2016  # literal grep patterns: they must match the source text verbatim
 stray_home_binds="$(grep -E '^[[:space:]]*ARGS\+=\(-v "\$CLAUDE_HOME/' "$KIB_ROOT/host/lifecycle.sh" \
     | grep -vE '\$CLAUDE_HOME/projects/\$SLUG:' | grep -vE '\$CLAUDE_HOME/\$_entry:' || true)"
 if [ -n "$stray_home_binds" ]; then
@@ -46,6 +47,7 @@ fi
 # Every credential mounted from $KIB_DIR — broker token(s) at /run/broker/token/<id> and each
 # hosted-MCP sidecar's cred at /run/cred/<file> — must be READ-ONLY, so there is no write path
 # to a credential by construction.
+# shellcheck disable=SC2016  # a literal grep pattern: it must match the "$KIB_DIR" source text
 kib_all="$(grep -oE '\-v "\$KIB_DIR/[^"]*"' "$KIB_ROOT/host/broker.sh" || true)"
 kib_n=$(printf '%s\n' "$kib_all" | grep -c . || true)
 if [ "$kib_n" -gt 0 ] && ! printf '%s\n' "$kib_all" | grep -qv ':ro"$'; then
@@ -117,7 +119,7 @@ t_audit_gate_severity() {
         (
             set -euo pipefail
             export KIB_ROOT
-            # shellcheck source=../../host/_load.sh
+            # shellcheck source=SCRIPTDIR/../../host/_load.sh
             . "$KIB_ROOT/host/_load.sh"
             cd "$1" || exit 9
             kib_audit_gate launch
@@ -127,7 +129,7 @@ t_audit_gate_severity() {
 
     # warn-class: a tracked path matching .kibignore is named, and the launch continues.
     (
-        GIT_TEMPLATE_DIR= git init -q "$dir/warn"
+        GIT_TEMPLATE_DIR='' git init -q "$dir/warn"
         cd "$dir/warn" || exit 1
         printf 'secret.txt\n' >.kibignore
         printf 'v\n' >secret.txt
@@ -144,7 +146,7 @@ t_audit_gate_severity() {
 
     # refuse-class: a host-executed git config key stops the launch with exit 5.
     (
-        GIT_TEMPLATE_DIR= git init -q "$dir/refuse"
+        GIT_TEMPLATE_DIR='' git init -q "$dir/refuse"
         git -C "$dir/refuse" config --local core.fsmonitor /tmp/fsm.sh
     ) >/dev/null 2>&1
     rc=0
@@ -156,7 +158,7 @@ t_audit_gate_severity() {
     fi
 
     # A clean repo must be silent and non-fatal.
-    GIT_TEMPLATE_DIR= git init -q "$dir/clean" >/dev/null 2>&1
+    GIT_TEMPLATE_DIR='' git init -q "$dir/clean" >/dev/null 2>&1
     rc=0
     out="$(_gate_in "$dir/clean")" || rc=$?
     if [ "$rc" = 0 ] && printf '%s' "$out" | grep -q 'GATE-RETURNED-OK'; then

@@ -18,11 +18,11 @@ set -euo pipefail
 KIB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE_NAME="keep-it-in-your-box"
 
-# shellcheck source=../host/core.sh
+# shellcheck source=SCRIPTDIR/../host/core.sh
 . "$KIB_ROOT/host/core.sh" # die/warn + the BUILD_* paths
-# shellcheck source=../host/portable.sh
+# shellcheck source=SCRIPTDIR/../host/portable.sh
 . "$KIB_ROOT/host/portable.sh" # lock_fd + notify_desktop (portable to macOS)
-# shellcheck source=../host/image.sh
+# shellcheck source=SCRIPTDIR/../host/image.sh
 . "$KIB_ROOT/host/image.sh" # latest_claude_version — the whole point of this script
 
 # `if`, never `[ -t 1 ] && …`: a bare failing AND-list trips `set -e`, and the

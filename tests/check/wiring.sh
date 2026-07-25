@@ -54,11 +54,11 @@ _broker_wanted_says() { # $1 = config body ("" = no config file), $2 = KIB_BROKE
         set +u
         export KIB_CONFIG="$cfg"
         if [ -n "$2" ]; then export KIB_BROKER="$2"; else unset KIB_BROKER; fi
-        # shellcheck source=../../host/core.sh
+        # shellcheck source=SCRIPTDIR/../../host/core.sh
         . "$KIB_ROOT/host/core.sh"
-        # shellcheck source=../../host/portable.sh
+        # shellcheck source=SCRIPTDIR/../../host/portable.sh
         . "$KIB_ROOT/host/portable.sh"
-        # shellcheck source=../../host/broker.sh
+        # shellcheck source=SCRIPTDIR/../../host/broker.sh
         . "$KIB_ROOT/host/broker.sh"
         broker_wanted && echo yes || echo no
     ) 2>/dev/null

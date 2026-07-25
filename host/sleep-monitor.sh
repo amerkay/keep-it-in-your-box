@@ -24,10 +24,10 @@ set -uo pipefail
 HOST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC2034  # host/core.sh reads it across the source boundary
 KIB_ROOT="$(dirname "$HOST_DIR")"
-# shellcheck source=core.sh
+# shellcheck source=SCRIPTDIR/core.sh
 . "$HOST_DIR/core.sh" # KIB_LOG_DIR — the log must not land in the project being diagnosed
 # SOURCED, never copied — a second copy of the metric would drift from the guard's.
-# shellcheck source=sleep-sample.sh
+# shellcheck source=SCRIPTDIR/sleep-sample.sh
 . "$HOST_DIR/sleep-sample.sh"
 
 INTERVAL="${1:-10}"                        # seconds between samples (min effective = SUBSAMPLE)
@@ -173,6 +173,8 @@ snapshot() { # $1 = target array name (IO1 or IO2). On IO2 also records tag+cmdl
         pid=${d#/proc/}
         w=$(awk '/^wchar:/{print $2; exit}' "$d/io" 2>/dev/null) || continue
         [ -n "$w" ] || continue
+        # shellcheck disable=SC2004  # _io namerefs an ASSOCIATIVE array: a bare subscript
+        # would key on the literal string "pid", not its value.
         _io[$pid]=$w
         if [ "$1" = IO2 ]; then
             PTAG[$pid]=$(tr '\0' '\n' <"$d/environ" 2>/dev/null | grep -m1 '^KIB_SESSION_TAG=' | cut -d= -f2-)
@@ -207,6 +209,7 @@ say "reminder:   set Suspend to 'After 1 minute' now, then leave it idle / close
 say "PRIMARY idle signal = logind IdleHint (Wayland-reliable); screensaver clock shown as (ss=) for contrast."
 say "-------------------------------------------------------------------------"
 say "BASELINE — all sleep-guard.sh processes right now:"
+# shellcheck disable=SC2009  # the point is the full ps column set; pgrep prints pids only
 ps -eo pid,ppid,tty,etime,user,args 2>/dev/null | grep -E 'sleep-guard\.sh|systemd-inhibit' | grep -v grep \
     | sed 's/^/    /' | tee -a "$LOG"
 say "-------------------------------------------------------------------------"

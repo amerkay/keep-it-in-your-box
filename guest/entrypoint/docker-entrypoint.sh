@@ -343,6 +343,7 @@ fi
 # while still root/SYS_ADMIN-capable; aborts the container on mount failure.
 KIB_EXEC_PREFIX=""
 if [ "${KIB_FUSE_INTERNAL:-0}" = 1 ]; then
+    # shellcheck source=SCRIPTDIR/entrypoint-fuse.sh
     . /usr/local/bin/entrypoint-fuse.sh
 fi
 

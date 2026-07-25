@@ -102,7 +102,7 @@ if ! _dir_guard_exempt "$@"; then
     unset _pwd _home _blocked _dir
 fi
 
-# shellcheck source=host/_load.sh
+# shellcheck source=SCRIPTDIR/../host/_load.sh
 . "$KIB_ROOT/host/_load.sh"
 
 # ── Host-global verbs: no project, no identity, no docker ────────
