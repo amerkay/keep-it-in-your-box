@@ -4,3 +4,7 @@
 #   shfmt v3.13.1, shellcheck v0.10.0
 ruff==0.16.0
 mypy==2.3.0
+# pytest runs the Python suites. tests/check/pytest.sh HARD-FAILS if it is missing rather
+# than skipping — a silently skipped suite reads as a pass, which is how a broken redaction
+# matcher would ship.
+pytest==9.1.1

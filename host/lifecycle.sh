@@ -1,0 +1,455 @@
+#!/usr/bin/env bash
+# Container lifecycle: identity, locks, create-or-attach, readiness, teardown, and the
+# `docker exec` that becomes this terminal's session.
+#
+# ONE long-lived container per project, every terminal attached by `docker exec`. Claude's own
+# concurrent-session arbitration (pid registry + daemon.lock) assumes the sessions share a PID
+# namespace and a /tmp — true for two terminals, false for two containers — so giving it one
+# container makes it see exactly what it sees on the host and arbitrate for itself.
+# (docs/design-notes/container-lifecycle.md)
+#
+# Reads:  KIB_ROOT IMAGE_NAME KIB_FUSE_MODE UNLOCK_SHARED and the globals host/config.sh sets
+# Writes: PROJ_HASH CNAME FUSE_CNAME FUSE_ROOT WL_CNAME WL_ROOT PATTERNS_STATE CLIP_STATE
+#         CRED_WITNESS LOCK_WITNESS BROKER_CNAME BROKER_NET BROKER_DIR BROKER_OUT BROKER_HASH
+#         BROKER_ENABLED PROJECT_MOUNT_SRC PROJECT_MOUNT_OPTS REDACTION_ARGS ARGS
+#         SLEEP_GUARD_PID SESSION_TAG EPH_ROOT
+# shellcheck disable=SC2034  # most of the above are consumed in the other host units
+
+# ── Identity ─────────────────────────────────────────────────────
+# Stable per project: hash $PWD so same-basename projects do not collide. Paths derive from the
+# hash rather than mktemp so ANY kib process can address them, not just the creator.
+kib_identity() {
+    PROJ_HASH="$(hash8 "$PWD")"
+    CNAME="kib-$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | cut -c1-40)-$PROJ_HASH"
+
+    if [ "${KIB_FORCE_NEW_SESSION:-0}" = "1" ]; then
+        # Clean slate: its own container and config dirs, so its daemon cannot collide with
+        # the project's. Discarded on exit, merge-out disabled.
+        EPH_ROOT="$KIB_STATE_ROOT/$SLUG.ephemeral.$$"
+        SESSION_BASE="$EPH_ROOT/session"
+        SHARED_BASE="$EPH_ROOT/shared"
+        CNAME="$CNAME-eph-$$"
+        EPHEMERAL=1
+        # Its own scratch dirs: sharing the project's would have this session's startup sweep
+        # and its exit both tear down the real container's live FUSE mount, unmasking files.
+        SCRATCH_SUFFIX=".eph.$$"
+    fi
+
+    FUSE_CNAME="${CNAME}-fuse"
+    FUSE_ROOT="/tmp/kib-fuse.${PROJ_HASH}${SCRATCH_SUFFIX}"
+    WL_CNAME="${CNAME}-wl"
+    WL_ROOT="/tmp/kib-wl.${PROJ_HASH}${SCRATCH_SUFFIX}"
+    PATTERNS_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.patterns"
+    CLIP_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.clip"
+    # Written at creation when the box got the REAL credential. A host-side FILE, not a shell
+    # variable: the last terminal out often merely ATTACHED and never ran stage_credential, so
+    # a per-process flag would skip merge_out_credential and leave canonical holding a token
+    # the box has already rotated away — which logs the account out.
+    CRED_WITNESS="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.credfallback"
+    # Bound :ro into the shared-assembly dir only when locked (the default), and read back off
+    # the running container's mounts by `running_unlocked`. A witness that always exists when
+    # locked, unlike any individual shared asset — a fresh user may have no plugins at all.
+    LOCK_WITNESS="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.lockwitness"
+
+    # Always defined so teardown/attach can reference them unconditionally. The network name
+    # maps the ephemeral suffix's dots to dashes to stay inside docker's charset.
+    BROKER_CNAME="${CNAME}-broker"
+    BROKER_NET="kib-broker-net-${PROJ_HASH}$(printf '%s' "$SCRATCH_SUFFIX" | tr '.' '-')"
+    BROKER_DIR="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.broker"
+    BROKER_OUT="$BROKER_DIR/out"
+    BROKER_HASH="$BROKER_DIR/hash"
+    BROKER_ENABLED=0
+
+    # The redaction interface fills these: sidecar mode sets a mount SRC/OPTS for $PWD;
+    # single mode leaves SRC empty (the entrypoint mounts the view in-container) and appends
+    # its own `docker run` flags to REDACTION_ARGS.
+    PROJECT_MOUNT_SRC="$PWD"
+    PROJECT_MOUNT_OPTS=""
+    REDACTION_ARGS=()
+}
+
+container_running() { [ -n "$(docker ps -q -f "name=^${CNAME}$" 2>/dev/null)" ]; }
+sidecar_running() { [ -n "$(docker ps -q -f "name=^${FUSE_CNAME}$" 2>/dev/null)" ]; }
+broker_running() { [ -n "$(docker ps -q -f "name=^${BROKER_CNAME}$" 2>/dev/null)" ]; }
+
+# Was the running container created with --unlock-shared? Read it off the mounts, which are
+# the ground truth — no state file to go stale.
+running_unlocked() {
+    ! docker inspect -f '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' "$CNAME" 2>/dev/null \
+        | grep -qx '/home/hostuser/.claude-shared/.kib-shared-locked'
+}
+
+# `docker run -d` returns as soon as PID 1 exists, but the entrypoint still has real work to
+# do as root — useradd, the shared-asset symlink farm, chown of the session dir — before it
+# execs `gosu … sleep infinity`. An immediate `docker exec` would land mid-setup: no home dir
+# yet, no symlinks, a chown walking the tree under us.
+#
+# Readiness is therefore a process whose command line is *exactly* `sleep infinity`, which
+# only exists once the entrypoint has exec'd. The exactness is load-bearing: while the
+# entrypoint is still working its own argv is `/bin/sh …/docker-entrypoint.sh sleep infinity`,
+# and PID 1 (docker-init) carries `… -- …docker-entrypoint.sh sleep infinity` forever — a
+# substring match would call a half-set-up container ready.
+container_ready() {
+    local args
+    args="$(docker top "$CNAME" -o args 2>/dev/null)" \
+        || args="$(docker top "$CNAME" 2>/dev/null \
+            | awk 'NR>1 { $1=$2=$3=$4=$5=$6=$7=""; sub(/^ +/,""); print }')"
+    printf '%s\n' "$args" | grep -qx 'sleep infinity'
+}
+
+# Ready, or gone — either way there is no point waiting longer. The caller decides which.
+_container_ready_or_gone() { container_ready || ! container_running; }
+
+wait_for_container_ready() {
+    wait_until 120 0.5 _container_ready_or_gone # ≤60s; a cold entrypoint is ~1s
+    container_ready && return 0
+    if container_running; then
+        echo "❌ kib: the project container never finished starting up (60s)." >&2
+    else
+        echo "❌ kib: the project container exited during startup. Logs:" >&2
+    fi
+    docker logs "$CNAME" 2>&1 | tail -20 | sed 's/^/   /' >&2 || true
+    # Leave nothing half-started behind: a running-but-never-ready container would make
+    # every later kib attach to it and hit this same timeout.
+    teardown_container
+    exit 1
+}
+
+teardown_container() {
+    docker stop -t 5 "$CNAME" >/dev/null 2>&1 || true # started with --rm; stop removes it
+
+    # Mode-specific: sidecar unmounts, removes the FUSE container, then its scratch root, in
+    # that order; single mode's mount died with the container, so only state remains.
+    teardown_redaction
+
+    # Plain dirs — none of the unmount ordering above applies. Each no-ops in the other mode.
+    stop_wayland_guard
+    stop_clipboard_bridge
+
+    # After the main container is stopped, so its network has no endpoint and `network rm`
+    # succeeds. (The resolv.conf watcher needs nothing: it died with the container.)
+    stop_broker
+}
+
+start_container() {
+    # Sidecar mode points PROJECT_MOUNT_SRC at the redacting mount; single mode leaves it empty
+    # and pushes flags onto REDACTION_ARGS for the entrypoint to mount in-container.
+    prepare_redaction
+    # Must precede the mounts below, which bind the proxy socket / spool dir.
+    if is_macos; then
+        start_clipboard_bridge
+    else
+        start_wayland_guard
+    fi
+
+    # Must precede the ARGS below, which add its base-URL env and placeholder shadow.
+    start_broker
+    # Only when the broker is not shadowing a synthetic credential: copy the real one into the
+    # shared-assembly DIR (never a single-file bind — rename footgun). Folded back on exit.
+    stage_credential
+
+    # --init: PID 1 is `sleep infinity`, which would never reap the zombies left behind by
+    # exec'd sessions. Docker's init does.
+    ARGS=(
+        -d --init --rm
+        --name "$CNAME"
+
+        # This project's private state: daemon, sessions, jobs, and the three files assembled
+        # from canonical (.claude.json, history.jsonl, CLAUDE.md). No other project mounts it.
+        -v "$SESSION_BASE:/home/hostuser/.claude-session"
+
+        # Shared-assembly dir: a real host directory the shared assets nest-bind into (below),
+        # plus the credential (synthetic shadow, or the real one copied in). A real dir, so
+        # Claude's atomic credential rename works.
+        -v "$SHARED_BASE:/home/hostuser/.claude-shared"
+
+        # config (+ .claude.json) resolve to the per-project session dir; the credential store
+        # to the shared-assembly dir.
+        -e CLAUDE_CONFIG_DIR=/home/hostuser/.claude-session
+        -e CLAUDE_SECURESTORAGE_CONFIG_DIR=/home/hostuser/.claude-shared
+
+        # Host UID/GID/HOME for runtime user creation. `docker exec` inherits these from the
+        # container config, so attached sessions get them too.
+        -e HOST_UID="$(id -u)"
+        -e HOST_GID="$(id -g)"
+        -e HOST_HOME="$HOME"
+        -e HOST_PWD="$PWD"
+
+        # Drop everything; add back only what the entrypoint needs for user setup + gosu.
+        --cap-drop=ALL
+        --cap-add=SETUID
+        --cap-add=SETGID
+        --cap-add=CHOWN
+        --cap-add=DAC_OVERRIDE
+        --cap-add=FOWNER
+
+        # The image still ships setuid binaries (su, mount, passwd, fusermount3). Defence in
+        # depth — the session's caps are already empty, so this closes a route, not a hole.
+        --security-opt no-new-privileges
+
+        # Bridge network + Claude's own domain allowlist. --add-host so a dev server on the
+        # host stays reachable.
+        --add-host=host.docker.internal:host-gateway
+
+        -e DISABLE_TELEMETRY=1
+        -e DISABLE_ERROR_REPORTING=1
+    )
+
+    # Project at the same absolute path as on the host, so Claude's path-keyed project
+    # configs resolve. Sidecar mode points $PWD at the redacting mount (rslave propagates its
+    # sub-mounts in); single mode adds NO bind for $PWD.
+    if [ -n "$PROJECT_MOUNT_SRC" ]; then
+        ARGS+=(-v "$PROJECT_MOUNT_SRC:$PWD$PROJECT_MOUNT_OPTS")
+    fi
+    # `if`, not `[ … ] && ARGS+=`: the codebase's convention for array appends under set -e.
+    if [ "${#REDACTION_ARGS[@]}" -gt 0 ]; then
+        ARGS+=("${REDACTION_ARGS[@]}")
+    fi
+
+    # Clipboard mounts: the mediated Wayland socket on Linux (reads pass, writes refused), or
+    # the pbpaste bridge spool on macOS. Both no-op if their sidecar/bridge didn't come up.
+    if is_macos; then
+        add_clipboard_bridge_args
+    else
+        add_wayland_args
+    fi
+
+    # Follow the host's live DNS. Linux only — on macOS the engine VM already tracks the host
+    # resolver, so there is nothing to sync.
+    is_macos || add_resolv_sync_args
+
+    local git_name git_email
+    git_name="$(git config --global user.name 2>/dev/null || true)"
+    git_email="$(git config --global user.email 2>/dev/null || true)"
+    if [ -n "$git_name" ]; then
+        ARGS+=(
+            -e GIT_AUTHOR_NAME="$git_name"
+            -e GIT_COMMITTER_NAME="$git_name"
+            -e GIT_AUTHOR_EMAIL="$git_email"
+            -e GIT_COMMITTER_EMAIL="$git_email"
+        )
+    fi
+
+    # Read-only: the HOST runs these at the next commit, so a writable bind would be host code
+    # execution. Belt-and-braces only — this covers one repo's top-level .git if it exists at
+    # launch; the FUSE guard is what covers nested repos, submodules and mid-session ones.
+    # Sidecar only: in single mode $PWD is the FUSE view and this bind would shadow it.
+    if [ "$KIB_FUSE_MODE" = sidecar ] && [ -d "$PWD/.git/hooks" ]; then
+        ARGS+=(-v "$PWD/.git/hooks:$PWD/.git/hooks:ro")
+    fi
+
+    # This project's transcripts, shared host<->box so --resume lists the same sessions on
+    # both sides. Nested rw bind inside the session mount; Docker applies mounts parent-first.
+    # Skipped for an ephemeral session — it must persist nothing to canonical.
+    if [ "$EPHEMERAL" != 1 ] && [ -d "$CLAUDE_HOME/projects/$SLUG" ]; then
+        ARGS+=(-v "$CLAUDE_HOME/projects/$SLUG:/home/hostuser/.claude-session/projects/$SLUG")
+    fi
+
+    # settings.json / keybindings.json are deliberately NOT bound: stage_shared_settings puts
+    # writable COPIES in $SHARED_BASE (already served by the dir mount above) and vets them
+    # before they re-enter canonical. Binding canonical rw here — as this once did — let a
+    # sandboxed session write the settings.json a HOST `claude` loads.
+
+    # These auto-load in EVERY project's next session and the host claude, so a write from one
+    # sandboxed repo is a cross-project pivot (audit H6) — READ-ONLY by default. Nothing is
+    # lost: the entrypoint farms a per-project dir, so in-session installs still work, they
+    # just land per-project. --unlock-shared makes them writable into canonical ~/.claude.
+    local _ro=":ro"
+    [ "$UNLOCK_SHARED" = 1 ] && _ro=""
+    local _entry
+    # `if`, not `[ … ] && ARGS+=`: a false test on the final iteration would make the whole
+    # loop exit 1, which under `set -e` kills kib before the container starts.
+    for _entry in plugins skills agents commands hooks; do
+        if [ -e "$CLAUDE_HOME/$_entry" ]; then
+            ARGS+=(-v "$CLAUDE_HOME/$_entry:/home/hostuser/.claude-shared/$_entry$_ro")
+        fi
+    done
+
+    # Lock witness: a read-only bind that exists ONLY when locked, so running_unlocked can
+    # read the lock state off the mounts even for a user with no shared assets to probe.
+    if [ "$UNLOCK_SHARED" = 0 ]; then
+        printf 'locked\n' >"$LOCK_WITNESS" 2>/dev/null || true
+        if [ -f "$LOCK_WITNESS" ]; then
+            ARGS+=(-v "$LOCK_WITNESS:/home/hostuser/.claude-shared/.kib-shared-locked:ro")
+        fi
+    fi
+
+    # Broker wiring: -e ANTHROPIC_BASE_URL + the placeholder credential that SHADOWS the real
+    # .credentials.json. Appended after the shared mounts above so it overlays the file inside
+    # them (Docker applies mounts parent-first). No-op unless the broker came up.
+    add_broker_env_args
+
+    # The container just idles; the real work runs in `docker exec` sessions, so it survives
+    # any one terminal closing.
+    docker run "${ARGS[@]}" "$IMAGE_NAME" sleep infinity >/dev/null \
+        || die "failed to start the project container."
+
+    # Dual-home onto the broker net AFTER the run (a second --network at run time would
+    # replace the default bridge; connecting keeps both + enables embedded DNS for the
+    # broker alias). host-gateway + default-bridge/LAN reachability are preserved.
+    connect_broker_network
+}
+
+# ── Session preparation ──────────────────────────────────────────
+# Config dirs, the project lock, and the shared-config banner. Their CONTENTS are assembled
+# fresh from canonical on the cold-start path only, never while a container is attached.
+kib_prepare_session() {
+    mkdir -p "$LOCK_DIR" && chmod 700 "$LOCK_DIR"
+    mkdir -p "$STATE_DIR" && chmod 700 "$STATE_DIR"
+    validate_shared_settings
+
+    if [ "$UNLOCK_SHARED" = 1 ]; then
+        echo "⚠️  --unlock-shared: your ~/.claude plugins/skills/agents/commands/hooks are WRITABLE" >&2
+        echo "   this session — an install lands in ~/.claude, shared with every project + host claude." >&2
+    else
+        echo "🔒 shared config: read-only (installs land per-project; kib unlock-shared to share)" >&2
+    fi
+
+    mkdir -p "$SESSION_BASE" && chmod 700 "$SESSION_BASE"
+    mkdir -p "$SHARED_BASE" && chmod 700 "$SHARED_BASE" # holds the real credential when the broker is off
+    if [ "$EPHEMERAL" = 1 ]; then
+        # Reap it even if we bail out below (e.g. the sidecar fails): the real cleanup() trap
+        # is not installed until just before the container starts.
+        trap 'rm -rf "$EPH_ROOT"' EXIT
+        echo "⚠️  KIB_FORCE_NEW_SESSION=1 — ephemeral session; no history, discarded on exit." >&2
+    else
+        # SHARED lock held for this terminal's lifetime — a reference count on the container,
+        # not a mutex. It blocks only while a departing session holds it EXCLUSIVELY to tear
+        # the container down, so we can never attach to a dying one. Never unlinked.
+        exec 200>"$LOCK_FILE"
+        lock_fd -w 60 -s 200 || die "timed out waiting for the project lock ($LOCK_FILE)."
+    fi
+}
+
+# ── Create or attach ─────────────────────────────────────────────
+# The boot lock serialises this section: two terminals launched at the same instant must not
+# both try to `docker run` the same container name.
+kib_bring_up() {
+    exec 201>"$BOOT_LOCK"
+    lock_fd -x 201
+    if container_running; then
+        # Redaction rules are read once at creation and the container outlives any terminal,
+        # so a second terminal must never silently run under stale — or absent — rules.
+        verify_redaction_attach
+        # Same hazard: never attach as if the token were brokered when it is not.
+        verify_broker_attach
+        # And for the read-only mounts over ~/.claude-shared, fixed at creation too.
+        if [ "$(running_unlocked && echo 1 || echo 0)" != "$UNLOCK_SHARED" ]; then
+            if [ "$UNLOCK_SHARED" = 1 ]; then
+                die "this project's container is running with the shared config LOCKED, and" \
+                    "the mounts are fixed at creation. Close all kib sessions for this" \
+                    "project, then run:" \
+                    "    kib unlock-shared"
+            fi
+            # Also the shape of a container created before the shared-config lock existed: it
+            # has no read-only mounts either, and must not be attached to as if it had.
+            die "this project's container has ~/.claude-shared WRITABLE — it was started with" \
+                "unlock-shared, or it predates the shared-config lock. Refusing to attach" \
+                "without the flag: the session would look protected and would not be." \
+                "Close all kib sessions for this project and relaunch, or attach with:" \
+                "    kib unlock-shared"
+        fi
+        wait_for_container_ready # in case its creator died mid-startup
+        # Re-pin the live session file (a concurrent session may have rewritten it wholesale).
+        # Do NOT re-assemble — the running container is bound to these files.
+        pin_global_config "$SESSION_BASE/.claude.json"
+        echo "🔗 kib: attaching to this project's running container ($CNAME)." >&2
+    else
+        teardown_container # clear anything a crashed session left behind
+        # Cold start only: refuse to launch into a repo whose git config the host would
+        # execute. Nothing is running yet, so exiting here strands nothing.
+        kib_audit_gate launch
+        # Rebuild this project's config from canonical ~/.claude, then pin. Only here — never
+        # while a container is attached to these bind-mounted files.
+        assemble_session_dir
+        pin_global_config "$SESSION_BASE/.claude.json"
+        start_container
+        wait_for_container_ready
+        # Linux only: macOS's engine VM already tracks the host resolver. One info line, and
+        # deliberately no desktop notification.
+        if is_macos; then
+            echo "ℹ️  DNS: handled by the Docker engine VM — follows the host resolver." >&2
+        else
+            start_resolv_sync
+        fi
+    fi
+    lock_fd -u 201
+    exec 201>&-
+}
+
+# ── Exit path ────────────────────────────────────────────────────
+kib_cleanup() {
+    kill "$SLEEP_GUARD_PID" 2>/dev/null || true
+
+    if [ "$EPHEMERAL" = 1 ]; then
+        teardown_container
+        [ -n "${EPH_ROOT:-}" ] && rm -rf "$EPH_ROOT"
+    else
+        # Last terminal out? Drop the shared lock, then try to take it exclusively — which
+        # only succeeds if no other kib holds it. While we do, a starting kib blocks on its
+        # shared acquire, so it cannot attach to a container we are about to stop.
+        exec 200>&-
+        exec 202>"$LOCK_FILE"
+        if lock_fd -n -x 202; then
+            teardown_container # stop the container first: the session files go quiescent
+            merge_out_session  # then fold this project's changes back to canonical
+            # …and say so if the repo grew something the host would run. `|| true` because
+            # report mode returns the finding class, and this is the EXIT trap: a non-zero
+            # here would overwrite the session's own exit status.
+            kib_audit_gate teardown || true
+            lock_fd -u 202
+        fi
+        exec 202>&-
+    fi
+
+    # NO `tput reset` here or before the exec below: it wipes the terminal AND its scrollback,
+    # erasing a short command's output the instant it exits. Claude's TUI manages its own
+    # screen, as it does on the host, so kib leaves the terminal alone. Regression-guarded.
+    :
+}
+
+# ── Run this terminal's session inside the project container ─────
+# Re-entering through the entrypoint (rather than calling claude directly) reuses its
+# "already the target user" branch, which sets HOME and PATH correctly.
+kib_run_session() {
+    # Stamps this terminal's processes so the sleep guard samples only pids that are ours —
+    # without it, one working session makes every terminal's guard inhibit.
+    SESSION_TAG="kib-$$-$(date +%s)"
+
+    # 200>&- / 201>&-: the guard must not inherit our lock fds. A guard outliving kib would
+    # keep holding the project's shared lock and stop the container from ever being torn down.
+    "$KIB_ROOT/host/sleep-guard.sh" "$CNAME" "$SESSION_TAG" 200>&- 201>&- &
+    SLEEP_GUARD_PID=$!
+
+    trap kib_cleanup EXIT
+    # Bash dies on SIGHUP (window closed) and SIGTERM *without* running the EXIT trap, which
+    # orphans the sleep guard still holding an inhibitor and strands the container if this was
+    # the last terminal. Route both through a normal exit so cleanup runs.
+    trap 'exit 129' HUP
+    trap 'exit 143' TERM
+
+    # Single mode's container needs SYS_ADMIN to mount, and `docker exec` hands EVERY session
+    # the container's full cap set — it does NOT inherit PID 1's reduced bounding set. So drop
+    # per session: enter as root, `setpriv` off SYS_ADMIN/SETPCAP (needs CAP_SETPCAP, which
+    # root has), then `gosu` to the agent uid. Sidecar's container never had SYS_ADMIN.
+    local -a incmd=(/usr/local/bin/docker-entrypoint.sh "$@")
+    local -a userflag=()
+    if [ "$KIB_FUSE_MODE" = single ]; then
+        # shellcheck disable=SC2054  # the comma is setpriv's own bounding-set syntax
+        incmd=(setpriv --bounding-set -sys_admin,-setpcap gosu "$(id -u):$(id -g)" "${incmd[@]}")
+    else
+        userflag=(--user "$(id -u):$(id -g)")
+    fi
+
+    # Set on the *exec*, not the container, so the tag is per-terminal and works against a
+    # container created before this existed. Claude's tools and subagents inherit it.
+    echo >&2 # blank line separating kib's startup diagnostics from the app's own output
+    docker exec -it \
+        ${userflag[@]+"${userflag[@]}"} \
+        --workdir "$PWD" \
+        -e COLUMNS="$(tput cols 2>/dev/null || echo 120)" \
+        -e LINES="$(tput lines 2>/dev/null || echo 40)" \
+        -e TERM="${TERM:-xterm-256color}" \
+        -e KIB_SESSION_TAG="$SESSION_TAG" \
+        "$CNAME" "${incmd[@]}"
+}

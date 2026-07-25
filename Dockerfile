@@ -40,7 +40,7 @@ RUN apt-get update && apt-get install -y curl \
     direnv \
     # Required for Claude Code's built-in sandbox
     bubblewrap socat \
-    # FUSE runtime for the .ccignore redacting sidecar.
+    # FUSE runtime for the .kibignore redacting sidecar.
     # trixie's 64-bit time_t transition renamed libfuse2 -> libfuse2t64, and fusepy is
     # packaged, so it comes from apt instead of a PEP 668 --break-system-packages override.
     fuse3 libfuse2t64 python3-fusepy \
@@ -79,7 +79,7 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
 
 # Install JavaScript/TypeScript development tools.
 # supergateway bridges a stdio MCP server to streamable-HTTP; the credential-broker's
-# hosted-MCP sidecar (cc-lib.sh start_hosted_mcp) runs it to expose a local/client-signed MCP
+# hosted-MCP sidecar (host/broker.sh start_hosted_mcp) runs it to expose a local/client-signed MCP
 # (e.g. Google Search Console) over the broker network without the credential entering the
 # agent container. Pre-installed so the sidecar needs no runtime npm fetch.
 RUN npm install -g \
@@ -142,7 +142,7 @@ RUN printf '%s\n' \
     '  <alias binding="strong"><family>Cascadia Mono</family><accept><family>monospace</family></accept></alias>' \
     '  <alias binding="strong"><family>JetBrains Mono</family><accept><family>monospace</family></accept></alias>' \
     '  <alias binding="strong"><family>monospace</family><prefer><family>DejaVu Sans Mono</family><family>Liberation Mono</family></prefer></alias>' \
-    '</fontconfig>' > /etc/fonts/conf.d/99-cc-monospace.conf \
+    '</fontconfig>' > /etc/fonts/conf.d/99-kib-monospace.conf \
     && fc-cache -f \
     && fc-match monospace \
     && fc-match ui-monospace
@@ -157,8 +157,9 @@ RUN uv venv /opt/dev-tools \
     && uv pip install --no-cache --python /opt/dev-tools/bin/python -r /opt/requirements-dev.txt \
     && ln -s /opt/dev-tools/bin/ruff /usr/local/bin/ruff \
     && ln -s /opt/dev-tools/bin/mypy /usr/local/bin/mypy \
+    && ln -s /opt/dev-tools/bin/pytest /usr/local/bin/pytest \
     && chmod -R a+rX /opt/dev-tools \
-    && ruff --version && mypy --version
+    && ruff --version && mypy --version && pytest --version
 
 # Install Claude Code via official native installer
 # NOTE: everything below this line rebuilds on every Claude Code version bump.
@@ -170,15 +171,25 @@ RUN echo "Installing Claude Code version: ${CLAUDE_VERSION}" && \
     /usr/local/bin/claude --version && \
     /usr/local/bin/claude --version 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1 > /etc/claude-code-version
 
-# Copy entrypoint script (after Claude install so edits don't bust the cache)
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-COPY ccignore-fuse.py /usr/local/bin/ccignore-fuse.py
-# entrypoint-fuse.sh is BAKED (not bind-mounted like the sidecar scripts): it is sourced by
-# the baked docker-entrypoint.sh and runs as root with SYS_ADMIN, so editing it needs a
-# rebuild. Only used by the single-container FUSE mode (macOS / CC_SINGLE_CONTAINER=1).
-COPY entrypoint-fuse.sh /usr/local/bin/entrypoint-fuse.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/ccignore-fuse.py \
-	&& chmod 0644 /usr/local/bin/entrypoint-fuse.sh
+# Entrypoints + guest shims (after the Claude install so edits don't bust its cache).
+#
+# The entrypoints are BAKED, not bind-mounted: docker-entrypoint.sh is the container's
+# ENTRYPOINT, and entrypoint-fuse.sh is sourced by it as root with SYS_ADMIN — a sandboxed
+# session must not be able to edit either, so both need a rebuild to change.
+COPY guest/entrypoint/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY guest/entrypoint/entrypoint-fuse.sh /usr/local/bin/entrypoint-fuse.sh
+# The kib package is COPIED here as a fallback, then bind-mounted over at run time from the
+# checkout — so editing a sidecar takes effect on the next container with no rebuild. The
+# three shims in /usr/local/bin are baked because they never change: each is one `exec` line
+# that puts /usr/local/lib on sys.path for that process only. PYTHONPATH is deliberately NOT
+# an image ENV — it would leak into every process the agent later runs.
+COPY kib /usr/local/lib/kib
+COPY guest/bin/fuse guest/bin/wayland-guard guest/bin/broker /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
+	/usr/local/bin/fuse /usr/local/bin/wayland-guard /usr/local/bin/broker \
+	&& chmod 0644 /usr/local/bin/entrypoint-fuse.sh \
+	&& chmod -R a+rX /usr/local/lib/kib \
+	&& python3 -c "import sys; sys.path.insert(0, '/usr/local/lib'); import kib.shared.rules, kib.broker.cli; print('kib package OK')"
 
 ENV SHELL=/bin/bash
 ENV TERM=xterm-256color

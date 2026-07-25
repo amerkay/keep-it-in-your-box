@@ -1,0 +1,6 @@
+#!/bin/sh
+# Baked shim. The logic lives in the bind-mounted kib package, so editing it takes effect on
+# the next container with no image rebuild; only this three-line launcher is baked.
+# PYTHONPATH is set for this exec ALONE, never image-wide — an ENV PYTHONPATH would leak
+# into every process the agent later runs.
+exec env PYTHONPATH=/usr/local/lib python3 -m kib.guest.fuse "$@"

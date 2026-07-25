@@ -6,28 +6,25 @@
 #
 #   ./dev.sh format   rewrite: ruff format + ruff --fix, shfmt -w
 #   ./dev.sh lint      verify: ruff, mypy --strict, shfmt -d          (what CI runs, via check)
-#   ./dev.sh check      lint + tests/check.sh (syntax, shellcheck, portability, unit tests)
+#   ./dev.sh check      lint + tests/check.sh (syntax, shellcheck, portability, pytest)
 #
-# Host-side script: bash-3.2/BSD-clean per the portability contract (tests/check.sh enforces
-# it). Nothing here needs a cc-portable.sh shim, so it deliberately does not source it.
+# Host-side, so bash-3.2/BSD-clean per the portability contract. Nothing here needs a
+# host/portable.sh shim, so it deliberately does not source one.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# mypy's cache is mmap'd, and mmap over the project's FUSE view dies with SIGBUS — an
-# in-repo .mypy_cache core-dumps every in-container run. Keep it outside the mount always:
-# one code path, and the host loses nothing but a repo-local cache directory.
+# mypy's cache is mmap'd and mmap over the FUSE view SIGBUSes, so an in-repo .mypy_cache
+# core-dumps every in-container run. Always outside the mount — one code path.
 MYPY_CACHE_DIR="${TMPDIR:-/tmp}/kib-mypy-cache"
 export MYPY_CACHE_DIR
 
 FAILED=""
 
-# Prefer a repo-local venv (host setup) over whatever is on PATH (the container bakes
-# /opt/dev-tools onto PATH), so a host venv never silently loses to a stale global install —
-# but only if it can actually execute *here*. The repo is shared with the container, and a host
-# `uv venv` puts a symlink to a uv-managed interpreter in .venv/bin/python3 that does not exist
-# inside the sandbox: `ruff` still runs (native binary, no shebang) while `mypy` dies with
-# "required file not found". Probing beats guessing at the environment — it also routes around a
-# half-deleted or wrong-arch venv on the host, and needs no OS/container branching.
+# Prefer a repo-local venv over PATH, so a host venv never loses to a stale global install —
+# but only if it actually executes HERE. The repo is shared with the container, and a host
+# `uv venv` symlinks an interpreter that does not exist inside it: `ruff` still runs (native
+# binary) while `mypy` dies with "required file not found". Probing rather than branching also
+# routes around a half-deleted or wrong-arch venv.
 tool() {
     if [ -x ".venv/bin/$1" ] && ".venv/bin/$1" --version >/dev/null 2>&1; then
         printf '%s\n' ".venv/bin/$1"
@@ -55,7 +52,8 @@ step() {
 # Tracked files plus new-but-not-ignored ones, so a file is linted before its first commit.
 git_files() { git ls-files --cached --others --exclude-standard; }
 
-# Shell scripts: *.sh plus extensionless files with a shell shebang (`cc`).
+# Shell scripts: *.sh plus extensionless files with a shell shebang (`bin/kib`, the three
+# guest/bin shims).
 list_sh() {
     git_files | while IFS= read -r f; do
         [ -f "$f" ] || continue

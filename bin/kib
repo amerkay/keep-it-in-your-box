@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# kib — host-side launcher for the keep-it-in-your-box sandbox.
+#
+# Only what must happen before anything else exists: the sensitive-directory guard, verb
+# dispatch, and the hand-off to host/ (one file per subsystem, loaded by host/_load.sh).
+#
+# VERBS WIN OVER PROGRAMS. `kib bash` does not run bash — it is an unknown verb and an error;
+# pass-through is explicit, `kib exec bash`. The CLI is deliberately stricter than a shell here,
+# so an unknown first token prints the table below and never launches anything.
+
+KIB_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC2034  # read across the source boundary, by the host/ units
+IMAGE_NAME="keep-it-in-your-box"
+
+usage() {
+    cat <<'USAGE'
+kib — run Claude Code in a Docker sandbox, one container per project.
+
+  kib [claude] [args…]        start (or attach to) this project's session
+  kib exec <cmd> [args…]      run a command inside the box  (kib exec bash)
+  kib broker <verb> [name]    login | logout | status | probe   (host-only credentials)
+  kib mcp add <name> …        declare a brokered MCP
+  kib mcp adopt <name>        move an inline-credential MCP into the broker
+  kib audit                   report host-executed git config + tracked hidden paths
+  kib unlock-shared [verb…]   this session may write ~/.claude's shared assets
+  kib build [--background]    rebuild the image
+  kib sleep-monitor [iv] [id] diagnose "why won't it idle-suspend?"
+  kib help                    this table
+
+Verbs win over programs: `kib bash` is an error, `kib exec bash` is what you want.
+USAGE
+}
+
+# ── Verb ─────────────────────────────────────────────────────────
+if [ $# -gt 0 ]; then
+    VERB="$1"
+    shift
+else
+    VERB=claude # bare `kib` is a session, the overwhelmingly common case
+fi
+
+case "$VERB" in
+    help | -h | --help)
+        usage
+        exit 0
+        ;;
+    claude | exec | broker | mcp | audit | unlock-shared | build | sleep-monitor) ;;
+    *)
+        printf '❌ kib: unknown verb %s\n\n' "$VERB" >&2
+        usage >&2
+        printf '\nTo run it inside the box:  kib exec %s\n' "$VERB" >&2
+        exit 2
+        ;;
+esac
+
+# ── Guard: forbid launching from sensitive host directories ──────
+# Exactly $HOME, ~/Desktop, ~/Documents, ~/Downloads; subdirectories are fine. Runs before any
+# trap is installed, so the error stays on screen after exit. Exempt: verbs managing
+# HOST-GLOBAL state that never touch the project dir, plus `claude mcp add|add-json`, which is
+# intercepted before any container exists. `mcp adopt` and `audit` DO read the project.
+_dir_guard_exempt() {
+    case "$VERB" in
+        broker | build | sleep-monitor) return 0 ;;
+        mcp) [ "${1:-}" = add ] && return 0 ;;
+        claude)
+            local -a a=("$@")
+            while [ "${a[0]:-}" = claude ]; do a=("${a[@]:1}"); done
+            if [ "${a[0]:-}" = mcp ]; then
+                case "${a[1]:-}" in add | add-json) return 0 ;; esac
+            fi
+            ;;
+    esac
+    return 1
+}
+
+if ! _dir_guard_exempt "$@"; then
+    _pwd="$(realpath "$PWD" 2>/dev/null || echo "$PWD")"
+    _home="$(realpath "$HOME" 2>/dev/null || echo "$HOME")"
+    _blocked=""
+    if [ "$_pwd" = "$_home" ]; then
+        _blocked="\$HOME"
+    else
+        # shellcheck disable=SC2088  # "~/Desktop" here is prose for the user, not a path
+        for _dir in Desktop Documents Downloads; do
+            [ "$_pwd" = "$_home/$_dir" ] && {
+                _blocked="~/$_dir"
+                break
+            }
+        done
+    fi
+    if [ -n "$_blocked" ]; then
+        echo "" >&2
+        echo "❌ kib refuses to launch from $_blocked ($PWD)." >&2
+        echo "   These directories are on the permanent forbidden list:" >&2
+        echo "     \$HOME, ~/Desktop, ~/Documents, ~/Downloads" >&2
+        echo "   (subdirectories are allowed — cd into one and retry.)" >&2
+        echo "" >&2
+        exit 1
+    fi
+    unset _pwd _home _blocked _dir
+fi
+
+# shellcheck source=host/_load.sh
+. "$KIB_ROOT/host/_load.sh"
+
+# ── Host-global verbs: no project, no identity, no docker ────────
+# Must work while the sandbox is broken or unbuilt, so they run before preflight and exit on
+# their own status. `&& exit 0 || exit $?` is deliberate: called bare, a function returning
+# non-zero would trip `set -e` before its own reporting ran. An && / || list suspends errexit.
+case "$VERB" in
+    build) exec "$KIB_ROOT/tools/build-bg.sh" "$@" ;;
+    sleep-monitor) exec "$KIB_ROOT/host/sleep-monitor.sh" "$@" ;;
+    broker) broker_cli "$@" && exit 0 || exit $? ;;
+esac
+
+# ── Project-scoped, container-free verbs ─────────────────────────
+kib_resolve_paths
+
+case "$VERB" in
+    mcp)
+        _sub="${1:-}"
+        [ $# -gt 0 ] && shift
+        case "$_sub" in
+            add) mcp_add "$@" && exit 0 || exit $? ;;
+            adopt) mcp_adopt "${1:-}" && exit 0 || exit $? ;;
+            *) die "usage: kib mcp add <name> …   |   kib mcp adopt <server-name>" ;;
+        esac
+        ;;
+    audit) kib_audit_gate report && exit 0 || exit $? ;;
+esac
+
+# ── Session verbs: claude | exec ─────────────────────────────────
+# --unlock-shared drops the read-only mounts over the shared assets, so an install lands in
+# canonical ~/.claude for EVERY project (and the host claude) rather than just this one.
+# shellcheck disable=SC2034  # read by host/lifecycle.sh (start_container, kib_bring_up)
+UNLOCK_SHARED="${KIB_UNLOCK_SHARED:-0}"
+if [ "$VERB" = unlock-shared ]; then
+    # shellcheck disable=SC2034  # same global, read in host/lifecycle.sh
+    UNLOCK_SHARED=1
+    if [ $# -gt 0 ]; then
+        VERB="$1"
+        shift
+    else
+        VERB=claude
+    fi
+    case "$VERB" in
+        claude | exec) ;;
+        *) die "kib unlock-shared takes a session verb: claude (default) or exec" ;;
+    esac
+fi
+
+CMD=()
+case "$VERB" in
+    claude)
+        # Peel leading `claude` tokens: `cc` already means `kib claude`, so `cc claude mcp add`
+        # is a normal habit. Stripping them BEFORE the interceptor sees argv is what stops that
+        # habit slipping an inline secret past the gate.
+        while [ "${1:-}" = claude ]; do shift; done
+
+        # Its tri-state exit drives ours: 0 = auto-brokered (done), 2 = blocked, anything else
+        # = not an intercept, fall through to a normal launch.
+        _ic=0
+        intercept_mcp_add "$@" || _ic=$?
+        [ "$_ic" = 0 ] && exit 0
+        [ "$_ic" = 2 ] && exit 2
+        unset _ic
+
+        # Everything left is claude's own argv — pass-through has its own verb, so there is
+        # nothing to guess about.
+        CMD=(claude --dangerously-skip-permissions "$@")
+        ;;
+    exec)
+        [ $# -gt 0 ] || die "usage: kib exec <command> [args…]" \
+            "e.g. kib exec bash        kib exec python app.py"
+        CMD=("$@")
+        ;;
+esac
+
+ensure_claude_home
+preflight_platform # darwin: engine/perl/bind-mount checks; linux: no-op
+build_image_if_missing
+check_for_updates
+
+kib_identity
+kib_prepare_session
+
+# Warn (never block) if an MCP config carries an inline credential the agent can read, and
+# mirror the redaction rules into .gitignore. Both run on every launch — create and attach —
+# since either can change between sessions.
+warn_inline_mcp_secrets
+sync_kibignore_gitignore
+
+kib_bring_up
+kib_run_session "${CMD[@]}"

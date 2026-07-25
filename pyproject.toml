@@ -2,8 +2,8 @@
 # CLI all read this file, so all three produce identical results. Versions are pinned in
 # requirements-dev.txt; run everything through ./dev.sh.
 #
-# No build backend / [project] table on purpose — this repo is a set of standalone scripts,
-# not an installable package. Only tool config lives here.
+# No build backend / [project] table on purpose — this repo is scripts plus one importable
+# package (`kib/`), not an installable distribution. Only tool config lives here.
 
 [tool.ruff]
 line-length = 100                  # repo-wide (prose wraps here too, see .editorconfig)
@@ -24,3 +24,8 @@ strict = true
 [[tool.mypy.overrides]]
 module = ["fuse", "fusepy"]
 ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Quiet by default; tests/check/pytest.sh reports the summary line it prints.
+addopts = "-q"

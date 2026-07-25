@@ -1,0 +1,164 @@
+"""The single `.kibignore` implementation — matcher AND gitignore emitter.
+
+This suite carries the weight for three consumers at once: the FUSE guard, the launch-time
+audit gate, and the `.gitignore` sync. They used to be three separate implementations, so
+every case here is one that could previously have been true in one place and false in
+another.
+"""
+
+from collections.abc import Callable
+from pathlib import Path
+
+import pytest
+
+from kib.shared import rules
+
+GUARD = Path(__file__).resolve().parent.parent.parent / "guest" / "policy" / "global.kibignore"
+
+
+def guarded(project: str = "") -> list[rules.Rule]:
+    """The shipped guard file plus a project rule set, in the order the FUSE server loads."""
+    return rules.load(str(GUARD), guard=True) + rules.parse(project.splitlines())
+
+
+# ── parsing ──────────────────────────────────────────────────────
+def test_comments_and_blanks_are_dropped() -> None:
+    assert rules.parse(["# a comment", "", "   ", "real"]) == [
+        rules.Rule(False, "real", rules.BARE, rules.REDACT, False)
+    ]
+
+
+@pytest.mark.parametrize("unsafe", ["/etc/passwd", "../outside", "a/../b"])
+def test_unsafe_rules_are_skipped(unsafe: str) -> None:
+    """A leading '/' or a '..' component could escape the project root — never honour one."""
+    assert rules.parse([unsafe]) == []
+
+
+def test_anchor_follows_the_presence_of_a_slash() -> None:
+    parsed = rules.parse(["bare", "dir/leaf"])
+    assert [r.anchor for r in parsed] == [rules.BARE, rules.EXACT]
+
+
+def test_negation_is_detached_before_anchoring() -> None:
+    (rule,) = rules.parse(["!dir/keep"])
+    assert rule.negated and rule.pattern == "dir/keep"
+
+
+def test_load_of_a_missing_file_is_an_empty_rule_set() -> None:
+    assert rules.load("/nonexistent/.kibignore") == []
+
+
+# ── matching ─────────────────────────────────────────────────────
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".env.example",
+        ".env.sample",
+        ".env.template",
+        ".env.dist",
+        ".env.defaults",
+        "newd/.env.example",
+        "a/b/c/.env.sample",
+    ],
+)
+def test_env_placeholders_are_readable(path: str) -> None:
+    """Committed by convention and holding no secrets — redacting them just breaks work."""
+    assert rules.verdict(guarded(), path) is None
+
+
+@pytest.mark.parametrize(
+    "path", [".env", ".env.local", ".env.production", "newd/.env", ".env.example.local"]
+)
+def test_secret_bearing_env_files_are_redacted(path: str) -> None:
+    assert rules.verdict(guarded(), path) == rules.REDACT
+
+
+@pytest.mark.parametrize(
+    ("project_rule", "path", "expected"),
+    [
+        ("!.env", ".env", rules.REDACT),
+        ("!.env.local", ".env.local", rules.REDACT),
+        ("!.vscode", ".vscode/tasks.json", rules.PROTECT),
+    ],
+)
+def test_a_project_cannot_un_protect_itself(project_rule: str, path: str, expected: str) -> None:
+    """Guard rules are immune to a project's '!' — that immunity is the whole guarantee."""
+    assert rules.verdict(guarded(project_rule), path) == expected
+
+
+def test_a_project_may_still_add_redaction_over_a_placeholder() -> None:
+    assert rules.verdict(guarded(".env.example"), ".env.example") == rules.REDACT
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".vscode/tasks.json",
+        "deep/.vscode/settings.json",
+        ".envrc",
+        "a/b/.devcontainer/devcontainer.json",
+        ".idea/workspace.xml",
+    ],
+)
+def test_guard_patterns_are_tail_matched_at_any_depth(path: str) -> None:
+    assert rules.verdict(guarded(), path) == rules.PROTECT
+
+
+@pytest.mark.parametrize("path", ["src/main.py", "README.md", ".github/workflows/ci.yml", "envrc"])
+def test_unrelated_paths_pass_through(path: str) -> None:
+    assert rules.verdict(guarded(), path) is None
+
+
+def test_last_match_wins_and_negation_re_includes() -> None:
+    parsed = rules.parse(["dir/*", "!dir/keep"])
+    assert rules.verdict(parsed, "dir/secret") == rules.REDACT
+    assert rules.verdict(parsed, "dir/keep") is None
+
+
+def test_a_masked_parent_seals_everything_beneath_it() -> None:
+    """git's parent-exclusion rule: no '!' can reach inside an already-masked directory."""
+    assert rules.verdict(rules.parse(["secrets"]), "secrets/a/b") == rules.REDACT
+
+
+def test_a_bare_rule_never_matches_inside_dot_git() -> None:
+    assert rules.verdict(rules.parse(["build"]), ".git/build") is None
+
+
+def test_glob_wildcards_never_cross_a_slash() -> None:
+    assert rules.verdict(rules.parse(["*.pem"]), "certs/server.pem") == rules.REDACT
+    assert rules.verdict(rules.parse(["a/*"]), "a/b/c") == rules.REDACT
+    assert rules.verdict(rules.parse(["a/*.txt"]), "a/b/c.txt") is None
+
+
+def test_matches_is_the_boolean_face_of_verdict() -> None:
+    parsed = rules.parse(["secrets", "!secrets/ok"])
+    assert rules.matches(parsed, "secrets") is True
+    assert rules.matches(parsed, "other") is False
+
+
+# ── the gitignore emitter (the third consumer) ───────────────────
+@pytest.mark.parametrize(
+    ("rule", "expected"),
+    [
+        ("secret.txt", "secret.txt"),  # bare name matches anywhere, as in gitignore
+        ("dir/secret", "/dir/secret"),  # a '/'-containing rule anchors at the repo root
+        ("!keep", "!keep"),
+        ("!dir/keep", "!/dir/keep"),  # the anchoring '/' lands AFTER the '!'
+        ("trailing/", "trailing"),  # the trailing slash is stripped BEFORE anchoring
+    ],
+)
+def test_to_gitignore_translation(rule: str, expected: str) -> None:
+    assert rules.to_gitignore(rules.parse([rule])) == [expected]
+
+
+def test_to_gitignore_drops_the_unsafe_rules_the_matcher_drops() -> None:
+    """The emitter and the matcher must agree on which rules exist at all."""
+    assert rules.to_gitignore(rules.parse(["/abs", "../up", "ok"])) == ["ok"]
+
+
+def test_to_gitignore_cli(
+    tmp_path: Path, write_file: Callable[[str, str], Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = write_file(".kibignore", "secret\n!dir/keep\n# note\n")
+    assert rules.main(["to-gitignore", str(path)]) == 0
+    assert capsys.readouterr().out.splitlines() == ["secret", "!/dir/keep"]

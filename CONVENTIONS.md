@@ -5,7 +5,7 @@ One entrypoint for everything below — run it before you finish:
 ```bash
 ./dev.sh format   # rewrite:  ruff format, ruff check --fix, shfmt -w
 ./dev.sh lint     # verify:   ruff format --check, ruff check, mypy --strict, shfmt -d
-./dev.sh check    # lint + tests/check.sh (syntax, shellcheck, portability, unit tests)
+./dev.sh check    # lint + tests/check.sh (syntax, shellcheck, portability, wiring, pytest)
 ```
 
 `./dev.sh check` is exactly what CI runs, so a clean local run means a green build.
@@ -19,9 +19,9 @@ the kib container, a CLI on the host) — never duplicate a setting into an edit
 |---|---|---|
 | Python format + lint + import order | `pyproject.toml` `[tool.ruff]` | Ruff replaces Black, Flake8 and isort |
 | Python typing | `pyproject.toml` `[tool.mypy]` | `strict = true`, no exceptions |
-| Shell format | `.editorconfig` | shfmt reads it **only** when passed no style flags — so pass none |
+| Shell format | `.editorconfig` | shfmt reads it **only** when passed no style flags — so pass none. Every extensionless script must be named in its `[…]` glob, or shfmt silently formats that one file with tabs |
 | Line length, charset, EOL, final newline | `.editorconfig` | **100 columns**, everywhere, prose included |
-| Python tool versions | `requirements-dev.txt` | exact `==` pins |
+| Python tool versions | `requirements-dev.txt` | exact `==` pins (ruff, mypy, pytest) |
 | Shell tool versions | `Dockerfile` `ARG SHFMT_VERSION` / `ARG SHELLCHECK_VERSION` | pinned release binaries; keep in step with `.github/workflows/lint.yml` |
 
 Bump a pin deliberately and in every place it appears. A floating version means the same code
@@ -44,35 +44,44 @@ config above — is in the README's [editor setup](README.md#editor-setup-vs-cod
 - 4-space indent; `snake_case` functions/variables, `PascalCase` classes, `UPPER_CASE` constants.
 - Docstrings on every module, class and non-trivial function (PEP 257). Comments carry the *why*
   — the rules this repo has re-learned the hard way are worth a sentence each.
-- **Stdlib only in anything the container runs.** The sidecars (`ccignore-fuse.py`,
-  `wayland-guard.py`, `cc-broker.py`, `claude-config-scope.py`) run off the image's bare
-  `python3`; a pip dependency there breaks the launch path. `requirements-dev.txt` is for the
-  lint toolchain, not for runtime.
+- **Stdlib only in anything the container runs.** Everything under `kib/` runs off the image's
+  bare `python3`; a pip dependency there breaks the launch path. `requirements-dev.txt` is for
+  the lint and test toolchain, not for runtime.
+- **`kib/shared/` may not import `kib.host` or `kib.guest`.** It is the layer both sides share;
+  a back-edge drags host-only code into the container.
 
 ## Shell
 
 - **shfmt** with the style in `.editorconfig` (4-space indent, `switch_case_indent`,
-  `binary_next_line`). Continuations lead with the operator — `\` then `&& …` on the next line —
-  matching the existing 54 sites.
-- **shellcheck** clean, and `bash -n` every script you touch before finishing: a syntax error
-  here leaves the user unable to start the sandbox at all.
+  `binary_next_line`). Continuations lead with the operator — `\` then `&& …` on the next line.
+- **shellcheck** clean at warning level, and `bash -n` every script you touch before finishing: a
+  syntax error here leaves the user unable to start the sandbox at all. A `# shellcheck disable=`
+  is per-file and reason-carrying — never a blanket one covering eleven subsystems. Note a
+  directive only applies to the **next complete command**, so a block of cross-unit globals needs
+  it in the file header, and it may never sit in front of a single `case` branch (SC1124).
+- **Every `host/*.sh` file opens with what it owns and which globals it reads/writes.** That
+  header is the contract between the units; shellcheck cannot see across the source boundary.
 - **Host-side scripts must be bash-3.2/BSD-clean** (stock macOS, no brew). GNU-only tools and
-  bash-4 features live behind a `cc-portable.sh` shim — see the portability contract in
-  `CLAUDE.md`. `tests/check.sh` enforces this and proves the darwin paths on Linux.
+  bash-4 features live behind a `host/portable.sh` shim — see the portability contract in
+  `CLAUDE.md`. `tests/check/portability.sh` enforces this and proves the darwin paths on Linux.
 
 ## Tests
 
-There is **no pytest here** and none should be added: the suites are self-checking scripts so
-they can run inside the sandbox with nothing installed.
+**Python is tested with pytest**; bash is tested by the two shell suites. pytest is pinned in
+`requirements-dev.txt` and baked into the image's `/opt/dev-tools`, so it is present wherever the
+toolchain is — `tests/check/pytest.sh` HARD-FAILS if it is missing rather than skipping, because a
+silently skipped suite reads as a pass.
 
-- `tests/check.sh` — host-side dev suite. Add a case as an `ok`/`bad` pair with a message that
-  says what broke and why it matters. Settled bugs get a **regression guard** here.
+- `tests/` mirrors `kib/`: `shared/`, `host/`, `guest/`, `broker/`. Shared fixtures live in
+  `tests/conftest.py`, which is also what puts the repo root on `sys.path`.
+- `tests/check.sh` — a thin runner over `tests/check/*.sh`, one file per section (syntax,
+  portability, wiring, mcp, regressions, shims, pytest). Add a case as a `pass`/`fail` pair with a
+  message that says what broke and why it matters. Settled bugs get a **regression guard** there.
 - `tests/security-test.sh` — runs *inside* a sandbox; must pass in both redaction modes
-  (normally, and under `CC_SINGLE_CONTAINER=1`).
-- `tests/broker-test.py`, `tests/config-scope-test.py`, `test-ccignore-fuse.py` — plain scripts
-  with a local `check()` helper, exiting non-zero on failure. Register new ones in
-  `tests/check.sh`'s `PY` list.
-- Name a check for the behaviour it protects, not the function it calls.
+  (normally, and under `KIB_SINGLE_CONTAINER=1`). Kept as one file, but it sources
+  `tests/lib.sh` so both suites report identically.
+- Name a check for the behaviour it protects, not the function it calls. A test whose name
+  survives a refactor of the code under it is the one worth writing.
 
 ## Documentation
 
@@ -88,10 +97,10 @@ they can run inside the sandbox with nothing installed.
 - **You are working from inside the sandbox this repo builds.** There is no `docker` binary or
   socket. Host-side commands go to the user as a fenced block, pasteable as-is: no `!` prefix
   (that runs *in this container*), no `$` prompts, no placeholders.
-- **Edits take effect on the next *container*, not the next terminal.** Bind-mounted sidecars
-  keep running their old code until the last session exits; `docker-entrypoint.sh`,
-  `entrypoint-fuse.sh` and anything in the `Dockerfile` need a rebuild (`./build-bg.sh`, never a
-  bare `docker build`). Before believing a "no change" result, check `ps -o lstart= -p 1`.
+- **Edits take effect on the next *container*, not the next terminal.** The bind-mounted `kib/`
+  package keeps running its old code until the last session exits; `guest/entrypoint/*`, the
+  `guest/bin/` shims and anything in the `Dockerfile` need a rebuild (`kib build`, never a bare
+  `docker build`). Before believing a "no change" result, check `ps -o lstart= -p 1`.
 - **mypy's cache must stay outside the repo** — it is mmap'd, and mmap over the FUSE view dies
   with SIGBUS. `dev.sh` exports `MYPY_CACHE_DIR` into `$TMPDIR`; keep it that way.
 - **A host `.venv` is visible inside the container, and half of it does not run there.** `uv venv`

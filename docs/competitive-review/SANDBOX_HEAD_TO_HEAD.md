@@ -216,6 +216,6 @@ Reading six threat models together, the consensus is more interesting than any s
 - cplt — [SECURITY.md](https://github.com/navikt/cplt/blob/main/SECURITY.md), [README](https://github.com/navikt/cplt), [known-impacts.md](https://github.com/navikt/cplt/blob/main/docs/known-impacts.md)
 - yoloAI — [README](https://github.com/kstenerud/yoloai), [GUIDE.md](https://github.com/kstenerud/yoloai/blob/main/docs/GUIDE.md), [findings-unresolved.md](https://github.com/kstenerud/yoloai/blob/main/docs/contributors/design/findings-unresolved.md)
 - aicontainer — [README](https://github.com/stefanoginella/aicontainer), [CHANGELOG.md](https://github.com/stefanoginella/aicontainer/blob/main/CHANGELOG.md), [post-create.py](https://github.com/stefanoginella/aicontainer/blob/main/template/post-create.py)
-- `cc` — this repository: `CLAUDE.md`, `cc`, `cc-lib.sh`, `ccignore-fuse.py`, `wayland-guard.py`, `security-test.sh`
+- `cc` — this repository: `CLAUDE.md`, `cc`, the `host/` units, `kib/guest/fuse.py`, `kib/guest/wayland_guard.py`, `security-test.sh`
 
 </details>

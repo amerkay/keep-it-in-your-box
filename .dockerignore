@@ -1,0 +1,16 @@
+# The build context only needs the Dockerfile's inputs: guest/entrypoint, guest/bin, kib/
+# and requirements-dev.txt. Everything else is either host-side, test fixtures, or caches
+# that would bust the `COPY kib` layer on every lint run.
+.git
+.github
+.venv
+**/__pycache__
+.mypy_cache
+.ruff_cache
+docs
+examples
+tests
+host
+bin
+tools
+*.md

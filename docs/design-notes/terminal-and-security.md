@@ -23,7 +23,7 @@ Target closed`). Restoring it would mean loosening the container's seccomp to pe
 creation — which hands *the agent* a userns primitive, strictly worse for this box's threat model.
 So the inner sandbox is traded away; Docker stays the boundary.
 
-**Keep the scope narrow.** The fix is an `npx` shim written by `docker-entrypoint.sh` that adds the
+**Keep the scope narrow.** The fix is an `npx` shim written by `guest/entrypoint/docker-entrypoint.sh` that adds the
 flags only when `chrome-devtools-mcp` is the package being run, so the plugin's stock, unmodified
 manifest (`{"command":"npx","args":["chrome-devtools-mcp@…"]}`) works with no per-project MCP
 config. It appends nothing the caller already passed, so `--headless=false` / a custom

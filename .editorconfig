@@ -16,8 +16,9 @@ max_line_length = 100
 indent_style = space
 indent_size = 4
 
-# `cc` is a shell script with no extension.
-[{*.sh,cc}]
+# The extensionless shell scripts have to be named: `bin/kib` and the three guest shims.
+# Miss one and shfmt silently falls back to tabs for that file alone.
+[{*.sh,kib,fuse,wayland-guard,broker}]
 indent_style = space
 indent_size = 4
 switch_case_indent = true

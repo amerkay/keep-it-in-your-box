@@ -1,0 +1,39 @@
+# Host-executed config guard — shipped with cc, mounted read-only from the repo.
+#
+# These rules are NOT a project's .kibignore. They are immune to negation: a project
+# cannot write `!.git/config` and switch its own guard off. They are also tail-matched,
+# so `.git/config` covers `sub/.git/config` and `.git/modules/x/config` — a repo cloned
+# or `git init`ed mid-session is protected too, which a launch-time mount cannot do.
+#
+# Everything here is a file the *host* executes later. The sandbox writing one is the
+# whole "week of sandbox escapes" bug class: the agent writes the future input of an
+# unsandboxed system, and the host runs it at the next commit / editor open / shell cd.
+
+[protect]
+# Read-through, write-deny. These must stay readable: in-container git reads .git/config
+# on virtually every command, so redacting it with the stub would break git outright.
+#
+# NOTE: git's own host-executed paths (.git/config, .git/hooks, and their submodule and
+# worktree forms under .git/modules/<name>/ and .git/worktrees/<name>/) are NOT listed
+# here. They nest arbitrarily deep, which a tail rule cannot express, so they live in
+# Redact._git_sensitive() instead — one definition, shared with the write validator.
+.vscode
+.devcontainer
+.idea
+.envrc
+
+[redact]
+# Stub on read + write-deny — the existing .kibignore behaviour. Secrets, not executables.
+# Mirrors the policy already stated in shared-CLAUDE.md ("treat .env* as suspect").
+#
+# '!' works here and applies within the guard set only (last match wins), so these
+# carve-outs cannot be used by a *project* to un-redact itself. The placeholder files
+# are committed by convention and contain no secrets — redacting them just breaks
+# ordinary work like "add the new key to .env.example".
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+!.env.defaults
+!.env.dist

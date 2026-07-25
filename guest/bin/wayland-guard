@@ -1,0 +1,3 @@
+#!/bin/sh
+# Baked shim — see guest/bin/fuse for why this is three lines and where the logic lives.
+exec env PYTHONPATH=/usr/local/lib python3 -m kib.guest.wayland_guard "$@"

@@ -42,7 +42,7 @@ host later executes. That is `cc`'s founding thesis, independently confirmed.
 |---|---|---|---|
 | "Git directories do not have to be called `.git`" — fsmonitor indirection | Cursor | patched 3.0.0 | `_is_git_config()` detects a git dir by **layout** (`HEAD`+`objects`+`refs`), never by name |
 | "The hook was already in the workspace" — `.claude` hook config | Cursor | CVE-2026-48124 | `validate_shared_settings` refuses inline `hooks[].command` |
-| "A time bomb in `.vscode`" — `tasks.json` | Antigravity | **unpatched** | `global.ccignore` `[protect]` — writes refused |
+| "A time bomb in `.vscode`" — `tasks.json` | Antigravity | **unpatched** | `guest/policy/global.kibignore` `[protect]` — writes refused |
 | "One Docker socket to rule them all" | Codex, Cursor, Gemini CLI | GHSA-v4xv-rqh3-w9mc | no socket mounted |
 | "GitPwned: allowlist to RCE" | Codex CLI | patched v0.95.0 | n/a — `cc` has no command allowlist to bypass |
 
@@ -96,7 +96,7 @@ session**. `cc`'s read-only asset mounts + per-project merge farm + host-side
 | **Credentials** | 5 broker the token host-side, so the agent never holds it | Shared OAuth token readable on disk (H3/H4) |
 | **Kernel boundary** | 6 use a VM/microVM | Shared kernel; Anthropic's own docs call a VM "the strongest separation" |
 | **Platforms** | 18 of 30 support macOS | Ubuntu/Linux only |
-| **Ephemerality** | `chamber`, `yoloai`, `matchlock`, `cleanroom` reseed per run | Long-lived container by design; `CC_FORCE_NEW_SESSION=1` is opt-in |
+| **Ephemerality** | `chamber`, `yoloai`, `matchlock`, `cleanroom` reseed per run | Long-lived container by design; `KIB_FORCE_NEW_SESSION=1` is opt-in |
 
 The egress position is defensible — a default-deny allowlist conflicts with building
 untrusted repos that fetch from arbitrary registries. **The credential position is not.**
@@ -197,7 +197,7 @@ untrusted repos that fetch from arbitrary registries. **The credential position 
 | Project | Why it matters to `cc` |
 |---|---|
 | [navikt/cplt](https://github.com/navikt/cplt) | **Closest philosophical match.** The same two rare controls as `cc` — host-config guard *and* in-project secret blocking — but kernel-enforced via Landlock instead of FUSE, plus the egress allowlist `cc` lacks. Organisationally backed (NAV, Norway), 10 contributors. |
-| [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) | Anthropic's own mandatory deny-write list is the most complete enumeration of host-executed config paths in the field. Worth diffing against `global.ccignore`. |
+| [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) | Anthropic's own mandatory deny-write list is the most complete enumeration of host-executed config paths in the field. Worth diffing against `guest/policy/global.kibignore`. |
 | [aicontainer](https://github.com/stefanoginella/aicontainer) | The only other **container** project treating `.git/config`, `.git/hooks` and cross-project config as first-class. Also ships a digest-pinned Docker socket proxy. |
 | [yoloai](https://github.com/kstenerud/yoloai) | Reference implementation of **credential brokering** — the concrete fix for `cc`'s accepted risk H3/H4. |
 

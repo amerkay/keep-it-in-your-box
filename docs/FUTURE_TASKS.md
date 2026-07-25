@@ -55,14 +55,14 @@ never held. That makes the single largest accepted risk fixable without touching
 without the Portmaster question (Gate D) that has already broken one design. It is host-side and
 capless, so it satisfies every gate trivially.
 
-### C1 · Credential broker, base-URL variant ★★★★★ — **PICK · BUILT (opt-in) 2026-07-23**
+### C1 · Credential broker, base-URL variant ★★★★★ — **PICK · BUILT 2026-07-23 · ON BY DEFAULT 2026-07-25**
 
-> **Status.** Implemented as `cc-broker.py` + the `start_broker`/`add_broker_env_args`/
-> `connect_broker_network`/`verify_broker_attach`/`stop_broker` subsystem in `cc-lib.sh`/`cc`.
+> **Status.** Implemented as `kib/broker/` + the `start_broker`/`add_broker_env_args`/
+> `connect_broker_network`/`verify_broker_attach`/`stop_broker` subsystem in `host/broker.sh`.
 > **Gate A PASSED** (Claude honours `ANTHROPIC_BASE_URL` for OAuth `/v1/messages`) and **Gate D
 > PASSED** (container→container on a user bridge under Portmaster), so this is the base-URL variant
-> on an internal bridge — no C2/CA, no host-loopback fallback. **Opt-in, off by default** (`broker =
-> on` in `~/.keep-it-in-your-box/config`, or `CC_BROKER=1`). Generic across agents: Claude wired now;
+> on an internal bridge — no C2/CA, no host-loopback fallback. **On by default** since 2026-07-25
+> (`broker = off`, or `KIB_BROKER=0`, disables it). Generic across agents: Claude wired now;
 > Codex/Gemini are ready-but-unstarted rows in the `PROVIDERS` table; a header-authed MCP (C3) is the
 > same shape. Fail-hard on create (broker is core auth); fail-safe on mid-session crash (never
 > re-mount the real token).
@@ -75,7 +75,7 @@ capless, so it satisfies every gate trivially.
 > truncated in place; and `threading.Lock` does not serialise across the one-broker-per-project
 > containers. VERIFY #1 (the refresh contract) is therefore **withdrawn, not deferred** — there is
 > no refresh path to verify. The broker now injects a long-lived token from
-> `~/.keep-it-in-your-box/claude-token` (`cc --broker-login`, mode 600, mounted `:ro`), the
+> `~/.keep-it-in-your-box/claude-token` (`kib broker login`, mode 600, mounted `:ro`), the
 > placeholder is **synthetic** rather than cloned from the real credential, and the broker has no
 > write path to any credential at all. Same conclusion yoloAI reached independently.
 
@@ -134,13 +134,13 @@ a CA in the container trust store. Passes all gates; strictly more machinery tha
 ### C3 · Generic authenticating reverse-proxy for third-party MCP servers ★★★★★ — **BUILT 2026-07-23**
 
 > **BUILT — what shipped (differs from the sketch below in three ways):**
-> 1. **No separate `mcp-broker.py`.** It is the *same* `cc-broker.py`, extended: a new
+> 1. **No separate `mcp-broker.py`.** It is the *same* `kib/broker/`, extended: a new
 >    `reverse_proxy_mcp` delivery mode + a registry row. **Providers are user-extensible — any MCP, no
 >    code change:** **only the LLMs (`claude`/`codex`/`gemini`) are built in — no MCP is hardcoded.**
->    DataForSEO and mcp-gsc ship as copy-in example defs in `examples/providers/`, and `cc-broker.py`
+>    DataForSEO and mcp-gsc ship as copy-in example defs in `examples/providers/`, and `kib/broker/`
 >    folds `~/.keep-it-in-your-box/providers.d/*.json` onto the built-ins (`_merge_user_providers`, mounted
->    `:ro` into the sidecar; the LLM built-ins non-overridable). `cc --mcp-adopt` *synthesizes* such a def
->    from an inline `claude mcp add --header …` entry, and `cc --add-mcp` declares one directly. `serve()`
+>    `:ro` into the sidecar; the LLM built-ins non-overridable). `kib mcp adopt` *synthesizes* such a def
+>    from an inline `claude mcp add --header …` entry, and `kib mcp add` declares one directly. `serve()`
 >    already looped providers and streamed unbuffered, so the relay
 >    needed no change — the agent's `.mcp.json` URL carries the upstream path (`…:<port>/http`) and the
 >    broker forwards it verbatim. Resolves the two open C3 questions below: **plain HTTP** to the broker
@@ -150,7 +150,7 @@ a CA in the container trust store. Passes all gates; strictly more machinery tha
 >    *server* runs in its own `cap-drop=ALL` sidecar (`start_hosted_mcp`, supergateway bridging stdio→HTTP)
 >    holding the credential; the agent reaches it over the broker net at `http://<id>:<port>`. Trade: the
 >    MCP server's own code runs in that sidecar (isolated from the agent, but trusted).
-> 3. **Unified UX:** `cc --login <name>` / `--logout <name>` / `--status` (registry-driven, generalizing
+> 3. **Unified UX:** `kib broker login <name>` / `--logout <name>` / `--status` (registry-driven, generalizing
 >    `--broker-login`) add any credential the Anthropic-token way — cc fails-hard on a missing *required*
 >    cred and prints the exact fix. See CLAUDE.md "Credential broker" for the delivery-mode reference.
 >
@@ -208,7 +208,7 @@ host-security control, so aborting the launch would be wrong.
 **Delivery — the secret-free plugin dissolves the global-vs-secret tension.** With the token out of the
 container, the plugin config is genuinely secret-free (`url` → broker, no header), so it is **safe to
 install shared/global** — there is nothing to propagate. Whether it authenticates in a given project is
-gated by whether `cc` started the broker (opt-in per launch), not by a secret in every container.
+gated by whether kib started the broker for that launch, not by a secret in every container.
 Delivery of that plugin uses the friendly `--unlock-shared` path below.
 
 **Residual risks (named).**
@@ -225,19 +225,19 @@ Delivery of that plugin uses the friendly `--unlock-shared` path below.
 > **BUILT:** `warn_inline_mcp_secrets` runs on every launch (create + attach) and warns — never blocks —
 > when an MCP entry in the project `.mcp.json` or this session's `.claude.json` carries an inline auth
 > header or a secret-shaped `env` value, naming the server + reason and **never printing the value**.
-> Entries cc itself brokered (`_ccBroker`) are skipped. Companion `cc --mcp-adopt <name>` migrates an
+> Entries cc itself brokered (`_kibBroker`) are skipped. Companion `kib mcp adopt <name>` migrates an
 > inline remote-MCP credential into the broker: it stores the secret host-side (mode 600), strips it from
 > the config, and lets the next launch inject a header-free brokered entry. It refuses a local/stdio MCP
 > (needs a `hosted_mcp` row) or an unknown upstream. The heuristic (open question below) is intentionally
 > conservative — key/token/secret env-name match + `Bearer`/`Basic` header shape — so it doesn't cry wolf.
 >
 > **EXTENDED 2026-07-24 — detection → PREVENTION (`intercept_mcp_add`):** the detector alone can't stop
-> the common leak. A user who won't learn `cc --add-mcp`/`--mcp-adopt` takes a vendor's own
+> the common leak. A user who won't learn `kib mcp add`/`--mcp-adopt` takes a vendor's own
 > `claude mcp add … --header "Authorization: …" …` line and swaps `claude`→`cc`; run verbatim, that puts
 > the raw secret in the **container's argv** before any warning fires — nothing in-box can undo it. So `cc`
 > now intercepts `[claude] mcp add|add-json` **host-side, before the `docker exec`**: the remote `--header`
 > form is **auto-brokered** (secret peeled off, stored mode-600, header-free route written — never enters
-> the box), the local/stdio `--env`-secret form is **blocked** (opt-out `CC_ALLOW_INLINE_MCP_SECRET=1`), and
+> the box), the local/stdio `--env`-secret form is **blocked** (opt-out `KIB_ALLOW_INLINE_MCP_SECRET=1`), and
 > anything else passes through. `warn_inline_mcp_secrets` stays as the backstop for secrets that arrive some
 > other way (an edited config, a teammate's commit). This makes C4 a *preventer* for the swap path, not only
 > a detector.
@@ -272,7 +272,7 @@ boundary** — it complements, not replaces, the agent-level secrets hard-stop a
 the **shared/all-projects** install, which writes to the `:ro` `~/.claude-shared/plugins/` and returns a
 raw `EACCES`. Intercept that specific failure and print the **existing** unlock-shared block (already in
 CLAUDE.md's EACCES message) — "to install a plugin for EVERY project, close every session and relaunch
-with `cc --unlock-shared`" — so the flag is discoverable rather than folklore. No new command surface
+with `kib unlock-shared`" — so the flag is discoverable rather than folklore. No new command surface
 (decided: friendly error, not a `cc plugin add` subcommand); per-project install stays silent and
 working. This is the delivery on-ramp for C3's secret-free broker plugin.
 
@@ -355,7 +355,7 @@ Open egress (today) — the accepted-risk position. E1 makes an opt-in available
 
 ## G3 — Redaction topology and macOS
 
-**Baseline today:** `ccignore-fuse.py` runs in a **separate sidecar container** (`--cap-add=SYS_ADMIN
+**Baseline today:** `kib/guest/fuse.py` runs in a **separate sidecar container** (`--cap-add=SYS_ADMIN
 --device /dev/fuse`, as the host uid). It mounts the redacted view at `/tmp/cc-fuse.<hash>/mnt`; the
 **main container bind-mounts that back over `$PWD` with `:rslave`.** That two-container mount hand-off
 is the source of the `/tmp`-shared precondition, the `:rslave` propagation, `fuse_mounted()`, the
@@ -406,7 +406,7 @@ FUSE backend. It is not "adding a VM": a Mac already runs a Linux VM for Docker 
 *replaces* Desktop's VM with one whose root is shared. Its only cost is the Colima dependency, which is
 the whole subject of the A/H/U decision at the end of this section.
 
-**No new flags needed.** `cc`'s existing sidecar config (`cc-lib.sh`) is exactly what the test used and
+**No new flags needed.** `cc`'s existing sidecar config (the `host/` units) is exactly what the test used and
 what works on Colima: `--cap-drop=ALL --cap-add=SYS_ADMIN --device /dev/fuse --security-opt
 apparmor=unconfined`. The AppArmor exception is load-bearing on any AppArmor-enforcing host —
 `docker-default` denies `mount` even with `CAP_SYS_ADMIN`, which is why a bare `--cap-add SYS_ADMIN`
@@ -480,7 +480,7 @@ must give. Three coherent plans:
 | Plan | Linux | macOS | Trade |
 |---|---|---|---|
 | **A** | `cap-drop=ALL` sidecar (R1) | same sidecar in **Colima** | Both constraints held; costs the **Colima dependency**. Strongest isolation. |
-| **H** *(recommended)* | `cap-drop=ALL` sidecar (R1), unchanged | hardened single-container FUSE (R2) | **No Colima.** Linux not regressed. macOS agent *capless-at-runtime* but not `cap-drop=ALL`-at-creation; source in-namespace. Two FUSE launch paths (share `ccignore-fuse.py`). |
+| **H** *(recommended)* | `cap-drop=ALL` sidecar (R1), unchanged | hardened single-container FUSE (R2) | **No Colima.** Linux not regressed. macOS agent *capless-at-runtime* but not `cap-drop=ALL`-at-creation; source in-namespace. Two FUSE launch paths (share `kib/guest/fuse.py`). |
 | **U** | hardened single-container FUSE (R2) | hardened single-container FUSE (R2) | **No Colima, no sidecar** — deletes all propagation complexity. But Linux **regresses** from the verified `cap-drop=ALL` sidecar; source in-namespace everywhere. |
 
 **Recommendation: H.** It is the only plan that removes the Colima dependency *without* regressing Linux
@@ -647,22 +647,22 @@ Settled decisions are recorded at the top (the four gates). Remaining:
   lock-in, Colima's documented upgrade-breakage history, Docker Desktop's free-tier terms) settled
   it: A ties macOS to Colima specifically (propagation only works on its shared-root VM) and is
   mac-only-testable; H works on *any* engine (Docker Desktop, OrbStack, Colima) and the whole macOS
-  topology is developable on Linux via `CC_SINGLE_CONTAINER=1`. Linux keeps the verified
+  topology is developable on Linux via `KIB_SINGLE_CONTAINER=1`. Linux keeps the verified
   `cap-drop=ALL` sidecar unchanged; macOS uses hardened single-container FUSE (`SYS_ADMIN` at
   creation, mounted by the trusted entrypoint, then dropped from the bounding set with `setpriv`
-  before the capless agent runs). All OS branching lives in `cc-portable.sh`; the two FUSE modes
+  before the capless agent runs). All OS branching lives in `host/portable.sh`; the two FUSE modes
   sit behind a 3-function interface (`prepare_redaction`/`verify_redaction_attach`/
   `teardown_redaction`). See CLAUDE.md § "macOS support (Plan H)". Remaining before flipping the
   README's "macOS ❌" rows: the on-hardware VERIFY items (clipboard binary choice, virtiofs
   ownership) — see that section.
 - [x] **C3/C4 shape** — RESOLVED. Generic parameterized reverse-proxy broker (not DFS-specific); C4 detector is host-side-at-launch and advisory (warn + recommend, never blocks); shared-plugin install surfaces a friendly `--unlock-shared` error (no new subcommand).
-- [x] **C3 transport** — RESOLVED (built): the agent reaches the broker over **plain HTTP** on the broker net (`http://cc-broker:<port><path>`); no CA needed. The broker re-originates TLS upstream.
-- [x] **C3 streaming** — RESOLVED: `cc-broker.py _do_relay` streams the response read-to-EOF, flushing per 64 KiB chunk (`send Connection: close`); SSE / streamable-HTTP passthrough is unbuffered. `tests/broker-test.py` asserts a 3-chunk stream arrives intact.
+- [x] **C3 transport** — RESOLVED (built): the agent reaches the broker over **plain HTTP** on the broker net (`http://kib-broker:<port><path>`); no CA needed. The broker re-originates TLS upstream.
+- [x] **C3 streaming** — RESOLVED: `kib/broker/ _do_relay` streams the response read-to-EOF, flushing per 64 KiB chunk (`send Connection: close`); SSE / streamable-HTTP passthrough is unbuffered. `tests/broker/test_broker.py` asserts a 3-chunk stream arrives intact.
 - [x] **C4 heuristic** — RESOLVED (conservative by choice): flags `Bearer`/`Basic` header shapes + `env` names matching `TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL`, warn-only. Entropy/base64 scoring was deemed unnecessary for a non-blocking nudge; revisit only if false positives appear on real configs.
 - **On-hardware VERIFY (needs Docker; can't run from inside the sandbox):** the `hosted_mcp` sidecar end-to-end (supergateway + `uvx <server>` fetch, HOME/cache dirs, the `/mcp` streamable-HTTP path) — built + fail-soft, same "verify on first real use" status as the codex/gemini rows.
 - [x] **Gate A** — RESOLVED 2026-07-23: Claude Code **honours** `ANTHROPIC_BASE_URL` for OAuth (`HIT POST /v1/messages?beta=true`). C1 (base-URL, no CA) is the path; C2 shelved.
 - [x] **Gate D** — RESOLVED 2026-07-23: Portmaster **permits** container→container on a user bridge (`C2C 200`). E1/broker use the internal bridge; no host-loopback fallback needed.
 - [x] **`validate_shared_settings` carve-out** — RESOLVED: no code change. `cc` sets `ANTHROPIC_BASE_URL` via a container `-e` flag (host-controlled channel); the validator keeps refusing `env.ANTHROPIC_BASE_URL` in the shared *settings.json* (the agent-writable, cross-project channel). Two different channels.
 - [ ] **Broker VERIFY #1 (refresh contract)** — confirm the Anthropic OAuth token endpoint + public client_id + response shape before flipping the broker to default-on. The refresh loop is built and fail-safe (never refreshes when `client_id` is unset; overridable via `/run/broker/oauth/claude.json`).
-- [ ] **Broker VERIFY (env precedence)** — does a container `-e ANTHROPIC_BASE_URL` win over a per-project (agent-writable) `settings.json` `env` entry? If the file wins, re-pin in `docker-entrypoint.sh`.
+- [ ] **Broker VERIFY (env precedence)** — does a container `-e ANTHROPIC_BASE_URL` win over a per-project (agent-writable) `settings.json` `env` entry? If the file wins, re-pin in `guest/entrypoint/docker-entrypoint.sh`.
 - [ ] `WebFetch` — server-side (survives an allowlist) or client-side (breaks under E1)?
