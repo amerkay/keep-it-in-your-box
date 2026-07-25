@@ -9,10 +9,14 @@ Claude Code runs a background-agent daemon arbitrated by `daemon.lock` in its co
 
 An earlier fix split `~/.claude` destructively into a shared dir + a per-project one. That cost the thing a solo user cares about most: afterwards there is no `~/.claude`, so a plain host `claude` has no login and no `--resume` continuity. **Now** `~/.claude` and `~/.claude.json` stay **canonical and stock-untouched**, and per-project isolation comes from *assembling* each container's config from them per launch. Same two path resolvers in the binary, but pointed at per-launch scratch under `$KIB_STATE_ROOT` (`${XDG_STATE_HOME:-~/.local/state}/keep-it-in-your-box`):
 
-| Env var | Resolves | `kib` points it at |
-|---|---|---|
-| `CLAUDE_CONFIG_DIR` | everything (daemon, sessions, projects, `.claude.json`, history, CLAUDE.md) | `$KIB_STATE_ROOT/<slug>/session` (assembled) |
-| `CLAUDE_SECURESTORAGE_CONFIG_DIR` | `.credentials.json` + shared assets | `$KIB_STATE_ROOT/<slug>/shared` (assembled) |
+| Env var | Resolves | Container path (bind target) | Host source (assembled) |
+|---|---|---|---|
+| `CLAUDE_CONFIG_DIR` | everything (daemon, sessions, projects, `.claude.json`, history, CLAUDE.md) | `/home/hostuser/.claude-session` | `$KIB_STATE_ROOT/<slug>/session` |
+| `CLAUDE_SECURESTORAGE_CONFIG_DIR` | `.credentials.json` + shared assets | `/home/hostuser/.claude-shared` | `$KIB_STATE_ROOT/<slug>/shared` |
+
+The two `.claude-*` names are **container-side only** and unchanged since they were introduced;
+only the host end of each bind moved when canonical `~/.claude` was restored. Host-facing text
+must use the `$KIB_STATE_ROOT` column.
 
 `<slug>` = `$PWD` with non-alphanumerics → `-` (Claude's own scheme). **Assembly (`assemble_session_dir`, cold-start only — never while a container is attached to these bind-mounted files):**
 
@@ -20,16 +24,16 @@ An earlier fix split `~/.claude` destructively into a shared dir + a per-project
 - **`history.jsonl`** — `seed-history` filters to this project's lines in; `merge-history` appends new lines back out (append-only, so a concurrent host `claude` append can't be lost).
 - **`CLAUDE.md`** — `assemble_sandbox_claude_md` writes `policy block + the user's canonical ~/.claude/CLAUDE.md` straight into the session dir. Canonical stays pure user memory (a host `claude` never sees the policy). *Not* farmed by the entrypoint any more.
 - **`projects/<slug>`** — a nested rw bind of `~/.claude/projects/<slug>`, so transcripts + `--resume` are shared host⇄box.
-- **Shared assets** — `settings.json`/`keybindings.json` are **copied** into the shared-assembly dir, never bound from canonical (`stage_shared_settings`), and folded back on exit only after the copy passes `_settings_bad_keys` (`merge_out_shared_settings`); `plugins/ skills/ agents/ commands/ hooks/` nest-bound **ro** (the cross-project / host-exec guard — `--unlock-shared` makes them rw so an install lands in canonical for every project + the host claude). A lock-witness file bound ro **only when locked** lets `running_unlocked` read the lock state off the mounts even for a user with no assets to probe.
+- **Shared assets** — `settings.json`/`keybindings.json` are **copied** into the shared-assembly dir, never bound from canonical (`stage_shared_settings`), and folded back on exit only after the copy passes `settings_findings` (`merge_out_shared_settings`); `plugins/ skills/ agents/ commands/ hooks/` nest-bound **ro** (the cross-project / host-exec guard — `--unlock-shared` makes them rw so an install lands in canonical for every project + the host claude). A lock-witness file bound ro **only when locked** lets `running_unlocked` read the lock state off the mounts even for a user with no assets to probe.
 - **Everything else** (daemon, sessions, file-history, caches, and *anything kib doesn't recognise* — `classify`'s drift canary logs it) stays container-private in the session base. **Fail-closed:** an unknown store can't leak and can't touch canonical.
 
-**`$HOST_HOME/.claude` → the session dir (entrypoint).** Claude's plugin state stores *absolute host* paths — `installed_plugins.json`'s `installPath`, `known_marketplaces.json`'s `installLocation`, both `/home/<you>/.claude/plugins/…` — and both files are farmed from the **read-only** shared mount, so Claude cannot rewrite them to container paths. The pre-existing whole-home symlink doesn't help: it is guarded on `[ ! -e "$HOST_HOME" ]`, and the project bind mount *creates* `$HOST_HOME` (`/home/kay` for `/home/kay/myrepo`), so it never fires in practice. Result without the link: every host-installed plugin dangles — `enabledPlugins: true` in `settings.json`, marketplace cloned and present, yet nothing in `/mcp`, because the plugin's recorded path doesn't exist. The marketplace layer *self-heals* (its JSON is a real writable file, so Claude re-clones) which makes the failure look partial and confusing; the plugin-cache layer cannot. One symlink makes all of it resolve back through the farmed tree. Skipped when `$HOST_HOME` is itself our symlink — there `/.claude` would be the stock config dir Claude looks for by default.
+**`$HOST_HOME/.claude` → the session dir (entrypoint).** Claude's plugin state stores *absolute host* paths (`installed_plugins.json`'s `installPath`, `known_marketplaces.json`'s `installLocation`) in files farmed from the **read-only** shared mount, so Claude cannot rewrite them to container paths. Without the symlink every host-installed plugin dangles: enabled in `settings.json`, marketplace present, nothing in `/mcp`. The whole-home symlink is no substitute — it is guarded on `[ ! -e "$HOST_HOME" ]` and the project bind mount *creates* `$HOST_HOME`, so it never fires. Skipped when `$HOST_HOME` is itself our symlink — there `/.claude` would be the stock config dir Claude looks for by default.
 
 Merge-out runs on the **last terminal out**, after the container is stopped (files quiescent), under a `flock` on `~/.claude.json.lock`. `ensure_claude_home` skeletons a missing `~/.claude` so the binds don't fail on a fresh install.
 
 ## One container per project
 
-Two terminals on the **same** project must work. Claude's own `[concurrentSessions]` registry and daemon arbitration assume all sessions share a PID namespace and `/tmp` — true on the host, false across containers (each reads the other's pid against its own `/proc`, concludes it's dead, displaces it forever; the daemon's `/tmp/cc-daemon-<uid>/` socket is container-local too). So:
+Two terminals on the **same** project must work. Claude's own `[concurrentSessions]` registry and daemon arbitration assume all sessions share a PID namespace and `/tmp` — true on the host, false across containers (each reads the other's pid against its own `/proc`, concludes it's dead, displaces it forever; the daemon's own `/tmp/cc-daemon-<uid>/` socket — Claude Code's, not kib's — is container-local too). So:
 
 - **One long-lived container per project** (`kib-<basename>-<hash>`), PID 1 = `sleep infinity` under `--init`. Every terminal attaches via `docker exec`, re-entering the entrypoint. Claude sees one PID namespace, one `/tmp`, one daemon, N sessions — its own arbitration handles the rest.
 - **Readiness = a process whose argv is *exactly* `sleep infinity`** — only exists after the entrypoint `exec`s. Exactness is load-bearing: mid-setup argv is `/bin/sh …/guest/entrypoint/docker-entrypoint.sh sleep infinity` and PID 1 carries the string forever, so a substring match calls a half-set-up container ready.

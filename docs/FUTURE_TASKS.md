@@ -3,6 +3,9 @@
 What is **not** built, and the constraints anything proposed here must satisfy. Shipped work and
 its rationale live in `docs/design-notes/`; this file carries only the open edges.
 
+IDs here (`K`ernel/container · `E`gress · `R`edaction) are local to this file. `docs/SECURITY_AUDIT.md`
+numbers its own findings and residual risks independently — its `R1` is not this file's `R1`.
+
 ---
 
 ## The gates
@@ -27,7 +30,7 @@ instead (`docs/design-notes/macos.md`).
 
 ## Open work
 
-### K1 · Tighter custom seccomp profile ★★★☆☆ — build this next
+### K1 · Tighter custom seccomp profile ★★★☆☆
 
 Docker's default blocks ~44 syscalls; a custom profile blocks more. Capless, portable, no new
 dependency, no macOS complication, no interaction with the broker or either FUSE mode. It hardens
@@ -77,7 +80,7 @@ What survives an allowlist: `WebSearch` is server-side, so it works behind an
 `api.anthropic.com`-only list. What breaks: `npm`/`pip`/`cargo`/`apt`, `git clone` from arbitrary
 forges, binary downloads. That is why it would ship **opt-in, off by default**.
 
-### R7 · Tool-layer `PreToolUse` denial ★★☆☆☆ — a layer, never the mechanism
+### R5 · Tool-layer `PreToolUse` denial ★★☆☆☆ — a layer, never the mechanism
 
 aicontainer's approach: a hook refusing `Read`/`Edit`/`Write`/`Grep`/`Glob` on `.env*`. Capless,
 portable, covers after-launch files by checking the path at call time, so it passes all four
@@ -92,12 +95,12 @@ as the enforcement point.
 | Option | Killed by |
 |---|---|
 | **E2** iptables / ipset inside the agent container | **CAP** — needs `CAP_NET_ADMIN`. Independently a silent no-op under gVisor (runsc's userspace netstack ignores iptables). |
-| **R3** Landlock | **OS** (Linux-only) *and* it cannot deny a subpath inside an allowed directory — which is the entire requirement (`.env` inside a writable project). This is why cplt's `.env` protection is not kernel-enforced on Linux. |
-| **R4** overlayfs with masked upper layer | **CAP** (mount needs `CAP_SYS_ADMIN`) and **POST** (composed at mount time, so `.env.production` created later lands unmasked). |
-| **R5** `/dev/null` bind masks (fence's mechanism) | **POST** — a bind mount cannot cover a file that does not exist yet. sandbox-runtime documents this against itself. |
-| **R6** copy-in / copy-out (yoloAI `:copy`) | **LIVE** — discards the same-absolute-path live mount and adds an apply step. A different product. |
+| **R1** Landlock | **OS** (Linux-only) *and* it cannot deny a subpath inside an allowed directory — which is the entire requirement (`.env` inside a writable project). This is why cplt's `.env` protection is not kernel-enforced on Linux. |
+| **R2** overlayfs with masked upper layer | **CAP** (mount needs `CAP_SYS_ADMIN`) and **POST** (composed at mount time, so `.env.production` created later lands unmasked). |
+| **R3** `/dev/null` bind masks (fence's mechanism) | **POST** — a bind mount cannot cover a file that does not exist yet. sandbox-runtime documents this against itself. |
+| **R4** copy-in / copy-out (yoloAI `:copy`) | **LIVE** — discards the same-absolute-path live mount and adds an apply step. A different product. |
 | **K3** Kata / Firecracker microVM | **OS** (needs KVM; unavailable under Docker Desktop without nested virt) and it closes none of the documented risks, which cross through files the *host* executes later. |
-| **C2** sentinel + TLS-terminating proxy | Shelved, not disqualified: Gate A passed, so the base-URL broker works with no CA in the container trust store. Keep as the fallback if Claude ever stops honouring `ANTHROPIC_BASE_URL`. |
+| **C1** sentinel + TLS-terminating proxy | Shelved, not disqualified: the base-URL broker already works with no CA in the container trust store, so the sentinel buys nothing today. Keep as the fallback if Claude ever stops honouring `ANTHROPIC_BASE_URL`. |
 
 ---
 
@@ -108,10 +111,7 @@ as the enforcement point.
       `guest/entrypoint/docker-entrypoint.sh`.
 - [ ] **`WebFetch`** — server-side (survives an allowlist, like `WebSearch`) or a client-side
       fetch (breaks under E1)?
-- [ ] **On-hardware VERIFY, needs a Mac:** which clipboard reader Claude invokes for image paste
-      (`WAYLAND_DISPLAY` routes to the `wl-paste` shim; if it's `xclip`/`DISPLAY` it's a one-line
-      flip — both shims are installed), and virtiofs file ownership (passthrough reads only;
-      `_deny_if_masked` is uid-independent).
-- [ ] **On-hardware VERIFY, needs Docker:** the `hosted_mcp` sidecar end-to-end — supergateway
-      plus `uvx <server>` fetch, HOME/cache dirs, the `/mcp` streamable-HTTP path. Built and
-      fail-soft; same verify-on-first-real-use status as the codex/gemini provider rows.
+- [ ] **On-hardware VERIFY, needs a Mac** — the two items listed in
+      `docs/design-notes/macos.md` § "Still open".
+- [ ] **On-hardware VERIFY, needs Docker** — the `hosted_mcp` sidecar end-to-end; see
+      `docs/design-notes/credential-broker.md` § "Delivery modes".

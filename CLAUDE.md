@@ -46,26 +46,19 @@ A file's directory says which side of the trust boundary it is on. `kib/shared/`
 ./dev.sh format               # ruff format + ruff --fix + shfmt -w
 ./dev.sh lint                 # ruff, mypy --strict, shfmt -d
 ./dev.sh check                # lint + tests/check.sh — exactly what CI runs
-./tests/check.sh              # host-side suite: syntax, shellcheck, portability, wiring, pytest
+./tests/check.sh              # host-side suite: one section per file in tests/check/
 pytest                        # just the Python suites
 ./tests/security-test.sh      # run INSIDE a sandbox; --list, -k <section>, --no-clipboard
 ```
 
-Toolchain config is repo-root and shared by editor, container and host: `pyproject.toml` (ruff
-+ mypy `strict` + pytest), `.editorconfig` (shfmt's config too — pass it **no** style flags or it
-ignores the file, and name every extensionless script in it or shfmt silently uses tabs for that
-one file), 100-column lines everywhere. Versions are pinned in `requirements-dev.txt` and in the
-Dockerfile's `ARG SHFMT_VERSION` / `ARG SHELLCHECK_VERSION`; keep the latter in step with
-`.github/workflows/lint.yml`. Conventions live in `CONVENTIONS.md`.
+Toolchain config is repo-root and shared by editor, container and host; the table of what lives
+where, and the pins to keep in step, is in `CONVENTIONS.md`. 100-column lines everywhere.
 
 Security-relevant changes must pass `security-test.sh` in **both** redaction modes: once
 normally, once with the container launched under `KIB_SINGLE_CONTAINER=1` (the macOS topology).
-Image build (host-side): **`kib build`** (or `./tools/build-image.sh`) — run it directly and it
-streams the build and exits non-zero on failure; kib backgrounds the same script for the upgrade
-prompt. Do **not** use a bare `docker build`: `CLAUDE_VERSION` then stays the literal string
-`latest`, Docker keys its cache on that string rather than what it resolves to, so the install
-layer is reused forever, the image keeps an old Claude, and kib prompts for the same upgrade every
-launch. `build-image.sh` resolves the version number first, which is what busts that cache.
+Image build (host-side): **`kib build`** (or `./tools/build-image.sh`), never a bare
+`docker build` — that pins `CLAUDE_VERSION` to the literal string `latest` and poisons Docker's
+layer cache forever (`docs/design-notes/architecture.md`).
 
 ## The CLI: verbs win over programs
 
@@ -123,28 +116,22 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
 - **No `tput reset`** (regression-guarded); keep `|| true` on `tput cols`/`lines` and `read`.
   (`terminal-and-security.md`)
 - **FUSE passthrough I/O is `os.pread`/`os.pwrite`, never `lseek`+`read`** — the shared fd offset
-  truncated reads at a 16 KiB boundary, which is where years of "flaky" lint/test runs came from.
-  Regression-guarded. Also: keep mypy's cache out of the repo (mmap over the view SIGBUSes —
-  `dev.sh` exports `MYPY_CACHE_DIR`), and keep `dev.sh`'s explicit `.py` list (`ruff format`
-  rewrites python blocks inside `*.md`). (`redaction-config-guard.md`)
+  truncates reads at a chunk boundary, and it surfaces as unexplained lint/test flakiness rather
+  than an I/O error. Regression-guarded. (`redaction-config-guard.md`)
 - **Never unlink lock files**, and every backgrounded host process must close fds 200/201
   (`200>&- 201>&-`) — one miss strands every project's containers. Unmount the FUSE view
   *before* killing its sidecar. (`container-lifecycle.md`)
-- **Don't put a hook back into the user's repos.** kib cannot install one the git-native way
-  (its own guard refuses `core.hooksPath`), so the file copy was always a workaround, and it
-  littered every repo the sandbox ever touched. The checks live in `host/gitguard.sh` +
-  `kib/host/gitaudit.py`, run at cold start, at teardown and on `kib audit`.
-  (`redaction-config-guard.md`)
+- **Don't put a hook back into the user's repos.** The checks live in `host/gitguard.sh` +
+  `kib/host/gitaudit.py`, run at cold start, at teardown and on `kib audit`. Why a hook is not an
+  option is in `kib/host/gitaudit.py`'s docstring. (`redaction-config-guard.md`)
 - **Don't set `PYTHONPATH` in the image** — it would leak into every process the agent runs. The
   guest shims set it for their own exec only. Regression-guarded.
 - **`daemon.log` noise is benign**: `bg adopt … dead=N`, `idle 5s … exiting`,
-  `bg settled (killed)` — each already cost a full investigation. (`terminal-and-security.md`)
+  `bg settled (killed)` — don't investigate them again. (`terminal-and-security.md`)
 - **`notify()` is for problems only** — never add a launch-success notification. (`clipboard-and-dns.md`)
 
 ## Conventions
 
 - Conventional commit style. Never commit unless asked.
-- `docs/design-notes/` files: `architecture.md` · `container-lifecycle.md` ·
-  `redaction-config-guard.md` · `credential-broker.md` · `clipboard-and-dns.md` ·
-  `sleep-guard.md` · `macos.md` · `terminal-and-security.md` (`README.md` is the map). Keep the
-  relevant file updated when behaviour or rationale changes.
+- Keep the relevant `docs/design-notes/` file updated in the same change as the behaviour or
+  rationale. Its `README.md` is the map.

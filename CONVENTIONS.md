@@ -5,7 +5,7 @@ One entrypoint for everything below — run it before you finish:
 ```bash
 ./dev.sh format   # rewrite:  ruff format, ruff check --fix, shfmt -w
 ./dev.sh lint     # verify:   ruff format --check, ruff check, mypy --strict, shfmt -d
-./dev.sh check    # lint + tests/check.sh (syntax, shellcheck, portability, wiring, pytest)
+./dev.sh check    # lint + tests/check.sh (one section per file in tests/check/)
 ```
 
 `./dev.sh check` is exactly what CI runs, so a clean local run means a green build.
@@ -102,15 +102,8 @@ silently skipped suite reads as a pass.
 
 - **Conventional commits, and never commit unless asked.** No `--no-verify`, no `--amend`, no
   history rewriting, no `push` unless told to.
-- **You are working from inside the sandbox this repo builds.** There is no `docker` binary or
-  socket. Host-side commands go to the user as a fenced block, pasteable as-is: no `!` prefix
-  (that runs *in this container*), no `$` prompts, no placeholders.
-- **Edits take effect on the next *container*, not the next terminal.** The bind-mounted `kib/`
-  package keeps running its old code until the last session exits; `guest/entrypoint/*`, the
-  `guest/bin/` shims and anything in the `Dockerfile` need a rebuild (`kib build`, never a bare
-  `docker build`). Before believing a "no change" result, check `ps -o lstart= -p 1`.
-- **mypy's cache must stay outside the repo** — it is mmap'd, and mmap over the FUSE view dies
-  with SIGBUS. `dev.sh` exports `MYPY_CACHE_DIR` into `$TMPDIR`; keep it that way.
+- **mypy's cache must stay outside the repo** (mmap over the FUSE view SIGBUSes) — `dev.sh`
+  exports `MYPY_CACHE_DIR`; keep it that way.
 - **A host `.venv` is visible inside the container, and half of it does not run there.** `uv venv`
   puts a symlink to a uv-managed interpreter in `.venv/bin/python3`, which the sandbox has no
   copy of — so `ruff` (a native binary) works while `mypy` (a Python entry point) fails with

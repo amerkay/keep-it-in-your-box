@@ -25,8 +25,8 @@ back-edge would drag host-only code into the container. Bash reaches Python exac
 - **`host/_load.sh`** — The one loader, in a fixed order: `core.sh` first (it defines `die`/`warn`), then `portable.sh` (all OS branching), then the subsystems — `image`, `config`, `redaction`, `gitguard`, `broker`, `mcp`, `desktop`, `net`, `lifecycle`.
 - **`host/core.sh`** — `die`/`warn`/`notify`, the `$KIB_STATE_ROOT` paths, `kib_py`, and the single `wait_until` the four hand-rolled poll loops collapsed into.
 - **`host/portable.sh`** — The **only** file allowed OS branching. Sourced by `bin/kib`, `tools/build-image.sh`, `host/sleep-guard.sh`. Provides `lock_fd`, `hash8`, `detach_pgrp`, `notify_desktop`, `preflight_platform`, `read_kib_config`, and sets `KIB_OS`/`is_macos`/`KIB_FUSE_MODE`.
-- **`kib/shared/`** — Imported by both sides: `rules.py` (the ONE `.kibignore` parser, matcher and gitignore emitter — it used to exist three times), `dangerous.py` (the git-INI and settings-JSON key tables, which used to exist twice and had drifted), `jsonio.py`, `cli.py` (the exit-code convention), `log.py`.
-- **`kib/host/`** — `config_scope.py`, `settings_scan.py`, `pins.py`, `gitaudit.py`, `mcp.py`. The last four were bash heredocs: ~380 lines of unlinted, untyped, untested Python inside the launcher, one of which handles live credentials.
+- **`kib/shared/`** — Imported by both sides: `rules.py` (the ONE `.kibignore` parser, matcher and gitignore emitter), `dangerous.py` (the ONE git-INI and settings-JSON key table), `jsonio.py`, `cli.py` (the exit-code convention), `log.py`.
+- **`kib/host/`** — `config_scope.py`, `settings_scan.py`, `pins.py`, `gitaudit.py`, `mcp.py`.
 - **`kib/broker/`** — Credential broker: `registry` (the provider table) · `proxy` (guest) · `credential` (guest) · `helpers` (host) · `cli`. See [credential-broker.md](credential-broker.md).
 - **`guest/bin/resolv-sync.sh`** — POSIX-sh DNS watcher inside the main container. See [clipboard-and-dns.md](clipboard-and-dns.md#dns-sync).
 - **`kib/guest/wayland_guard.py`** — Filtering Wayland proxy sidecar. See [clipboard-and-dns.md](clipboard-and-dns.md#clipboard).

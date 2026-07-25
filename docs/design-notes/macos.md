@@ -6,7 +6,7 @@ that reference this.
 `kib` runs on any macOS Docker engine. macOS can't host the Linux FUSE sidecar (measured on Docker Desktop 4.78.0: it refuses the `rshared`/`rslave` mount config because bind sources resolve through the `/host_mnt` sharing layer, and the LinuxKit kernel refuses the unprivileged-userns `uid_map` write — so a truly capless-at-creation in-place FUSE exists only inside a real Linux VM, i.e. Colima). Two redaction modes behind one interface (`prepare_redaction`/`verify_redaction_attach`/`teardown_redaction`; `kib` calls only those), chosen by `KIB_FUSE_MODE`:
 
 - **`sidecar`** (Linux): unchanged, strongest isolation.
-- **`single`** (macOS; Linux under `KIB_SINGLE_CONTAINER=1` as a **test vehicle**): no sidecar; the container is created with `SYS_ADMIN`+`SETPCAP`+`/dev/fuse`+`apparmor=unconfined` and the baked `guest/entrypoint/entrypoint-fuse.sh` mounts the redacted view over the project path; the real project sits at `/kib/real` under a root-700 parent. Accepted R2 trade: capless-at-runtime, not capless-at-creation. **The cap drop happens per session in `kib`'s `docker exec`, not at PID 1** — exec gets the *container's* cap set, not PID 1's reduced bounding set, so `kib` enters as root and runs `setpriv --bounding-set -sys_admin,-setpcap gosu <uid> …` itself (`setpriv` needs `CAP_SETPCAP` effective, which a `--user` session lacks). `security-test.sh` asserts `CapBnd` lacks both, auto-detects single mode via `KIB_FUSE_INTERNAL=1`, and adjusts the two differing expectations. **Both modes must pass the full suite.**
+- **`single`** (macOS; Linux under `KIB_SINGLE_CONTAINER=1` as a **test vehicle**): no sidecar; the container is created with `SYS_ADMIN`+`SETPCAP`+`/dev/fuse`+`apparmor=unconfined` and the baked `guest/entrypoint/entrypoint-fuse.sh` mounts the redacted view over the project path; the real project sits at `/kib/real` under a root-700 parent. Accepted trade: capless-at-runtime, not capless-at-creation. **The cap drop happens per session in `kib`'s `docker exec`, not at PID 1** — exec gets the *container's* cap set, not PID 1's reduced bounding set, so `kib` enters as root and runs `setpriv --bounding-set -sys_admin,-setpcap gosu <uid> …` itself (`setpriv` needs `CAP_SETPCAP` effective, which a `--user` session lacks). `security-test.sh` asserts `CapBnd` lacks both, auto-detects single mode via `KIB_FUSE_INTERNAL=1`, and adjusts the two differing expectations. **Both modes must pass the full suite.**
 
 ## Portability contract
 
@@ -26,5 +26,3 @@ DNS sync is skipped on macOS (the engine VM tracks the host resolver). No migrat
 
 - Which reader Claude invokes for image paste (`WAYLAND_DISPLAY` routes to the `wl-paste` shim; if it's `xclip`/`DISPLAY`, a one-line flip — both shims installed).
 - virtiofs file ownership (affects passthrough reads only — `_deny_if_masked` is uid-independent).
-
-README "macOS ❌" rows flip only after these pass.

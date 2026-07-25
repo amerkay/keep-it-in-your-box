@@ -11,7 +11,7 @@
 # ON by default. KIB_BROKER=1 / KIB_BROKER=0 override this per launch.
 #
 # The brokered credential is a LONG-LIVED STATIC token, stored next to this file as
-# `claude-token` (mode 600) — NOT ~/.claude-shared/.credentials.json, whose refresh tokens
+# `claude-token` (mode 600) — NOT ~/.claude/.credentials.json, whose refresh tokens
 # are single-use and rotate, so a second refresher logs you out. The first interactive
 # launch with no token offers the login for you; decline it (or launch headless) and the
 # session falls back to mounting the real credential, with a warning.
