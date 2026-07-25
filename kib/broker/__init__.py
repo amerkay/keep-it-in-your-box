@@ -8,15 +8,11 @@ and no CA in the agent's trust store. A compromised agent can *use* the upstream
 read the token.
 
 ── THE SECRET IS STATIC. THE BROKER NEVER WRITES IT. ─────────────────────────
-Read this before adding a refresh loop back. An earlier version brokered the live
-`.credentials.json` on a 30s timer and logged the account out, hard: Anthropic subscription
-refresh tokens are SINGLE-USE and ROTATE, so the first refresher invalidates the family for
-every other holder; a single-file bind mount cannot temp+rename (EBUSY), so the write
-truncated in place; and `threading.Lock` serialises one process, while there is one broker
-container per project. A known upstream failure mode (anthropics/claude-code #56339, #54443,
-#60503), not something code can work around. So: one long-lived static token, mounted
-READ-ONLY, no refresh loop, no expiry tracking, no write path to any credential.
-`kib broker login` mints it. (docs/design-notes/credential-broker.md)
+One long-lived static token from `kib broker login`, mounted READ-ONLY: no refresh loop, no
+expiry tracking, no write path to any credential, and never `.credentials.json`. Anthropic
+subscription refresh tokens are SINGLE-USE and ROTATE, so any refresher here invalidates the
+token family for the host CLI and every other holder — a permanent logout, upstream and not
+fixable in code. (docs/design-notes/credential-broker.md)
 
 Layout:
     credential.py  guest — the read-only token view and placeholder minting

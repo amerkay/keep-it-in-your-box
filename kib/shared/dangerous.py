@@ -10,7 +10,7 @@ Two tables, because the two file formats are genuinely different, and one scanne
   so one poisoned session reaches all of them.
 
 Everything deciding "is this key dangerous" imports from here — the FUSE write validator, the
-audit gate, settings validation. Both tables were written down twice before, and drifted.
+audit gate, settings validation. Never write a second copy of either table — they drift.
 
 Matching is on the key's LAST component, so `filter.lfs.clean` matches on `clean`.
 Over-matching costs exactly one refused write, which is the right side to err on.

@@ -1,8 +1,7 @@
-"""The key tables that have drifted before.
+"""The git-INI and settings.json key tables.
 
-`DANGEROUS_GIT_KEYS` lived in two files — the FUSE guard and the pre-commit hook — and the
-settings.json equivalent lived in a bash heredoc. Each table is now defined once; this suite
-is what stops a key being added to one consumer's mental model and not the module.
+Each is defined exactly once in `kib.shared.dangerous`; this suite is what stops a key being
+added to one consumer's mental model and not to the module every consumer reads.
 """
 
 import pytest

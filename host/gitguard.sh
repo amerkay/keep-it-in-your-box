@@ -18,8 +18,7 @@ KIB_LEGACY_HOOK_MARKER="MARKER: ccignore-precommit"
 
 _git_toplevel() { git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true; }
 
-# One-time cleanup: kib used to copy its own guard into <repo>/.git/hooks/pre-commit. Remove
-# ours, and only ours — a hook without the marker is the user's and is never touched.
+# One-time cleanup: remove ours, and only ours — a hook without the marker is the user's.
 kib_remove_legacy_hook() {
     local hook="$1/.git/hooks/pre-commit"
     [ -f "$hook" ] || return 0

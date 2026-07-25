@@ -1,8 +1,8 @@
 """`.kibignore` — parsed, matched and translated in exactly one place.
 
 The FUSE guard, the launch-time audit gate and the `.gitignore` sync all read this module, so
-anchoring, negation and unsafe-rule skipping mean one thing everywhere. It existed three times
-before — matcher, pre-commit copy, bash translation — and had already drifted.
+anchoring, negation and unsafe-rule skipping mean one thing everywhere. A second copy of this
+logic drifts from the first, and the drift shows up as a guard that admits a write.
 
 Syntax (gitignore-shaped, with two additions the guard file needs):
 
