@@ -18,7 +18,7 @@ CC_PORTABLE_SOURCED=1
 
 case "$(uname -s)" in
     Darwin) CC_OS=darwin ;;
-    *)      CC_OS=linux ;;
+    *) CC_OS=linux ;;
 esac
 
 is_macos() { [ "$CC_OS" = darwin ]; }
@@ -34,7 +34,7 @@ else
     CC_FUSE_MODE=sidecar
 fi
 
-_is_uint() { case "$1" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+_is_uint() { case "$1" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac }
 
 # ── flock(1) shim ─────────────────────────────────────────────────
 # Linux: pass straight through. Darwin: perl flock() on the *inherited* fd. The
@@ -70,19 +70,25 @@ lock_fd() {
     local nb=0 mode="" to=0
     while [ $# -gt 0 ]; do
         case "$1" in
-            -n | --nonblock)  nb=1 ;;
-            -s | --shared)    mode=SH ;;
+            -n | --nonblock) nb=1 ;;
+            -s | --shared) mode=SH ;;
             -x | --exclusive) mode=EX ;;
-            -u | --unlock)    mode=UN ;;
-            -w | --timeout)   shift; to="$1" ;;
-            -w*)              to="${1#-w}" ;;
-            --)               shift; break ;;
-            -*)               ;;      # ignore any flag we don't use
-            *)                break ;;
+            -u | --unlock) mode=UN ;;
+            -w | --timeout)
+                shift
+                to="$1"
+                ;;
+            -w*) to="${1#-w}" ;;
+            --)
+                shift
+                break
+                ;;
+            -*) ;; # ignore any flag we don't use
+            *) break ;;
         esac
         shift
     done
-    [ -n "$mode" ] || mode=EX          # flock(1) defaults to exclusive
+    [ -n "$mode" ] || mode=EX # flock(1) defaults to exclusive
     if [ $# -eq 1 ] && _is_uint "$1"; then
         # $fd is a literal here so it can name the redirection; the perl program
         # and the other args stay escaped so they expand in the eval'd context.
@@ -124,8 +130,10 @@ notify_desktop() {
     if [ "$CC_OS" = darwin ]; then
         command -v osascript >/dev/null 2>&1 || return 0
         # Escape for the AppleScript string literals.
-        title=${title//\\/\\\\}; title=${title//\"/\\\"}
-        body=${body//\\/\\\\};   body=${body//\"/\\\"}
+        title=${title//\\/\\\\}
+        title=${title//\"/\\\"}
+        body=${body//\\/\\\\}
+        body=${body//\"/\\\"}
         osascript -e "display notification \"$body\" with title \"$title\"" >/dev/null 2>&1 || true
     else
         local icon=dialog-information
@@ -205,22 +213,23 @@ read_kib_config() {
     [ -f "$KIB_CONFIG" ] || return 0
     local line key val
     while IFS= read -r line || [ -n "$line" ]; do
-        line="${line%%#*}"                          # strip comment
-        line="${line#"${line%%[![:space:]]*}"}"     # ltrim
-        line="${line%"${line##*[![:space:]]}"}"     # rtrim
+        line="${line%%#*}"                      # strip comment
+        line="${line#"${line%%[![:space:]]*}"}" # ltrim
+        line="${line%"${line##*[![:space:]]}"}" # rtrim
         [ -z "$line" ] && continue
         case "$line" in *=*) ;; *) continue ;; esac
-        key="${line%%=*}"; val="${line#*=}"
-        key="${key%"${key##*[![:space:]]}"}"        # rtrim key
-        val="${val#"${val%%[![:space:]]*}"}"        # ltrim val
-        val="${val%"${val##*[![:space:]]}"}"        # rtrim val
+        key="${line%%=*}"
+        val="${line#*=}"
+        key="${key%"${key##*[![:space:]]}"}" # rtrim key
+        val="${val#"${val%%[![:space:]]*}"}" # ltrim val
+        val="${val%"${val##*[![:space:]]}"}" # rtrim val
         case "$key" in
-            broker)              KIB_BROKER="$(printf '%s' "$val" | tr 'A-Z' 'a-z')" ;;
-            egress)              KIB_EGRESS="$(printf '%s' "$val" | tr 'A-Z' 'a-z')" ;;
+            broker) KIB_BROKER="$(printf '%s' "$val" | tr 'A-Z' 'a-z')" ;;
+            egress) KIB_EGRESS="$(printf '%s' "$val" | tr 'A-Z' 'a-z')" ;;
             allow_host_services) KIB_ALLOW_HOST="$(printf '%s' "$val" | tr 'A-Z' 'a-z')" ;;
-            allow_lan)           KIB_ALLOW_LAN="$(printf '%s' "$val" | tr 'A-Z' 'a-z')" ;;
-            lan_cidrs)           KIB_LAN_CIDRS="$val" ;;
+            allow_lan) KIB_ALLOW_LAN="$(printf '%s' "$val" | tr 'A-Z' 'a-z')" ;;
+            lan_cidrs) KIB_LAN_CIDRS="$val" ;;
         esac
-    done < "$KIB_CONFIG"
+    done <"$KIB_CONFIG"
 }
 read_kib_config

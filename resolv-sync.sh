@@ -52,7 +52,7 @@ while :; do
     if [ -r "$SRC" ]; then
         # Drop comments and loopback nameservers; keep search/options/real nameservers.
         cur="$(grep -v '^[[:space:]]*#' "$SRC" 2>/dev/null \
-               | grep -v '^[[:space:]]*nameserver[[:space:]]\+127\.' || true)"
+            | grep -v '^[[:space:]]*nameserver[[:space:]]\+127\.' || true)"
         # Only sync when the content changed AND at least one real nameserver survives.
         if [ "$cur" != "$last" ] \
             && printf '%s\n' "$cur" | grep -q '^[[:space:]]*nameserver[[:space:]]'; then

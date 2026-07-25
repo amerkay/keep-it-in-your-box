@@ -25,12 +25,12 @@ while [ "${1:-}" = claude ]; do shift; done
 # otherwise reject `cc --login` there. (Dispatched further down, after sourcing cc-lib.sh.)
 # --mcp-adopt DOES touch the project (it reads .mcp.json), so it is NOT exempt.
 case "${1:-}" in
-    --broker-login|--broker-logout|--broker-status|--login|--logout|--status|--add-mcp) _skip_dir_guard=1 ;;
+    --broker-login | --broker-logout | --broker-status | --login | --logout | --status | --add-mcp) _skip_dir_guard=1 ;;
     # `mcp add|add-json` is intercepted host-side (host-global, identity-free, like --add-mcp),
     # so it must work from $HOME too. A normal interactive session stays guarded. (The `cc`
     # alias's leading `claude` token(s) are already stripped above, so this sees the real
     # command whether it arrived as `cc mcp add …` or a bare `kib mcp add …`.)
-    mcp)    case "${2:-}" in add|add-json) _skip_dir_guard=1 ;; *) _skip_dir_guard=0 ;; esac ;;
+    mcp) case "${2:-}" in add | add-json) _skip_dir_guard=1 ;; *) _skip_dir_guard=0 ;; esac ;;
     *) _skip_dir_guard=0 ;;
 esac
 _pwd="$(realpath "$PWD" 2>/dev/null || echo "$PWD")"
@@ -40,7 +40,10 @@ if [ "$_pwd" = "$_home" ]; then
     _blocked="\$HOME"
 else
     for _dir in Desktop Documents Downloads; do
-        [ "$_pwd" = "$_home/$_dir" ] && { _blocked="~/$_dir"; break; }
+        [ "$_pwd" = "$_home/$_dir" ] && {
+            _blocked="~/$_dir"
+            break
+        }
     done
 fi
 if [ -n "$_blocked" ] && [ "$_skip_dir_guard" = 0 ]; then
@@ -89,28 +92,50 @@ fi
 # In an && / || list errexit is suspended, so the function always runs to completion and cc
 # controls the exit status.
 case "${1:-}" in
-    --broker-login)  shift; broker_login  && exit 0 || exit $? ;;
-    --broker-logout) shift; broker_logout && exit 0 || exit $? ;;
-    --broker-status) shift; broker_status && exit 0 || exit $? ;;
+    --broker-login)
+        shift
+        broker_login && exit 0 || exit $?
+        ;;
+    --broker-logout)
+        shift
+        broker_logout && exit 0 || exit $?
+        ;;
+    --broker-status)
+        shift
+        broker_status && exit 0 || exit $?
+        ;;
     # Unified, registry-driven surface. `cc --login <name>` (name defaults to claude), etc.
-    --login)   shift; provider_login  "${1:-claude}" && exit 0 || exit $? ;;
-    --logout)  shift; provider_logout "${1:-claude}" && exit 0 || exit $? ;;
-    --status)  shift; provider_status                && exit 0 || exit $? ;;
-    --add-mcp) shift; mcp_add "$@"                    && exit 0 || exit $? ;;
-    # Migrate an inline-credential MCP (claude mcp add --header …) into the broker. Touches the
-    # project dir, so it runs after identity is known — dispatched below, not here.
+    --login)
+        shift
+        provider_login "${1:-claude}" && exit 0 || exit $?
+        ;;
+    --logout)
+        shift
+        provider_logout "${1:-claude}" && exit 0 || exit $?
+        ;;
+    --status)
+        shift
+        provider_status && exit 0 || exit $?
+        ;;
+    --add-mcp)
+        shift
+        mcp_add "$@" && exit 0 || exit $?
+        ;;
+        # Migrate an inline-credential MCP (claude mcp add --header …) into the broker. Touches the
+        # project dir, so it runs after identity is known — dispatched below, not here.
 esac
 
 # Front-line preventer: catch a pasted `cc [claude] mcp add … --header/--env <secret>` (the user
 # swaps claude→cc) HERE, host-side, before it can carry a secret into the container as argv. Its
 # tri-state exit drives ours — 0 = auto-brokered/staged (done), 2 = blocked, anything else = not
 # an intercept, fall through to a normal launch. See intercept_mcp_add in cc-lib.sh.
-_ic=0; intercept_mcp_add "$@" || _ic=$?
+_ic=0
+intercept_mcp_add "$@" || _ic=$?
 [ "$_ic" = 0 ] && exit 0
 [ "$_ic" = 2 ] && exit 2
 unset _ic
 
-preflight_platform          # darwin: engine/perl/bind-mount checks; linux: no-op
+preflight_platform # darwin: engine/perl/bind-mount checks; linux: no-op
 build_image_if_missing
 check_for_updates
 
@@ -205,14 +230,14 @@ if [ "${CC_FORCE_NEW_SESSION:-0}" = "1" ]; then
     # real container's live FUSE mount, unmasking .ccignore'd files under a live session.
     SCRATCH_SUFFIX=".eph.$$"
     mkdir -p "$SESSION_BASE" && chmod 700 "$SESSION_BASE"
-    mkdir -p "$SHARED_BASE"  && chmod 700 "$SHARED_BASE"   # holds the real credential on the broker-off path
+    mkdir -p "$SHARED_BASE" && chmod 700 "$SHARED_BASE" # holds the real credential on the broker-off path
     # Reap it even if we bail out below (e.g. the sidecar fails): the real cleanup() trap
     # isn't installed until just before the container starts.
     trap 'rm -rf "$EPH_ROOT"' EXIT
     echo "⚠️  CC_FORCE_NEW_SESSION=1 — ephemeral session; no history, discarded on exit." >&2
 else
     mkdir -p "$SESSION_BASE" && chmod 700 "$SESSION_BASE"
-    mkdir -p "$SHARED_BASE"  && chmod 700 "$SHARED_BASE"   # holds the real credential on the broker-off path
+    mkdir -p "$SHARED_BASE" && chmod 700 "$SHARED_BASE" # holds the real credential on the broker-off path
     # SHARED lock, held for this terminal's lifetime: a reference count on the project's
     # container, not a mutex — any number of terminals hold it at once. It blocks only
     # while a departing session holds the lock *exclusively* to tear the container down,
@@ -238,14 +263,14 @@ assemble_session_dir() {
         _scope_py scope-in-json "$CLAUDE_JSON" "$PWD" "$SESSION_BASE/.claude.json" \
             || warn "could not scope .claude.json — starting this session from an empty config."
     else
-        printf '{\n  "projects": {}\n}\n' > "$SESSION_BASE/.claude.json"
+        printf '{\n  "projects": {}\n}\n' >"$SESSION_BASE/.claude.json"
     fi
     # This project's ↑ history only (never another project's prompts/pastes).
     if command -v python3 >/dev/null 2>&1; then
         _scope_py seed-history "$CLAUDE_HOME/history.jsonl" "$PWD" "$SESSION_BASE/history.jsonl" \
-            || : > "$SESSION_BASE/history.jsonl"
+            || : >"$SESSION_BASE/history.jsonl"
     else
-        : > "$SESSION_BASE/history.jsonl"
+        : >"$SESSION_BASE/history.jsonl"
     fi
     # Sandbox policy + the user's canonical memory, placed directly (not a shared symlink).
     assemble_sandbox_claude_md
@@ -270,7 +295,8 @@ assemble_session_dir() {
 # desktop popup). A stronger line when /etc/claude-code-version changed since we last saw it.
 check_claude_home_drift() {
     command -v python3 >/dev/null 2>&1 || return 0
-    local unknown; unknown="$(_scope_py classify "$CLAUDE_HOME" 2>/dev/null || true)"
+    local unknown
+    unknown="$(_scope_py classify "$CLAUDE_HOME" 2>/dev/null || true)"
     [ -n "$unknown" ] || return 0
     echo "ℹ️  cc: unrecognised ~/.claude entries (kept container-private, not shared): $(printf '%s' "$unknown" | tr '\n' ' ')" >&2
 }
@@ -336,16 +362,16 @@ PROJECT_MOUNT_OPTS=""
 REDACTION_ARGS=()
 
 container_running() { [ -n "$(docker ps -q -f "name=^${CNAME}$" 2>/dev/null)" ]; }
-sidecar_running()   { [ -n "$(docker ps -q -f "name=^${FUSE_CNAME}$" 2>/dev/null)" ]; }
-broker_running()    { [ -n "$(docker ps -q -f "name=^${BROKER_CNAME}$" 2>/dev/null)" ]; }
+sidecar_running() { [ -n "$(docker ps -q -f "name=^${FUSE_CNAME}$" 2>/dev/null)" ]; }
+broker_running() { [ -n "$(docker ps -q -f "name=^${BROKER_CNAME}$" 2>/dev/null)" ]; }
 
 # Was the running container created with --unlock-shared? Read it off the mounts, which are
 # the ground truth — no state file to go stale. The lock witness is the probe: cc binds it
 # read-only into the shared-assembly dir ONLY when locked, and — unlike any individual shared
 # asset (a fresh user may have no plugins/skills/…) — it is guaranteed present when locked.
 running_unlocked() {
-    ! docker inspect -f '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' "$CNAME" 2>/dev/null |
-        grep -qx '/home/hostuser/.claude-shared/.cc-shared-locked'
+    ! docker inspect -f '{{range .Mounts}}{{.Destination}}{{"\n"}}{{end}}' "$CNAME" 2>/dev/null \
+        | grep -qx '/home/hostuser/.claude-shared/.cc-shared-locked'
 }
 
 # `docker run -d` returns as soon as PID 1 exists, but the entrypoint still has real work
@@ -361,14 +387,15 @@ running_unlocked() {
 container_ready() {
     local args
     args="$(docker top "$CNAME" -o args 2>/dev/null)" \
-        || args="$(docker top "$CNAME" 2>/dev/null |
-                   awk 'NR>1 { $1=$2=$3=$4=$5=$6=$7=""; sub(/^ +/,""); print }')"
+        || args="$(docker top "$CNAME" 2>/dev/null \
+            | awk 'NR>1 { $1=$2=$3=$4=$5=$6=$7=""; sub(/^ +/,""); print }')"
     printf '%s\n' "$args" | grep -qx 'sleep infinity'
 }
 
 wait_for_container_ready() {
     local _
-    for _ in $(seq 1 120); do                       # ≤60s; a cold entrypoint is ~1s
+    # ≤60s; a cold entrypoint is ~1s
+    for _ in $(seq 1 120); do
         container_ready && return 0
         if ! container_running; then
             echo "❌ cc: the project container exited during startup. Logs:" >&2
@@ -387,7 +414,7 @@ wait_for_container_ready() {
 }
 
 teardown_container() {
-    docker stop -t 5 "$CNAME" >/dev/null 2>&1 || true   # started with --rm; stop removes it
+    docker stop -t 5 "$CNAME" >/dev/null 2>&1 || true # started with --rm; stop removes it
 
     # Redaction teardown is mode-specific (sidecar: unmount + rm the FUSE container +
     # rm its scratch root, in that order; single: the mount died with the container,
@@ -549,7 +576,8 @@ start_container() {
     # dir, so in-session creation/installs still work, they just land per-project. Under
     # --unlock-shared they are writable and installs land in canonical ~/.claude (promoted to
     # every project + the host claude).
-    local _ro=":ro"; [ "$UNLOCK_SHARED" = 1 ] && _ro=""
+    local _ro=":ro"
+    [ "$UNLOCK_SHARED" = 1 ] && _ro=""
     local _entry
     # `if`, not `[ … ] && ARGS+=`: a false test on the final iteration would make the whole
     # loop exit 1, which under `set -e` kills cc before the container starts.
@@ -562,7 +590,7 @@ start_container() {
     # Lock witness: a read-only bind that exists ONLY when locked, so running_unlocked can read
     # the lock state off the mounts even for a user with no shared assets to probe.
     if [ "$UNLOCK_SHARED" = 0 ]; then
-        printf 'locked\n' > "$LOCK_WITNESS" 2>/dev/null || true
+        printf 'locked\n' >"$LOCK_WITNESS" 2>/dev/null || true
         if [ -f "$LOCK_WITNESS" ]; then
             ARGS+=(-v "$LOCK_WITNESS:/home/hostuser/.claude-shared/.cc-shared-locked:ro")
         fi
@@ -617,13 +645,13 @@ if container_running; then
             "Close all cc sessions for this project and relaunch, or attach with:" \
             "    cc --unlock-shared"
     fi
-    wait_for_container_ready   # in case its creator died mid-startup
+    wait_for_container_ready # in case its creator died mid-startup
     # Re-assert the pins on the live session file (a concurrent session may have rewritten it
     # wholesale). Do NOT re-assemble here — the running container is bound to these files.
     pin_global_config "$SESSION_BASE/.claude.json"
     echo "🔗 cc: attaching to this project's running container ($CNAME)." >&2
 else
-    teardown_container    # clear anything a crashed session left behind
+    teardown_container # clear anything a crashed session left behind
     # Cold start: rebuild this project's config from canonical ~/.claude, then pin. Only here —
     # never while a container is attached to these bind-mounted files.
     assemble_session_dir
@@ -662,7 +690,10 @@ SLEEP_GUARD_PID=$!
 # claude-config-scope.py. Not called for ephemeral sessions (merge-out disabled by design).
 merge_out_session() {
     command -v python3 >/dev/null 2>&1 || {
-        merge_out_credential; merge_out_shared_settings; return 0; }
+        merge_out_credential
+        merge_out_shared_settings
+        return 0
+    }
     exec 203>"$CLAUDE_JSON.lock"
     if lock_fd -w 30 -x 203; then
         _scope_py merge-out-json "$SESSION_BASE/.claude.json" "$PWD" "$CLAUDE_JSON" \
@@ -675,7 +706,7 @@ merge_out_session() {
     else
         # Silence here would discard the whole session's config + ↑ history without a trace.
         warn "timed out waiting for $CLAUDE_JSON.lock — this session's .claude.json and" \
-             "↑ history changes were NOT merged back into ~/.claude."
+            "↑ history changes were NOT merged back into ~/.claude."
     fi
     exec 203>&-
 }
@@ -694,8 +725,8 @@ cleanup() {
         exec 200>&-
         exec 202>"$LOCK_FILE"
         if lock_fd -n -x 202; then
-            teardown_container      # stop the container first: the session files go quiescent
-            merge_out_session       # then fold this project's changes back to canonical
+            teardown_container # stop the container first: the session files go quiescent
+            merge_out_session  # then fold this project's changes back to canonical
             lock_fd -u 202
         fi
         exec 202>&-
@@ -758,7 +789,7 @@ fi
 # its subagents all inherit it across fork/exec, so the sleep guard can scope its /proc
 # sample to this session alone. It is set on the *exec*, not the container, so it is
 # per-terminal and works against a container created before this existed.
-echo >&2   # blank line separating cc's startup diagnostics from the app's own output
+echo >&2 # blank line separating cc's startup diagnostics from the app's own output
 docker exec -it \
     ${USERFLAG[@]+"${USERFLAG[@]}"} \
     --workdir "$PWD" \

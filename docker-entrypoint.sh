@@ -16,30 +16,30 @@ HOST_GID="${HOST_GID:-1000}"
 # becoming root, which NNP blocks — so this is defence in depth making the invariant explicit
 # and self-enforcing. It is baked into the image, so a sandboxed session cannot edit it.)
 assert_no_sysadmin() {
-	[ "${CC_FUSE_INTERNAL:-0}" = 1 ] || return 0
-	ans_bnd=$(awk '/^CapBnd:/{print $2}' /proc/self/status 2>/dev/null)
-	[ -n "$ans_bnd" ] || return 0
-	if [ $(( 0x$ans_bnd & 0x200000 )) -ne 0 ]; then
-		echo "✗ cc: refusing to run — CAP_SYS_ADMIN is still in this session's bounding set." >&2
-		echo "  Single-container FUSE mode must drop it (setpriv) before the agent runs; it did" >&2
-		echo "  not. Aborting rather than run the agent with mount capability. (CapBnd=$ans_bnd)" >&2
-		exit 1
-	fi
+    [ "${CC_FUSE_INTERNAL:-0}" = 1 ] || return 0
+    ans_bnd=$(awk '/^CapBnd:/{print $2}' /proc/self/status 2>/dev/null)
+    [ -n "$ans_bnd" ] || return 0
+    if [ $((0x$ans_bnd & 0x200000)) -ne 0 ]; then
+        echo "✗ cc: refusing to run — CAP_SYS_ADMIN is still in this session's bounding set." >&2
+        echo "  Single-container FUSE mode must drop it (setpriv) before the agent runs; it did" >&2
+        echo "  not. Aborting rather than run the agent with mount capability. (CapBnd=$ans_bnd)" >&2
+        exit 1
+    fi
 }
 
 # Ensure Claude is also available at the native per-user location.
 # POSIX sh has no `local`, so the variables are prefixed to avoid clobbering the caller's.
 ensure_user_local_claude() {
-	eulc_home="$1"
-	eulc_target="$eulc_home/.local/bin/claude"
-	eulc_claude="$(command -v claude 2>/dev/null || true)"
+    eulc_home="$1"
+    eulc_target="$eulc_home/.local/bin/claude"
+    eulc_claude="$(command -v claude 2>/dev/null || true)"
 
-	[ -n "$eulc_claude" ] || return 0
+    [ -n "$eulc_claude" ] || return 0
 
-	mkdir -p "$eulc_home/.local/bin" 2>/dev/null || true
-	if [ ! -e "$eulc_target" ]; then
-		ln -sf "$eulc_claude" "$eulc_target" 2>/dev/null || true
-	fi
+    mkdir -p "$eulc_home/.local/bin" 2>/dev/null || true
+    if [ ! -e "$eulc_target" ]; then
+        ln -sf "$eulc_claude" "$eulc_target" 2>/dev/null || true
+    fi
 }
 
 # macOS clipboard bridge (CC_CLIP_BRIDGE=1): install container-side shims that talk to the
@@ -48,7 +48,7 @@ ensure_user_local_claude() {
 # and fail — one-way by construction, mirroring the Wayland guard. Placed in /usr/local/bin
 # (ahead of /usr/bin), so they shadow the real wl-clipboard, which has no socket here anyway.
 install_clipboard_shims() {
-	cat > /usr/local/bin/wl-paste <<'SHIM'
+    cat >/usr/local/bin/wl-paste <<'SHIM'
 #!/bin/sh
 # cc clipboard bridge — READ ONLY. Requests a selection from the host over /cc-clip.
 DIR=/cc-clip
@@ -70,7 +70,7 @@ while [ ! -e "$DIR/done.$id" ] && [ "$i" -lt 40 ]; do sleep 0.05; i=$((i + 1)); 
 rm -f "$DIR/req.$id" "$DIR/resp.$id" "$DIR/done.$id" 2>/dev/null
 SHIM
 
-	cat > /usr/local/bin/xclip <<'SHIM'
+    cat >/usr/local/bin/xclip <<'SHIM'
 #!/bin/sh
 # cc clipboard bridge — xclip-compatible. `-o`/`-out` reads via the bridge; anything else
 # is a write and is refused.
@@ -81,8 +81,8 @@ echo "cc: clipboard WRITE refused — the sandbox clipboard is read-only." >&2
 exit 1
 SHIM
 
-	for w in wl-copy pbcopy; do
-		cat > "/usr/local/bin/$w" <<'SHIM'
+    for w in wl-copy pbcopy; do
+        cat >"/usr/local/bin/$w" <<'SHIM'
 #!/bin/sh
 # cc clipboard bridge — WRITE refused. A clipboard write is host code execution at the
 # user's next paste, so it is blocked here exactly as the Wayland guard blocks it.
@@ -91,29 +91,29 @@ DIR=/cc-clip
 echo "cc: clipboard WRITE refused — the sandbox clipboard is read-only." >&2
 exit 1
 SHIM
-	done
+    done
 
-	chmod +x /usr/local/bin/wl-paste /usr/local/bin/xclip \
-		/usr/local/bin/wl-copy /usr/local/bin/pbcopy 2>/dev/null || true
+    chmod +x /usr/local/bin/wl-paste /usr/local/bin/xclip \
+        /usr/local/bin/wl-copy /usr/local/bin/pbcopy 2>/dev/null || true
 }
 
 # If already running as the target user, just exec
 if [ "$(id -u)" = "$HOST_UID" ]; then
-	USER_HOME=$(getent passwd "$HOST_UID" | cut -d: -f6)
-	if [ -z "$USER_HOME" ]; then
-		echo "✗ Failed to resolve home directory for UID $HOST_UID" >&2
-		exit 1
-	fi
-	if [ "$HOST_UID" = "0" ]; then
-		echo "✗ Refusing to run tool command as root" >&2
-		exit 1
-	fi
-	mkdir -p "$USER_HOME/.local/bin" "$USER_HOME/.local/share" "$USER_HOME/.config" "$USER_HOME/.cache" 2>/dev/null || true
-	export HOME="$USER_HOME"
-	export PATH="$USER_HOME/.local/bin:$PATH"
-	ensure_user_local_claude "$USER_HOME"
-	assert_no_sysadmin
-	exec "$@"
+    USER_HOME=$(getent passwd "$HOST_UID" | cut -d: -f6)
+    if [ -z "$USER_HOME" ]; then
+        echo "✗ Failed to resolve home directory for UID $HOST_UID" >&2
+        exit 1
+    fi
+    if [ "$HOST_UID" = "0" ]; then
+        echo "✗ Refusing to run tool command as root" >&2
+        exit 1
+    fi
+    mkdir -p "$USER_HOME/.local/bin" "$USER_HOME/.local/share" "$USER_HOME/.config" "$USER_HOME/.cache" 2>/dev/null || true
+    export HOME="$USER_HOME"
+    export PATH="$USER_HOME/.local/bin:$PATH"
+    ensure_user_local_claude "$USER_HOME"
+    assert_no_sysadmin
+    exec "$@"
 fi
 
 # Running as root, need to set up user
@@ -121,19 +121,19 @@ echo "▶ Setting up container user with UID:GID ${HOST_UID}:${HOST_GID}..." >/d
 
 # Create group if needed
 if ! getent group "$HOST_GID" >/dev/null 2>&1; then
-	groupadd -g "$HOST_GID" hostgroup
+    groupadd -g "$HOST_GID" hostgroup
 fi
 
 # Handle user creation/modification
 if ! id -u "$HOST_UID" >/dev/null 2>&1; then
-	# Create new user (suppress UID range warning for macOS UIDs)
-	UID_MIN=100 UID_MAX=65000 useradd -u "$HOST_UID" -g "$HOST_GID" -d /home/hostuser -s /bin/bash -m hostuser 2>/dev/null || useradd -u "$HOST_UID" -g "$HOST_GID" -d /home/hostuser -s /bin/bash -m hostuser
-	USER_NAME="hostuser"
-	USER_HOME="/home/hostuser"
+    # Create new user (suppress UID range warning for macOS UIDs)
+    UID_MIN=100 UID_MAX=65000 useradd -u "$HOST_UID" -g "$HOST_GID" -d /home/hostuser -s /bin/bash -m hostuser 2>/dev/null || useradd -u "$HOST_UID" -g "$HOST_GID" -d /home/hostuser -s /bin/bash -m hostuser
+    USER_NAME="hostuser"
+    USER_HOME="/home/hostuser"
 else
-	# User already exists
-	USER_NAME=$(id -nu "$HOST_UID")
-	USER_HOME=$(getent passwd "$HOST_UID" | cut -d: -f6)
+    # User already exists
+    USER_NAME=$(id -nu "$HOST_UID")
+    USER_HOME=$(getent passwd "$HOST_UID" | cut -d: -f6)
 fi
 
 # Ensure home directory exists and has correct ownership (for all cases)
@@ -142,9 +142,9 @@ chown "$HOST_UID:$HOST_GID" "$USER_HOME" 2>/dev/null || true
 
 # Ensure XDG_RUNTIME_DIR exists for Wayland clipboard access
 if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
-	mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
-	chown "$HOST_UID:$HOST_GID" "$XDG_RUNTIME_DIR" 2>/dev/null || true
-	chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
+    mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
+    chown "$HOST_UID:$HOST_GID" "$XDG_RUNTIME_DIR" 2>/dev/null || true
+    chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
 fi
 
 # Create tmp directories used by Claude's sandbox (TMPDIR=/tmp/claude)
@@ -168,108 +168,108 @@ CLAUDE_SESSION_DIR="${CLAUDE_CONFIG_DIR:-}"
 CLAUDE_SHARED_DIR="${CLAUDE_SECURESTORAGE_CONFIG_DIR:-}"
 
 if [ -n "$CLAUDE_SESSION_DIR" ] && [ -d "$CLAUDE_SHARED_DIR" ]; then
-	mkdir -p "$CLAUDE_SESSION_DIR" 2>/dev/null || true
-	# Skipped when cc has mounted plugins/ read-only, which is the default.
-	if [ -w "$CLAUDE_SHARED_DIR/plugins" ]; then
-		mkdir -p "$CLAUDE_SHARED_DIR/plugins/marketplaces" 2>/dev/null || true
-	fi
+    mkdir -p "$CLAUDE_SESSION_DIR" 2>/dev/null || true
+    # Skipped when cc has mounted plugins/ read-only, which is the default.
+    if [ -w "$CLAUDE_SHARED_DIR/plugins" ]; then
+        mkdir -p "$CLAUDE_SHARED_DIR/plugins/marketplaces" 2>/dev/null || true
+    fi
 
-	# Whole-file assets: one symlink each, as before. CLAUDE.md is deliberately absent —
-	# cc assembles it (policy + user memory) straight into CLAUDE_CONFIG_DIR.
-	for entry in settings.json keybindings.json hooks; do
-		src="$CLAUDE_SHARED_DIR/$entry"
-		dst="$CLAUDE_SESSION_DIR/$entry"
-		[ -e "$src" ] || continue
-		# Claude rewrites settings.json atomically (temp file + rename), replacing our
-		# symlink with a real file. Fold that edit back into the shared copy before
-		# relinking, so an in-session settings change isn't dropped — but only when it
-		# really is newer, or we'd revert a change another project made through the
-		# shared file meanwhile. (`find -newer`, not `-nt`: this runs under dash.)
-		if [ -f "$dst" ] && [ ! -L "$dst" ]; then
-			# A read-only shared copy (cc's default) means this asset is deliberately
-			# not project-writable: keep the local file as this project's override
-			# rather than deleting an edit we cannot fold back.
-			[ -w "$src" ] || continue
-			if [ -n "$(find "$dst" -newer "$src" 2>/dev/null)" ]; then
-				cp -p "$dst" "$src" 2>/dev/null || true
-			fi
-			rm -f "$dst" 2>/dev/null || true
-		fi
-		ln -sfn "$src" "$dst" 2>/dev/null || true
-	done
+    # Whole-file assets: one symlink each, as before. CLAUDE.md is deliberately absent —
+    # cc assembles it (policy + user memory) straight into CLAUDE_CONFIG_DIR.
+    for entry in settings.json keybindings.json hooks; do
+        src="$CLAUDE_SHARED_DIR/$entry"
+        dst="$CLAUDE_SESSION_DIR/$entry"
+        [ -e "$src" ] || continue
+        # Claude rewrites settings.json atomically (temp file + rename), replacing our
+        # symlink with a real file. Fold that edit back into the shared copy before
+        # relinking, so an in-session settings change isn't dropped — but only when it
+        # really is newer, or we'd revert a change another project made through the
+        # shared file meanwhile. (`find -newer`, not `-nt`: this runs under dash.)
+        if [ -f "$dst" ] && [ ! -L "$dst" ]; then
+            # A read-only shared copy (cc's default) means this asset is deliberately
+            # not project-writable: keep the local file as this project's override
+            # rather than deleting an edit we cannot fold back.
+            [ -w "$src" ] || continue
+            if [ -n "$(find "$dst" -newer "$src" 2>/dev/null)" ]; then
+                cp -p "$dst" "$src" 2>/dev/null || true
+            fi
+            rm -f "$dst" 2>/dev/null || true
+        fi
+        ln -sfn "$src" "$dst" 2>/dev/null || true
+    done
 
-	# Asset *directories*: a real per-project dir holding one symlink per shared item,
-	# instead of one symlink to the shared dir. cc mounts these read-only (a write there
-	# would auto-run in every other project's next session), and a plain symlink would
-	# make `/agents`, skill authoring and `/plugin install` fail outright. This way shared
-	# items still load, and anything created in-session lands in this project's own dir
-	# and works immediately — it simply doesn't follow you to other projects.
-	#
-	# State *files* need no special case: a JSON writer does temp-file + rename, and the
-	# rename replaces our symlink with a real local file, which this dir permits.
-	farm_dir() {   # $1 = shared source dir, $2 = per-project dir
-		[ -d "$1" ] || return 0
-		[ -L "$2" ] && rm -f "$2"               # upgrade a farm built by an older cc
-		mkdir -p "$2" 2>/dev/null || true
+    # Asset *directories*: a real per-project dir holding one symlink per shared item,
+    # instead of one symlink to the shared dir. cc mounts these read-only (a write there
+    # would auto-run in every other project's next session), and a plain symlink would
+    # make `/agents`, skill authoring and `/plugin install` fail outright. This way shared
+    # items still load, and anything created in-session lands in this project's own dir
+    # and works immediately — it simply doesn't follow you to other projects.
+    #
+    # State *files* need no special case: a JSON writer does temp-file + rename, and the
+    # rename replaces our symlink with a real local file, which this dir permits.
+    farm_dir() { # $1 = shared source dir, $2 = per-project dir
+        [ -d "$1" ] || return 0
+        [ -L "$2" ] && rm -f "$2" # upgrade a farm built by an older cc
+        mkdir -p "$2" 2>/dev/null || true
 
-		# Drop our own links first, so an item deleted from the shared dir since the last
-		# launch doesn't linger as a dangling link. Only links *into* the shared dir are
-		# ours; real files and dirs are this project's and are never touched.
-		for link in "$2"/* "$2"/.*; do
-			[ -L "$link" ] || continue
-			case "$(readlink "$link" 2>/dev/null)" in
-				"$CLAUDE_SHARED_DIR"/*) rm -f "$link" ;;
-			esac
-		done
+        # Drop our own links first, so an item deleted from the shared dir since the last
+        # launch doesn't linger as a dangling link. Only links *into* the shared dir are
+        # ours; real files and dirs are this project's and are never touched.
+        for link in "$2"/* "$2"/.*; do
+            [ -L "$link" ] || continue
+            case "$(readlink "$link" 2>/dev/null)" in
+                "$CLAUDE_SHARED_DIR"/*) rm -f "$link" ;;
+            esac
+        done
 
-		for item in "$1"/*; do
-			[ -e "$item" ] || continue          # unmatched glob
-			name="${item##*/}"
-			[ -e "$2/$name" ] && continue       # a local item of the same name wins
-			ln -sfn "$item" "$2/$name" 2>/dev/null || true
-		done
-	}
+        for item in "$1"/*; do
+            [ -e "$item" ] || continue # unmatched glob
+            name="${item##*/}"
+            [ -e "$2/$name" ] && continue # a local item of the same name wins
+            ln -sfn "$item" "$2/$name" 2>/dev/null || true
+        done
+    }
 
-	for entry in plugins skills agents commands; do
-		farm_dir "$CLAUDE_SHARED_DIR/$entry" "$CLAUDE_SESSION_DIR/$entry"
-	done
+    for entry in plugins skills agents commands; do
+        farm_dir "$CLAUDE_SHARED_DIR/$entry" "$CLAUDE_SESSION_DIR/$entry"
+    done
 
-	# One level deeper for the plugin installer's working dirs. Without this a per-project
-	# `/plugin install` fails: the state JSONs update fine (rename replaces their symlink),
-	# but cloning a marketplace or unpacking a plugin needs to mkdir *inside* these, and a
-	# symlink to the read-only shared dir refuses that.
-	for entry in marketplaces cache data; do
-		farm_dir "$CLAUDE_SHARED_DIR/plugins/$entry" "$CLAUDE_SESSION_DIR/plugins/$entry"
-	done
+    # One level deeper for the plugin installer's working dirs. Without this a per-project
+    # `/plugin install` fails: the state JSONs update fine (rename replaces their symlink),
+    # but cloning a marketplace or unpacking a plugin needs to mkdir *inside* these, and a
+    # symlink to the read-only shared dir refuses that.
+    for entry in marketplaces cache data; do
+        farm_dir "$CLAUDE_SHARED_DIR/plugins/$entry" "$CLAUDE_SESSION_DIR/plugins/$entry"
+    done
 
-	# The session dir belongs to one project, so no other container is walking it and this
-	# recursive chown cannot race. `-h` retags the symlinks above instead of dereferencing
-	# them into the shared dir.
-	chown -Rh "$HOST_UID:$HOST_GID" "$CLAUDE_SESSION_DIR" 2>/dev/null || true
+    # The session dir belongs to one project, so no other container is walking it and this
+    # recursive chown cannot race. `-h` retags the symlinks above instead of dereferencing
+    # them into the shared dir.
+    chown -Rh "$HOST_UID:$HOST_GID" "$CLAUDE_SESSION_DIR" 2>/dev/null || true
 
-	# The shared dir IS touched by every container, so only fix it when the owner actually
-	# differs — normally it doesn't, the container user being the host user. (Chowning it
-	# unconditionally made two containers starting at once race on the same inodes.)
-	if [ "$(stat -c %u "$CLAUDE_SHARED_DIR" 2>/dev/null || echo "$HOST_UID")" != "$HOST_UID" ]; then
-		chown -Rh "$HOST_UID:$HOST_GID" "$CLAUDE_SHARED_DIR" 2>/dev/null || true
-	fi
+    # The shared dir IS touched by every container, so only fix it when the owner actually
+    # differs — normally it doesn't, the container user being the host user. (Chowning it
+    # unconditionally made two containers starting at once race on the same inodes.)
+    if [ "$(stat -c %u "$CLAUDE_SHARED_DIR" 2>/dev/null || echo "$HOST_UID")" != "$HOST_UID" ]; then
+        chown -Rh "$HOST_UID:$HOST_GID" "$CLAUDE_SHARED_DIR" 2>/dev/null || true
+    fi
 fi
 
 # Set up timezone if TZ environment variable is provided
 if [ -n "$TZ" ]; then
-	echo "▶ Setting timezone to: $TZ"
-	if [ -f "/usr/share/zoneinfo/$TZ" ]; then
-		ln -sf "/usr/share/zoneinfo/$TZ" /etc/localtime
-		echo "$TZ" >/etc/timezone
-	else
-		echo "⚠ Warning: Timezone $TZ not found, using system default"
-	fi
+    echo "▶ Setting timezone to: $TZ"
+    if [ -f "/usr/share/zoneinfo/$TZ" ]; then
+        ln -sf "/usr/share/zoneinfo/$TZ" /etc/localtime
+        echo "$TZ" >/etc/timezone
+    else
+        echo "⚠ Warning: Timezone $TZ not found, using system default"
+    fi
 fi
 
 # Symlink host home path so Claude's project paths (keyed by absolute path) resolve
 # This allows /resume to find conversations started on the host
 if [ -n "${HOST_HOME:-}" ] && [ "$HOST_HOME" != "$USER_HOME" ] && [ ! -e "$HOST_HOME" ]; then
-	ln -sf "$USER_HOME" "$HOST_HOME"
+    ln -sf "$USER_HOME" "$HOST_HOME"
 fi
 
 # When $HOST_HOME already exists the block above is skipped — and it normally DOES exist,
@@ -284,9 +284,9 @@ fi
 # Skipped when $HOST_HOME is our own symlink from above (its /.claude would be the stock
 # config dir Claude looks for by default).
 if [ -n "${HOST_HOME:-}" ] && [ "$HOST_HOME" != "$USER_HOME" ] && [ -d "$HOST_HOME" ] \
-	&& [ ! -L "$HOST_HOME" ] && [ ! -e "$HOST_HOME/.claude" ] && [ -n "$CLAUDE_SESSION_DIR" ]; then
-	ln -s "$CLAUDE_SESSION_DIR" "$HOST_HOME/.claude" 2>/dev/null || true
-	chown -h "$HOST_UID:$HOST_GID" "$HOST_HOME/.claude" 2>/dev/null || true
+    && [ ! -L "$HOST_HOME" ] && [ ! -e "$HOST_HOME/.claude" ] && [ -n "$CLAUDE_SESSION_DIR" ]; then
+    ln -s "$CLAUDE_SESSION_DIR" "$HOST_HOME/.claude" 2>/dev/null || true
+    chown -h "$HOST_UID:$HOST_GID" "$HOST_HOME/.claude" 2>/dev/null || true
 fi
 
 # Playwright's Chromium, parked where Puppeteer's `--channel stable` resolution looks. Still
@@ -305,7 +305,7 @@ ln -sf "$(readlink -f /usr/local/bin/google-chrome-stable)" /opt/google/chrome/c
 # Deliberately conservative: it only fires for that one package, and only appends what the caller
 # did not already pass — so `--headless=false`, a custom `--executable-path`/`--channel`, or a
 # remote `--browser-url` all still win. CC_CHROME_MCP_ARGS=0 disables it outright.
-cat > /usr/local/bin/npx << 'NPXWRAPPER'
+cat >/usr/local/bin/npx <<'NPXWRAPPER'
 #!/bin/sh
 # Find the real npx by walking PATH (no `which`: Debian is retiring it, and a bare `command -v`
 # would just find this shim again). Fail loudly rather than exec'ing "".
@@ -352,7 +352,7 @@ chmod +x /usr/local/bin/npx
 # macOS clipboard bridge shims (once, at container creation — `docker exec` sessions take
 # the already-target-user branch above and never reach here).
 if [ "${CC_CLIP_BRIDGE:-0}" = 1 ]; then
-	install_clipboard_shims
+    install_clipboard_shims
 fi
 
 # Single-container FUSE redaction (CC_FUSE_INTERNAL=1): mount the redacted view over the
@@ -360,7 +360,7 @@ fi
 # while still root/SYS_ADMIN-capable; aborts the container on mount failure.
 CC_EXEC_PREFIX=""
 if [ "${CC_FUSE_INTERNAL:-0}" = 1 ]; then
-	. /usr/local/bin/entrypoint-fuse.sh
+    . /usr/local/bin/entrypoint-fuse.sh
 fi
 
 # Set up environment for the target user

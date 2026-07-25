@@ -14,43 +14,80 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 if [ -t 1 ]; then
-    G=$'\033[32m'; R=$'\033[31m'; Y=$'\033[33m'; B=$'\033[1m'; D=$'\033[2m'; N=$'\033[0m'
+    G=$'\033[32m'
+    R=$'\033[31m'
+    Y=$'\033[33m'
+    B=$'\033[1m'
+    D=$'\033[2m'
+    N=$'\033[0m'
 else
-    G=""; R=""; Y=""; B=""; D=""; N=""
+    G=""
+    R=""
+    Y=""
+    B=""
+    D=""
+    N=""
 fi
-PASS=0; FAIL=0; WARN=0; FAILURES=()
-ok()   { printf '  %s✔%s %s\n' "$G" "$N" "$1"; PASS=$((PASS + 1)); }
-bad()  { printf '  %s✘%s %s\n' "$R" "$N" "$1"; [ -n "${2:-}" ] && printf '      %s%s%s\n' "$D" "$2" "$N"; FAIL=$((FAIL + 1)); FAILURES+=("$1"); }
-warn() { printf '  %s!%s %s\n' "$Y" "$N" "$1"; [ -n "${2:-}" ] && printf '      %s%s%s\n' "$D" "$2" "$N"; WARN=$((WARN + 1)); }
-sec()  { printf '\n%s%s%s\n' "$B" "$1" "$N"; }
+PASS=0
+FAIL=0
+WARN=0
+FAILURES=()
+ok() {
+    printf '  %s✔%s %s\n' "$G" "$N" "$1"
+    PASS=$((PASS + 1))
+}
+bad() {
+    printf '  %s✘%s %s\n' "$R" "$N" "$1"
+    [ -n "${2:-}" ] && printf '      %s%s%s\n' "$D" "$2" "$N"
+    FAIL=$((FAIL + 1))
+    FAILURES+=("$1")
+}
+warn() {
+    printf '  %s!%s %s\n' "$Y" "$N" "$1"
+    [ -n "${2:-}" ] && printf '      %s%s%s\n' "$D" "$2" "$N"
+    WARN=$((WARN + 1))
+}
+sec() { printf '\n%s%s%s\n' "$B" "$1" "$N"; }
 
 # Host-side (run on the user's Mac/Linux): must obey the portability contract.
-HOST_BASH=(cc cc-lib.sh cc-portable.sh sleep-guard.sh build-bg.sh tests/check.sh)
+HOST_BASH=(cc cc-lib.sh cc-portable.sh sleep-guard.sh build-bg.sh rebuild.sh dev.sh tests/check.sh)
 # Host-side POSIX sh.
 HOST_SH=(clipboard-bridge.sh)
+# Host-side but structurally Linux-only (reads /proc, drives systemd): syntax + shellcheck,
+# exempt from the portability contract by design — it may use declare -A and friends.
+LINUX_BASH=(monitor-sleep-inhibition.sh)
 # Container-side (always Linux): linted for syntax only, exempt from the portability contract.
 CONT_SH=(docker-entrypoint.sh entrypoint-fuse.sh resolv-sync.sh)
 CONT_BASH=(tests/security-test.sh)
-PY=(ccignore-fuse.py wayland-guard.py ccignore-precommit.py cc-broker.py claude-config-scope.py tests/broker-test.py tests/config-scope-test.py)
+PY=(ccignore-fuse.py wayland-guard.py ccignore-precommit.py cc-broker.py claude-config-scope.py test-ccignore-fuse.py tests/broker-test.py tests/config-scope-test.py)
 
 # ── 1. syntax + shellcheck ───────────────────────────────────────
 sec "Syntax (bash -n / sh -n)"
-for f in "${HOST_BASH[@]}" "${CONT_BASH[@]}"; do
-    [ -f "$f" ] || { warn "$f missing"; continue; }
+for f in "${HOST_BASH[@]}" "${LINUX_BASH[@]}" "${CONT_BASH[@]}"; do
+    [ -f "$f" ] || {
+        warn "$f missing"
+        continue
+    }
     if err="$(bash -n "$f" 2>&1)"; then ok "bash -n $f"; else bad "bash -n $f" "$err"; fi
 done
 for f in "${HOST_SH[@]}" "${CONT_SH[@]}"; do
-    [ -f "$f" ] || { warn "$f missing"; continue; }
+    [ -f "$f" ] || {
+        warn "$f missing"
+        continue
+    }
     if err="$(sh -n "$f" 2>&1)"; then ok "sh -n $f"; else bad "sh -n $f" "$err"; fi
 done
 for f in "${PY[@]}"; do
-    [ -f "$f" ] || { warn "$f missing"; continue; }
+    [ -f "$f" ] || {
+        warn "$f missing"
+        continue
+    }
     if err="$(python3 -m py_compile "$f" 2>&1)"; then ok "py_compile $f"; else bad "py_compile $f" "$err"; fi
 done
 
 sec "shellcheck (errors are fatal; style/info advisory)"
 if command -v shellcheck >/dev/null 2>&1; then
-    for f in "${HOST_BASH[@]}" "${HOST_SH[@]}" "${CONT_SH[@]}" "${CONT_BASH[@]}"; do
+    for f in "${HOST_BASH[@]}" "${HOST_SH[@]}" "${LINUX_BASH[@]}" "${CONT_SH[@]}" "${CONT_BASH[@]}"; do
         [ -f "$f" ] || continue
         if shellcheck -S error -x "$f" >/dev/null 2>&1; then
             if out="$(shellcheck -S warning -x "$f" 2>&1)" && [ -z "$out" ]; then
@@ -81,7 +118,11 @@ for f in "${HOST_BASH[@]}" "${HOST_SH[@]}"; do
     [ -f "$f" ] || continue
     # cc-portable.sh is the shim home; check.sh is a Linux-only dev harness that uses raw
     # flock to *test* lock_fd — both are exempt from the contract by design.
-    case "$f" in cc-portable.sh | tests/check.sh) ok "$f (shim home / dev tool — exempt)"; continue ;; esac
+    case "$f" in cc-portable.sh | tests/check.sh)
+        ok "$f (shim home / dev tool — exempt)"
+        continue
+        ;;
+    esac
     code="$(sed 's/#.*$//' "$f")"
     hits="$(printf '%s\n' "$code" | grep -nE "$FATAL_RE" || true)"
     if [ -n "$hits" ]; then
@@ -97,17 +138,22 @@ done
 sec "Shim unit tests (cc-portable.sh, darwin paths forced)"
 # shellcheck source=cc-portable.sh
 IMAGE_NAME=unused
-die() { printf 'die: %s\n' "$@" >&2; return 1; }
+die() {
+    printf 'die: %s\n' "$@" >&2
+    return 1
+}
 . ./cc-portable.sh
-CC_OS=darwin        # force the perl/BSD shims; perl is identical on Linux
+CC_OS=darwin # force the perl/BSD shims; perl is identical on Linux
 
 t_hash8() {
-    local h; h="$(hash8 hello)"
+    local h
+    h="$(hash8 hello)"
     [ "$h" = 2cf24dba ] && ok "hash8: sha256 first 8" || bad "hash8" "got '$h', want 2cf24dba"
 }
 
 t_lockfd() {
-    local tmp; tmp="$(mktemp)"
+    local tmp
+    tmp="$(mktemp)"
     exec 200>"$tmp"
     if lock_fd -n -x 200; then ok "lock_fd: acquire -n -x"; else bad "lock_fd acquire"; fi
     if flock -n -x "$tmp" -c true 2>/dev/null; then bad "lock_fd: lock did not persist across the shim call"; else ok "lock_fd: lock persists via the held fd (OFD semantics)"; fi
@@ -116,37 +162,46 @@ t_lockfd() {
     exec 200>&-
 
     # timeout: hold it elsewhere, -w1 must fail in ~1s
-    local tmp2; tmp2="$(mktemp)"
-    flock -x "$tmp2" -c "sleep 3" & local hp=$!
+    local tmp2
+    tmp2="$(mktemp)"
+    flock -x "$tmp2" -c "sleep 3" &
+    local hp=$!
     sleep 0.3
     exec 201>"$tmp2"
-    local t0 t1; t0="$(date +%s)"
+    local t0 t1
+    t0="$(date +%s)"
     if lock_fd -w 1 -s 201; then bad "lock_fd: -w1 acquired a held exclusive lock"; else ok "lock_fd: -w1 -s times out on a held lock"; fi
     t1="$(date +%s)"
     [ "$((t1 - t0))" -le 2 ] || warn "lock_fd -w1 waited $((t1 - t0))s (expected ~1)"
-    exec 201>&-; kill "$hp" 2>/dev/null; wait "$hp" 2>/dev/null || true
+    exec 201>&-
+    kill "$hp" 2>/dev/null
+    wait "$hp" 2>/dev/null || true
 
     # file form: flock -n FILE CMD (the check_for_updates probe)
-    local tmp3; tmp3="$(mktemp)"
+    local tmp3
+    tmp3="$(mktemp)"
     if lock_fd -n "$tmp3" true; then ok "lock_fd: file-form succeeds on a free lock"; else bad "lock_fd file-form (free)"; fi
-    flock -x "$tmp3" -c "sleep 2" & hp=$!
+    flock -x "$tmp3" -c "sleep 2" &
+    hp=$!
     sleep 0.3
     if lock_fd -n "$tmp3" true; then bad "lock_fd: file-form succeeded on a held lock"; else ok "lock_fd: file-form fails on a held lock"; fi
-    kill "$hp" 2>/dev/null; wait "$hp" 2>/dev/null || true
+    kill "$hp" 2>/dev/null
+    wait "$hp" 2>/dev/null || true
     rm -f "$tmp" "$tmp2" "$tmp3"
 }
 
 t_detach() {
     detach_pgrp sleep 5
     local pid=$! pgid
-    sleep 0.3   # let perl load POSIX, setsid, then exec — else ps races a pre-setsid read
+    sleep 0.3 # let perl load POSIX, setsid, then exec — else ps races a pre-setsid read
     pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
     if [ -n "$pid" ] && [ "$pgid" = "$pid" ]; then
         ok "detach_pgrp: child is its own process-group leader (kill -\$! works)"
     else
         bad "detach_pgrp" "pid=$pid pgid=$pgid (want equal)"
     fi
-    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null || true
 }
 
 t_busiest() {
@@ -210,16 +265,16 @@ done
 # shape leaking through host-config into CLAUDE_CODE_OAUTH_TOKEN.
 case "$(printf '%s\n' "$hc" | sed -n 's/^CCB_PLACEHOLDER_TOKEN=//p')" in
     *fake_value_*) ok "--host-config placeholder token is a fake_value_ sentinel" ;;
-    *)             bad "--host-config placeholder token is not a sentinel" "may inject a real token shape" ;;
+    *) bad "--host-config placeholder token is not a sentinel" "may inject a real token shape" ;;
 esac
 
 # broker_login's exit-status contract (regression: an inconclusive probe must NOT fail a
 # successful store). Eval the real one-line helper out of cc-lib.sh and assert its truth table.
 eval "$(sed -n '/^_login_ok_after_probe()/p' cc-lib.sh)"
 if declare -f _login_ok_after_probe >/dev/null; then
-    _login_ok_after_probe 0 && a=0 || a=1        # accepted  → login ok
-    _login_ok_after_probe 2 && b=0 || b=1        # inconclusive → login ok
-    _login_ok_after_probe 1 && c=0 || c=1        # rejected   → login FAILS
+    _login_ok_after_probe 0 && a=0 || a=1 # accepted  → login ok
+    _login_ok_after_probe 2 && b=0 || b=1 # inconclusive → login ok
+    _login_ok_after_probe 1 && c=0 || c=1 # rejected   → login FAILS
     [ "$a" = 0 ] && [ "$b" = 0 ] && [ "$c" = 1 ] \
         && ok "broker_login: store succeeds unless the probe definitively rejects (0/2 ok, 1 fails)" \
         || bad "broker_login exit-status contract wrong" "accepted=$a inconclusive=$b rejected=$c (want 0 0 1)"
@@ -236,7 +291,7 @@ guard_out="$(cd "$HOME" 2>/dev/null && KIB_CONFIG="$(mktemp -u)" bash "$REPO_ROO
 case "$guard_out" in
     *"refuses to launch"*) bad "cc --broker-status blocked from \$HOME by the dir guard" "Fix-1 regressed" ;;
     *"credential broker"*) ok "broker subcommands bypass the sensitive-dir guard (run from \$HOME)" ;;
-    *)                     bad "cc --broker-status from \$HOME produced unexpected output" "$(printf '%s' "$guard_out" | head -1)" ;;
+    *) bad "cc --broker-status from \$HOME produced unexpected output" "$(printf '%s' "$guard_out" | head -1)" ;;
 esac
 
 # ── 4c. MCP brokering: registry / enabled sets / .claude.json injection / adopt / detector ──
@@ -275,8 +330,9 @@ en="$(_mcp_run '
   echo "E=[$(broker_enabled_providers)] H=[$(hosted_mcp_providers)]"')"
 case "$en" in
     *"E=[claude remote]"*"H=[local]"*)
-        ok "enabled = LLM + user reverse route (claude+remote); hosted = user local; orphan token ignored" ;;
-    *)  bad "broker_enabled_providers / hosted_mcp_providers wrong" "$en" ;;
+        ok "enabled = LLM + user reverse route (claude+remote); hosted = user local; orphan token ignored"
+        ;;
+    *) bad "broker_enabled_providers / hosted_mcp_providers wrong" "$en" ;;
 esac
 
 # .claude.json injection: broker + hosted URLs written from the user defs' ports, user entry
@@ -290,9 +346,9 @@ inj="$(_mcp_run '
   BROKER_ENABLED=1 HOSTED_MCP_UP="local" inject_brokered_mcps >/dev/null 2>&1
   cat "$SESSION_DIR/.claude.json"')"
 if printf '%s' "$inj" | grep -q "cc-broker:8100/http" \
-   && printf '%s' "$inj" | grep -q "local:8101/mcp" \
-   && printf '%s' "$inj" | grep -q '"myown"' \
-   && ! printf '%s' "$inj" | grep -q "STALE"; then
+    && printf '%s' "$inj" | grep -q "local:8101/mcp" \
+    && printf '%s' "$inj" | grep -q '"myown"' \
+    && ! printf '%s' "$inj" | grep -q "STALE"; then
     ok "inject_brokered_mcps: writes broker+hosted URLs, keeps user entry, prunes stale ours"
 else
     bad "inject_brokered_mcps wrong" "$(printf '%s' "$inj" | tr -d '\n ' | head -c 200)"
@@ -310,9 +366,9 @@ reuse="$(_mcp_run '
   echo "perm=$(ls -l "$KIB_DIR/svc-token" 2>/dev/null | cut -c1-10)"
   grep -q Authorization ".mcp.json" && echo "leak=yes" || echo "leak=no"')"
 if printf '%s' "$reuse" | grep -q "dup=no" \
-   && printf '%s' "$reuse" | grep -q "blob=TOK123" \
-   && printf '%s' "$reuse" | grep -q "perm=-rw-------" \
-   && printf '%s' "$reuse" | grep -q "leak=no"; then
+    && printf '%s' "$reuse" | grep -q "blob=TOK123" \
+    && printf '%s' "$reuse" | grep -q "perm=-rw-------" \
+    && printf '%s' "$reuse" | grep -q "leak=no"; then
     ok "cc --mcp-adopt: reuses an existing route for the same host, stores into its token (600), strips project"
 else
     bad "cc --mcp-adopt reuse wrong" "$reuse"
@@ -323,7 +379,7 @@ det="$(_mcp_run '
   printf "{\"mcpServers\":{\"dfs\":{\"url\":\"https://x\",\"headers\":{\"Authorization\":\"Basic SECRETBLOB123\"}}}}" > ".mcp.json"
   warn_inline_mcp_secrets 2>&1')"
 if printf '%s' "$det" | grep -q "cc --mcp-adopt dfs" \
-   && ! printf '%s' "$det" | grep -q "SECRETBLOB123"; then
+    && ! printf '%s' "$det" | grep -q "SECRETBLOB123"; then
     ok "warn_inline_mcp_secrets: names the server + reason, never prints the secret value"
 else
     bad "warn_inline_mcp_secrets wrong (or leaked the value!)" "$det"
@@ -340,10 +396,10 @@ gen="$(_mcp_run '
   echo "blob=$(cat "$KIB_DIR/acme-token" 2>/dev/null)"
   grep -q X-API-Key ".mcp.json" && echo leak=yes || echo leak=no')"
 if printf '%s' "$gen" | grep -q "def=yes" \
-   && printf '%s' "$gen" | grep -q "listed=1" \
-   && printf '%s' "$gen" | grep -q "port=810" \
-   && printf '%s' "$gen" | grep -q "blob=AK_LIVE_9" \
-   && printf '%s' "$gen" | grep -q "leak=no"; then
+    && printf '%s' "$gen" | grep -q "listed=1" \
+    && printf '%s' "$gen" | grep -q "port=810" \
+    && printf '%s' "$gen" | grep -q "blob=AK_LIVE_9" \
+    && printf '%s' "$gen" | grep -q "leak=no"; then
     ok "cc --mcp-adopt (no preset): synthesizes a user provider def the broker then serves"
 else
     bad "generic adopt-synthesis wrong" "$gen"
@@ -369,7 +425,7 @@ icA="$(_mcp_run '
   echo "def=$([ -f "$KIB_DIR/providers.d/icdfs.json" ] && echo yes || echo no)"
   grep -q Zm9vOmJhcg== "$SESSION_DIR/ic.err" && echo leak=yes || echo leak=no')"
 if printf '%s' "$icA" | grep -q "rc=0" && printf '%s' "$icA" | grep -q "perm=-rw-------" \
-   && printf '%s' "$icA" | grep -q "def=yes" && printf '%s' "$icA" | grep -q "leak=no"; then
+    && printf '%s' "$icA" | grep -q "def=yes" && printf '%s' "$icA" | grep -q "leak=no"; then
     ok "intercept_mcp_add: remote --header form auto-brokered host-side (token 600, def written, no leak)"
 else
     bad "intercept remote-header wrong" "$icA"
@@ -391,7 +447,7 @@ icB="$(_mcp_run '
   grep -q secretpw "$SESSION_DIR/ic.err" && echo leak=yes || echo leak=no
   CC_ALLOW_INLINE_MCP_SECRET=1 intercept_mcp_add claude mcp add iclocal --env DFS_PASSWORD=secretpw -- npx -y dataforseo-mcp-server 2>/dev/null; echo "optout_rc=$?"')"
 if printf '%s' "$icB" | grep -q "block_rc=2" && printf '%s' "$icB" | grep -q "leak=no" \
-   && printf '%s' "$icB" | grep -q "optout_rc=1"; then
+    && printf '%s' "$icB" | grep -q "optout_rc=1"; then
     ok "intercept_mcp_add: local --env secret blocked (rc2, no leak); CC_ALLOW_INLINE_MCP_SECRET=1 opts out (rc1)"
 else
     bad "intercept local-env wrong" "$icB"
@@ -405,7 +461,7 @@ icH="$(_mcp_run '
   intercept_mcp_add claude mcp add icstdio --header "Authorization: Bearer sk-stdio" -- npx -y some-server 2>/dev/null; echo "stdio_rc=$?"
   CC_ALLOW_INLINE_MCP_SECRET=1 intercept_mcp_add claude mcp add icnourl --header "Authorization: Bearer sk-noturl" 2>/dev/null; echo "optout_rc=$?"')"
 if printf '%s' "$icH" | grep -q "nourl_rc=2" && printf '%s' "$icH" | grep -q "leak=no" \
-   && printf '%s' "$icH" | grep -q "stdio_rc=2" && printf '%s' "$icH" | grep -q "optout_rc=1"; then
+    && printf '%s' "$icH" | grep -q "stdio_rc=2" && printf '%s' "$icH" | grep -q "optout_rc=1"; then
     ok "intercept_mcp_add: unbrokerable auth header (no URL / stdio) blocked (rc2, no leak); opt-out rc1"
 else
     bad "intercept unbrokerable-header wrong (should block, not passthrough)" "$icH"
@@ -416,7 +472,7 @@ icC="$(_mcp_run '
   intercept_mcp_add mcp list 2>/dev/null; echo "list_rc=$?"
   intercept_mcp_add claude 2>/dev/null; echo "session_rc=$?"')"
 if printf '%s' "$icC" | grep -q "nosecret_rc=1" && printf '%s' "$icC" | grep -q "list_rc=1" \
-   && printf '%s' "$icC" | grep -q "session_rc=1"; then
+    && printf '%s' "$icC" | grep -q "session_rc=1"; then
     ok "intercept_mcp_add: passthrough for no-secret add, mcp-list, and a plain session (rc1)"
 else
     bad "intercept passthrough wrong" "$icC"
@@ -494,13 +550,18 @@ fi
 # `nameserver 127.0.0.11`; if the sync overwrites that with the host upstreams, the `cc-broker`
 # alias stops resolving mid-session (the ENOTFOUND bug). Runs the REAL script against temp files.
 t_resolv_embedded() {
-    local dir; dir="$(mktemp -d)"
+    local dir
+    dir="$(mktemp -d)"
     # broker on: DST has the embedded resolver; host SRC has an upstream + the loopback stub.
-    printf 'search .\nnameserver 127.0.0.11\noptions ndots:0\n' > "$dir/dst"
-    printf '# host\nnameserver 192.168.18.250\nnameserver 127.0.0.53\nsearch lan\n' > "$dir/src"
+    printf 'search .\nnameserver 127.0.0.11\noptions ndots:0\n' >"$dir/dst"
+    printf '# host\nnameserver 192.168.18.250\nnameserver 127.0.0.53\nsearch lan\n' >"$dir/src"
     CC_RESOLV_DST="$dir/dst" CC_RESOLV_SYNC_INTERVAL=1 sh resolv-sync.sh "$dir/src" 2>/dev/null &
-    local pid=$!; sleep 0.5; kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
-    local first; first="$(grep -m1 '^[[:space:]]*nameserver' "$dir/dst" 2>/dev/null | awk '{print $2}')"
+    local pid=$!
+    sleep 0.5
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null || true
+    local first
+    first="$(grep -m1 '^[[:space:]]*nameserver' "$dir/dst" 2>/dev/null | awk '{print $2}')"
     [ "$first" = 127.0.0.11 ] \
         && ok "resolv-sync: embedded DNS (127.0.0.11) kept FIRST — broker alias survives the sync" \
         || bad "resolv-sync embedded DNS" "first nameserver '$first', want 127.0.0.11"
@@ -508,9 +569,12 @@ t_resolv_embedded() {
         && ok "resolv-sync: keeps the host upstream, strips the loopback stub" \
         || bad "resolv-sync upstream/stub handling"
     # broker off: DST has no embedded resolver → output is upstreams only (unchanged behaviour).
-    printf 'nameserver 10.0.0.1\n' > "$dir/dst2"
-    CC_RESOLV_DST="$dir/dst2" sh resolv-sync.sh "$dir/src" 2>/dev/null & pid=$!
-    sleep 0.5; kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+    printf 'nameserver 10.0.0.1\n' >"$dir/dst2"
+    CC_RESOLV_DST="$dir/dst2" sh resolv-sync.sh "$dir/src" 2>/dev/null &
+    pid=$!
+    sleep 0.5
+    kill "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null || true
     grep -q '127.0.0.11' "$dir/dst2" \
         && bad "resolv-sync broker-off" "injected 127.0.0.11 where DST had none" \
         || ok "resolv-sync: no embedded DNS present → upstreams only (broker off, unchanged)"
@@ -528,4 +592,4 @@ if [ "$FAIL" -gt 0 ]; then
     printf '\n%sFailed:%s\n' "$B" "$N"
     printf '  %s\n' "${FAILURES[@]}"
 fi
-exit $(( FAIL > 0 ? 1 : 0 ))
+exit $((FAIL > 0 ? 1 : 0))

@@ -8,7 +8,7 @@ BUILD_LOG="$SCRIPT_DIR/build.log"
 BUILD_PID="$SCRIPT_DIR/build.pid"
 
 # shellcheck source=cc-portable.sh
-. "$SCRIPT_DIR/cc-portable.sh"   # lock_fd + notify_desktop (portable to macOS)
+. "$SCRIPT_DIR/cc-portable.sh" # lock_fd + notify_desktop (portable to macOS)
 
 # Run this directly to rebuild the image by hand — it is the ONLY correct way to do it.
 # `docker build` on its own leaves CLAUDE_VERSION at its default, the literal string `latest`,
@@ -18,8 +18,8 @@ BUILD_PID="$SCRIPT_DIR/build.pid"
 #
 # Interactive (stdout is a terminal) streams the build and exits non-zero on failure; when cc
 # backgrounds it the output goes quietly to build.log, as before.
-                     # `if`, never `[ -t 1 ] && …`: a bare failing AND-list trips `set -e`, and
-                     # the non-interactive case is exactly the backgrounded one cc relies on.
+# `if`, never `[ -t 1 ] && …`: a bare failing AND-list trips `set -e`, and
+# the non-interactive case is exactly the backgrounded one cc relies on.
 INTERACTIVE=0
 if [ -t 1 ]; then INTERACTIVE=1; fi
 
@@ -48,7 +48,7 @@ fi
 
 build_image() {
     local args=(--build-arg CLAUDE_VERSION="${LATEST_VERSION:-latest}"
-                -t "${IMAGE_NAME}:building" "$SCRIPT_DIR")
+        -t "${IMAGE_NAME}:building" "$SCRIPT_DIR")
     if [ "$INTERACTIVE" = 1 ]; then
         echo "🔨 Building keep-it-in-your-box with Claude Code ${LATEST_VERSION:-latest}..." >&2
         # Straight to the terminal — no pipe, no redirect. BuildKit only draws its progress UI
@@ -56,20 +56,20 @@ build_image() {
         # build.log is there for the backgrounded case, which is exactly when nobody is watching.
         docker build "${args[@]}"
     else
-        docker build "${args[@]}" > "$BUILD_LOG" 2>&1
+        docker build "${args[@]}" >"$BUILD_LOG" 2>&1
     fi
 }
 
 if build_image \
     && docker tag "${IMAGE_NAME}:building" "${IMAGE_NAME}:latest" \
-    && docker rmi "${IMAGE_NAME}:building" >> "$BUILD_LOG" 2>&1; then
-    echo "✅ Build complete — new image ready for next launch" >> "$BUILD_LOG"
+    && docker rmi "${IMAGE_NAME}:building" >>"$BUILD_LOG" 2>&1; then
+    echo "✅ Build complete — new image ready for next launch" >>"$BUILD_LOG"
     notify_desktop normal "Claude Code" "Image rebuild complete — new version ready for next launch"
     if [ "$INTERACTIVE" = 1 ]; then
         echo "✅ Build complete — it is picked up when this project's LAST cc session exits." >&2
     fi
 else
-    echo "❌ Build failed — see $BUILD_LOG" >> "$BUILD_LOG"
+    echo "❌ Build failed — see $BUILD_LOG" >>"$BUILD_LOG"
     notify_desktop critical "Claude Code" "Image rebuild failed — check $BUILD_LOG"
     # Surface failure as an exit status too, but only interactively: cc backgrounds this and
     # never reads it, and a non-zero exit there would just be noise.

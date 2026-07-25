@@ -51,7 +51,7 @@ GRACE="${SLEEP_GUARD_GRACE:-30}"
 MIN_BYTES="${SLEEP_GUARD_MIN_BYTES:-1024}"
 DEBUG="${SLEEP_GUARD_DEBUG:-0}"
 LID_SUSPEND="${SLEEP_GUARD_LID_SUSPEND:-1}"
-SETTLE="${SLEEP_GUARD_SETTLE:-15}"   # (LINUX) after a resume, stay awake this long before re-suspending
+SETTLE="${SLEEP_GUARD_SETTLE:-15}" # (LINUX) after a resume, stay awake this long before re-suspending
 
 # CC_OS / is_macos come from cc-portable.sh (the one place OS branching lives). Fall back to
 # a local probe if it is somehow unavailable, so the guard never hard-fails at startup.
@@ -64,9 +64,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 INHIBIT_PID=""
 LAST_ACTIVE=0
-PREV=""             # previous "<pid> <bytes>" sample, one line per pid
-AWAKE_SINCE=0       # epoch of the last resume (or 0 = never suspended since start); gates re-suspend
-LAST_LOOP=0         # epoch of the previous loop iteration; a jump >> POLL means we were suspended
+PREV=""       # previous "<pid> <bytes>" sample, one line per pid
+AWAKE_SINCE=0 # epoch of the last resume (or 0 = never suspended since start); gates re-suspend
+LAST_LOOP=0   # epoch of the previous loop iteration; a jump >> POLL means we were suspended
 
 release_lock() {
     if [ -n "$INHIBIT_PID" ] && kill -0 "$INHIBIT_PID" 2>/dev/null; then
@@ -109,17 +109,17 @@ acquire_lock() {
 lid_closed() {
     grep -qi 'closed' /proc/acpi/button/lid/*/state 2>/dev/null
 }
-external_display() {   # any connected output that is not the internal panel
+external_display() { # any connected output that is not the internal panel
     local f st
     for f in /sys/class/drm/*/status; do
         [ -r "$f" ] || continue
-        read -r st < "$f" 2>/dev/null || continue
+        read -r st <"$f" 2>/dev/null || continue
         [ "$st" = connected ] || continue
-        case "$f" in *eDP*|*LVDS*|*DSI*) ;; *) return 0 ;; esac
+        case "$f" in *eDP* | *LVDS* | *DSI*) ;; *) return 0 ;; esac
     done
     return 1
 }
-other_cc_working() {   # a different session's guard still holds a claude-code lock
+other_cc_working() { # a different session's guard still holds a claude-code lock
     systemd-inhibit --list 2>/dev/null | grep -q 'claude-code'
 }
 suspend_if_lid_shut() {
@@ -166,7 +166,7 @@ sample_wchar() {
 # Largest positive wchar delta across pids present in BOTH samples. An awk join over prev
 # (first input) and cur (second) — flat in the number of pids, and no bash-4 associative
 # array, so it runs on stock macOS bash 3.2.
-busiest_delta() {   # $1 = prev sample, $2 = cur sample
+busiest_delta() { # $1 = prev sample, $2 = cur sample
     awk '
         NR==FNR { if ($1 != "") prev[$1] = $2; next }
         ($1 in prev) { d = $2 - prev[$1]; if (d > max) max = d }

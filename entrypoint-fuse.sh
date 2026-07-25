@@ -24,7 +24,7 @@
 mkdir -p "$CC_FUSE_MNT" 2>/dev/null || true
 CC_FUSE_MNT_REAL="$(readlink -f "$CC_FUSE_MNT" 2>/dev/null || echo "$CC_FUSE_MNT")"
 
-_fuse_live() {   # true if a fuse fs is mounted at the (resolved) mountpoint
+_fuse_live() { # true if a fuse fs is mounted at the (resolved) mountpoint
     awk -v p="$CC_FUSE_MNT_REAL" '$2==p && $3 ~ /^fuse/ {ok=1} END{exit !ok}' /proc/self/mounts 2>/dev/null
 }
 

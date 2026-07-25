@@ -25,8 +25,18 @@ CLAUDE_DIST_URL="https://storage.googleapis.com/claude-code-dist-86c565f3-f756-4
 # One argument per line, so a multi-line explanation stays readable at the call site.
 # The `[ $# -gt 0 ]` guard matters: `printf '   %s\n'` with no arguments would still
 # print the format once, adding a stray blank line to every single-line message.
-die()  { printf '❌ cc: %s\n' "$1" >&2; shift; [ $# -gt 0 ] && printf '   %s\n' "$@" >&2; exit 1; }
-warn() { printf '⚠️  cc: %s\n' "$1" >&2; shift; [ $# -gt 0 ] && printf '   %s\n' "$@" >&2; return 0; }
+die() {
+    printf '❌ cc: %s\n' "$1" >&2
+    shift
+    [ $# -gt 0 ] && printf '   %s\n' "$@" >&2
+    exit 1
+}
+warn() {
+    printf '⚠️  cc: %s\n' "$1" >&2
+    shift
+    [ $# -gt 0 ] && printf '   %s\n' "$@" >&2
+    return 0
+}
 
 latest_claude_version() {
     curl -sf "$CLAUDE_DIST_URL" 2>/dev/null | tr -d '[:space:]' || true
@@ -36,7 +46,8 @@ latest_claude_version() {
 build_image_if_missing() {
     docker image inspect "$IMAGE_NAME" &>/dev/null && return 0
     echo "🔨 Building Claude Code image (first time, please wait)..." >&2
-    local latest; latest="$(latest_claude_version)"
+    local latest
+    latest="$(latest_claude_version)"
     docker build --build-arg CLAUDE_VERSION="${latest:-latest}" -t "$IMAGE_NAME" "$SCRIPT_DIR"
 }
 
@@ -46,7 +57,8 @@ check_for_updates() {
     # truncating build.log and racing on `docker tag`. Test it in place instead;
     # flock creates the file if it is absent.
     if ! lock_fd -n "$BUILD_LOCK" true 2>/dev/null; then
-        local running; running="$(cat "$BUILD_PID" 2>/dev/null || true)"
+        local running
+        running="$(cat "$BUILD_PID" 2>/dev/null || true)"
         echo "🔨 Background image rebuild in progress... (log: $BUILD_LOG)" >&2
         [ -n "$running" ] && echo "   To cancel: kill -TERM -$running" >&2
         return 0
@@ -74,7 +86,7 @@ check_for_updates() {
     [[ "$answer" =~ ^[Yy]$ ]] || return 0
     # Its own process group, so `kill -TERM -PGID` kills the whole build tree.
     detach_pgrp "$SCRIPT_DIR/build-bg.sh"
-    echo $! > "$BUILD_PID"
+    echo $! >"$BUILD_PID"
     disown
     echo "🔨 Starting background rebuild... (log: $BUILD_LOG)" >&2
     echo "   To cancel: kill -TERM -$(cat "$BUILD_PID")" >&2
@@ -98,7 +110,7 @@ assemble_sandbox_claude_md() {
         printf '%s\n' "$e"
         # The user's own memory, verbatim, below the policy block. Absent on a fresh install.
         if [ -f "$CLAUDE_HOME/CLAUDE.md" ]; then cat "$CLAUDE_HOME/CLAUDE.md"; fi
-    } > "$md.cc.tmp" && mv "$md.cc.tmp" "$md"
+    } >"$md.cc.tmp" && mv "$md.cc.tmp" "$md"
 }
 
 # ── Shared settings.json: refuse host-reaching keys ───────────────
@@ -177,12 +189,14 @@ validate_shared_settings() {
     bad="$(_settings_bad_keys "$f")" && return 0
 
     case "$?" in
-        3) warn "~/.claude/settings.json is not valid JSON — skipping validation." \
+        3)
+            warn "~/.claude/settings.json is not valid JSON — skipping validation." \
                 "Claude ignores an unparseable settings file, so this is not fatal."
-           return 0 ;;
+            return 0
+            ;;
         4) die "cannot read ~/.claude/settings.json. Refusing to launch:" \
-               "an unreadable settings file cannot be checked for keys that" \
-               "run commands on your behalf." ;;
+            "an unreadable settings file cannot be checked for keys that" \
+            "run commands on your behalf." ;;
     esac
 
     printf '\n' >&2
@@ -256,10 +270,11 @@ PY
 # Both anchor at the git toplevel, so skip with a note when cc runs from a subdir.
 sync_ccignore_gitignore() {
     [ -f "$PWD/.ccignore" ] || return 0
-    local top; top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
-    [ -n "$top" ] || return 0                       # not a git repo — nothing to sync
+    local top
+    top="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)"
+    [ -n "$top" ] || return 0 # not a git repo — nothing to sync
     if [ "$(realpath "$top" 2>/dev/null || echo "$top")" \
-       != "$(realpath "$PWD" 2>/dev/null || echo "$PWD")" ]; then
+        != "$(realpath "$PWD" 2>/dev/null || echo "$PWD")" ]; then
         echo "ℹ️  .ccignore: launched from a subdir of the git repo; skipping" >&2
         echo "   .gitignore sync + pre-commit guard (they anchor at the repo root)." >&2
         return 0
@@ -271,21 +286,25 @@ sync_ccignore_gitignore() {
     local patterns="" line neg
     while IFS= read -r line || [ -n "$line" ]; do
         line="${line%%#*}"
-        line="${line#"${line%%[![:space:]]*}"}"     # ltrim
-        line="${line%"${line##*[![:space:]]}"}"     # rtrim
+        line="${line#"${line%%[![:space:]]*}"}" # ltrim
+        line="${line%"${line##*[![:space:]]}"}" # rtrim
         # Detach a leading '!' so the anchoring '/' lands after it: `!/foo`, not `/!foo`
         # (which is a literal path starting with '!' and negates nothing). Reattached below.
         neg=""
-        case "$line" in !*) neg="!"; line="${line#!}" ;; esac
+        case "$line" in !*)
+            neg="!"
+            line="${line#!}"
+            ;;
+        esac
         line="${line%/}"
         [ -z "$line" ] && continue
         case "$line" in /*) continue ;; esac
         case "/$line/" in */../*) continue ;; esac
         case "$line" in
             */*) patterns+="$neg/$line"$'\n' ;;
-            *)   patterns+="$neg$line"$'\n' ;;
+            *) patterns+="$neg$line"$'\n' ;;
         esac
-    done < "$PWD/.ccignore"
+    done <"$PWD/.ccignore"
 
     local gi="$PWD/.gitignore" rest=""
     local b="# >>> ccignore (auto-synced by cc — do not edit this block) >>>"
@@ -300,14 +319,14 @@ sync_ccignore_gitignore() {
             printf '%s' "$patterns"
             printf '%s\n' "$e"
         fi
-    } > "$gi.cc.tmp" && mv "$gi.cc.tmp" "$gi"
+    } >"$gi.cc.tmp" && mv "$gi.cc.tmp" "$gi"
 
     local hooks="$PWD/.git/hooks" hook="$PWD/.git/hooks/pre-commit"
     mkdir -p "$hooks"
     if [ -e "$hook" ] && ! grep -q "MARKER: ccignore-precommit" "$hook" 2>/dev/null; then
         warn ".ccignore: existing pre-commit hook at $hook; not overwriting." \
-             "ccignored files may still be committable — merge the guard manually" \
-             "from $SCRIPT_DIR/ccignore-precommit.py"
+            "ccignored files may still be committable — merge the guard manually" \
+            "from $SCRIPT_DIR/ccignore-precommit.py"
     elif ! cmp -s "$SCRIPT_DIR/ccignore-precommit.py" "$hook" 2>/dev/null; then
         cp "$SCRIPT_DIR/ccignore-precommit.py" "$hook" && chmod +x "$hook"
     fi
@@ -327,7 +346,7 @@ unmount_fuse() {
     fuse_mounted "$m" || return 0
     fusermount3 -u "$m" 2>/dev/null \
         || fusermount -u "$m" 2>/dev/null \
-        || umount -l "$m" 2>/dev/null || true    # lazy: last resort for a dead server
+        || umount -l "$m" 2>/dev/null || true # lazy: last resort for a dead server
     ! fuse_mounted "$m"
 }
 
@@ -363,7 +382,7 @@ _prepare_redaction_single() {
     # (host-only) so the sandbox can't edit what redaction is validated against, and so
     # the attach-time staleness check has a stable copy to compare against — exactly the
     # role $FUSE_ROOT/patterns plays for the sidecar.
-    if [ -f "$PWD/.ccignore" ]; then cp "$PWD/.ccignore" "$PATTERNS_STATE"; else : > "$PATTERNS_STATE"; fi
+    if [ -f "$PWD/.ccignore" ]; then cp "$PWD/.ccignore" "$PATTERNS_STATE"; else : >"$PATTERNS_STATE"; fi
     chmod 644 "$PATTERNS_STATE"
 
     # NO -v for $PWD: the entrypoint mounts the redacted view there. The real project is
@@ -385,7 +404,7 @@ _prepare_redaction_single() {
         -e CC_FUSE_INTERNAL=1
         -e CC_FUSE_MNT="$PWD"
     )
-    PROJECT_MOUNT_SRC=""     # signal start_container to add no $PWD bind
+    PROJECT_MOUNT_SRC="" # signal start_container to add no $PWD bind
     echo "🛡️  .ccignore: single-container FUSE redaction (mounted in-container at $PWD)" >&2
 }
 
@@ -408,7 +427,7 @@ _verify_redaction_attach_single() {
             "(A container created by an older cc will always land here.)"
     fi
     if ! cmp -s "$PWD/.ccignore" "$PATTERNS_STATE" 2>/dev/null \
-       && ! { [ ! -f "$PWD/.ccignore" ] && [ ! -s "$PATTERNS_STATE" ]; }; then
+        && ! { [ ! -f "$PWD/.ccignore" ] && [ ! -s "$PATTERNS_STATE" ]; }; then
         die ".ccignore changed since this project's container started." \
             "The running redaction layer still enforces the OLD rules. Refusing to" \
             "attach — close all cc sessions for this project and relaunch."
@@ -440,7 +459,8 @@ _prepare_redaction_sidecar() {
     # into the project, a nested `git init`), which is exactly what the guard is
     # for. Same principle as the mount-failure abort below — never silently
     # downgrade a redaction the user is relying on.
-    local prop; prop="$(findmnt -no PROPAGATION --target /tmp 2>/dev/null || true)"
+    local prop
+    prop="$(findmnt -no PROPAGATION --target /tmp 2>/dev/null || true)"
     if [[ "$prop" != *shared* ]]; then
         die "cc needs /tmp to be a shared mount for .ccignore redaction and the" \
             "host-config guard, but it is '${prop:-unknown}'. Fix it with:" \
@@ -461,7 +481,7 @@ _prepare_redaction_sidecar() {
     if [ -f "$PWD/.ccignore" ]; then
         cp "$PWD/.ccignore" "$FUSE_ROOT/patterns"
     else
-        : > "$FUSE_ROOT/patterns"
+        : >"$FUSE_ROOT/patterns"
     fi
     chmod 644 "$FUSE_ROOT/patterns"
 
@@ -478,16 +498,17 @@ _prepare_redaction_sidecar() {
         -v "$SCRIPT_DIR/global.ccignore:/usr/local/share/global.ccignore:ro" \
         "$IMAGE_NAME" \
         /usr/local/bin/ccignore-fuse.py \
-            --src /src --mnt "$FUSE_ROOT/mnt" \
-            --patterns-file "$FUSE_ROOT/patterns" \
-            --guard-file /usr/local/share/global.ccignore >/dev/null; then
+        --src /src --mnt "$FUSE_ROOT/mnt" \
+        --patterns-file "$FUSE_ROOT/patterns" \
+        --guard-file /usr/local/share/global.ccignore >/dev/null; then
         rm -rf "$FUSE_ROOT"
         echo "❌ .ccignore: could not start FUSE sidecar. Aborting." >&2
         exit 1
     fi
 
     local _
-    for _ in $(seq 1 100); do                       # ≤5s for the mount to come live
+    # ≤5s for the mount to come live
+    for _ in $(seq 1 100); do
         fuse_mounted "$FUSE_ROOT/mnt" && break
         sleep 0.05
     done
@@ -520,7 +541,7 @@ _verify_redaction_attach_sidecar() {
             "(A container created by an older cc will always land here.)"
     fi
     if ! cmp -s "${PWD}/.ccignore" "$FUSE_ROOT/patterns" 2>/dev/null \
-       && ! { [ ! -f "$PWD/.ccignore" ] && [ ! -s "$FUSE_ROOT/patterns" ]; }; then
+        && ! { [ ! -f "$PWD/.ccignore" ] && [ ! -s "$FUSE_ROOT/patterns" ]; }; then
         die ".ccignore changed since this project's container started." \
             "The running redaction layer still enforces the OLD rules. Refusing to" \
             "attach — close all cc sessions for this project and relaunch."
@@ -608,7 +629,7 @@ start_wayland_notifier() {
         done' _ "$WL_CNAME" \
         "The sandbox tried to write your clipboard. Blocked — your next paste is safe. Project: $(basename "$PWD")" \
         >/dev/null 2>&1 200>&- 201>&- &
-    echo $! > "$WL_ROOT/notify.pid"
+    echo $! >"$WL_ROOT/notify.pid"
 }
 
 start_wayland_guard() {
@@ -617,7 +638,7 @@ start_wayland_guard() {
         return 0
     fi
     mkdir -p "$WL_ROOT"
-    chmod 755 "$WL_ROOT"          # the main container traverses this as root before gosu
+    chmod 755 "$WL_ROOT" # the main container traverses this as root before gosu
 
     # The real socket is mounted read-only: that does not stop a connect() (see the Varlink
     # note below), which is exactly what the proxy needs and all it gets. --network none
@@ -632,22 +653,22 @@ start_wayland_guard() {
         -v "$SCRIPT_DIR/wayland-guard.py:/usr/local/bin/wayland-guard.py:ro" \
         "$IMAGE_NAME" \
         /usr/local/bin/wayland-guard.py \
-            --upstream /run/host-wayland.sock \
-            --listen "$WL_ROOT/wayland-0" >/dev/null 2>&1
-    then
+        --upstream /run/host-wayland.sock \
+        --listen "$WL_ROOT/wayland-0" >/dev/null 2>&1; then
         warn "could not start the clipboard proxy — image paste is unavailable this session."
         rm -rf "$WL_ROOT" 2>/dev/null || true
         return 0
     fi
 
     local _
-    for _ in $(seq 1 100); do                       # ≤5s for the proxy to bind
+    # ≤5s for the proxy to bind
+    for _ in $(seq 1 100); do
         [ -S "$WL_ROOT/wayland-0" ] && break
         sleep 0.05
     done
     if [ ! -S "$WL_ROOT/wayland-0" ]; then
         warn "the clipboard proxy never came up; image paste is unavailable. Logs:" \
-             "$(docker logs "$WL_CNAME" 2>&1 | tail -5)"
+            "$(docker logs "$WL_CNAME" 2>&1 | tail -5)"
         docker rm -f "$WL_CNAME" >/dev/null 2>&1 || true
         rm -rf "$WL_ROOT" 2>/dev/null || true
         return 0
@@ -680,7 +701,7 @@ start_clipboard_bridge() {
         return 0
     }
     mkdir -p "$CLIP_STATE"
-    chmod 755 "$CLIP_STATE"         # the container traverses this as root before gosu
+    chmod 755 "$CLIP_STATE" # the container traverses this as root before gosu
     # 200>&- 201>&- is LOAD-BEARING, exactly as for the Wayland notifier and sleep-guard:
     # the bridge outlives the cc that starts it (it runs for the container's whole life),
     # and inheriting the project's shared lock on fd 200 would stop the last terminal out
@@ -691,7 +712,7 @@ start_clipboard_bridge() {
     # and `kill -TERM -<pid>`s it — a sandbox that could overwrite it (e.g. with 1) would turn
     # teardown into a host process-group kill. ${CLIP_STATE}.pid lives in the 700 $STATE_DIR,
     # which is never mounted in.
-    echo $! > "${CLIP_STATE}.pid"
+    echo $! >"${CLIP_STATE}.pid"
     disown 2>/dev/null || true
     echo "📋 clipboard: pbpaste bridge active (read-only from the sandbox)" >&2
 }
@@ -719,7 +740,7 @@ stop_clipboard_bridge() {
     # Numeric-only, even though the pid file is host-only ($STATE_DIR, never mounted in):
     # `kill -TERM -<pid>` signals a whole process group, so a non-numeric or empty value
     # must never reach it.
-    case "$pid" in ''|*[!0-9]*) pid="" ;; esac
+    case "$pid" in '' | *[!0-9]*) pid="" ;; esac
     # Negative pid: the bridge runs in its own process group (detach_pgrp).
     [ -n "$pid" ] && kill -TERM "-$pid" 2>/dev/null || true
     rm -f "${CLIP_STATE}.pid" 2>/dev/null || true
@@ -764,7 +785,7 @@ broker_wanted() {
     case "${CC_BROKER:-}" in 1) return 0 ;; 0) return 1 ;; esac
     # Any recognised "off" spelling disables it; anything else (including a typo) keeps the
     # SAFE default on. `!= off` alone would have silently enabled the broker for `broker = false`.
-    case "${KIB_BROKER:-on}" in off|Off|OFF|0|no|No|NO|false|False|FALSE) return 1 ;; esac
+    case "${KIB_BROKER:-on}" in off | Off | OFF | 0 | no | No | NO | false | False | FALSE) return 1 ;; esac
     return 0
 }
 
@@ -812,7 +833,7 @@ EOF
 # claude row is required for the broker to launch (checked in start_broker); MCP rows are
 # purely additive and never block a launch. Order follows the registry (claude first).
 broker_enabled_providers() { _active_providers "base_url_env reverse_proxy_mcp"; }
-hosted_mcp_providers()     { _active_providers "hosted_mcp"; }
+hosted_mcp_providers() { _active_providers "hosted_mcp"; }
 
 # Fixed at container creation, like the .ccignore rules and the unlock-shared mode: a second
 # terminal must never attach under a broker config that changed since the container started.
@@ -846,7 +867,7 @@ _write_broker_config() {
         sep=", "
     done
     printf '{"enabled": [%s], "out_dir": "/run/broker/out", "token_paths": {%s}}\n' \
-        "$enabled_json" "$token_json" > "$BROKER_DIR/config.json"
+        "$enabled_json" "$token_json" >"$BROKER_DIR/config.json"
     chmod 600 "$BROKER_DIR/config.json"
 }
 
@@ -856,7 +877,7 @@ _write_broker_config() {
 # error deep in the session. Tear down anything already started (FUSE/clipboard sidecars,
 # the half-started broker) so nothing is stranded.
 _broker_abort() {
-    teardown_container              # stops main (if up) + all sidecars incl. stop_broker
+    teardown_container # stops main (if up) + all sidecars incl. stop_broker
     die "$1" \
         "" \
         "This is a broker STARTUP failure, not an auth problem. The sandbox will not run" \
@@ -891,7 +912,7 @@ start_broker_notifier() {
         done' _ "$BROKER_CNAME" \
         "The credential broker could not reach the API or use its token. Check: cc --broker-status. Project: $(basename "$PWD")" \
         >/dev/null 2>&1 200>&- 201>&- &
-    echo $! > "$BROKER_DIR/notify.pid"
+    echo $! >"$BROKER_DIR/notify.pid"
 }
 
 # Bring up the broker sidecar on its own bridge, wait for it to mint the placeholder and bind
@@ -910,7 +931,7 @@ start_broker() {
             echo "🔐 credential broker is on, but no token is stored yet." >&2
             echo "   Starting a one-time login so the real token never enters the sandbox…" >&2
             echo >&2
-            ( provider_login claude ) || true
+            (provider_login claude) || true
             echo >&2
         fi
         if ! broker_has_token; then
@@ -918,11 +939,11 @@ start_broker() {
             # BROKER_ENABLED stays 0, stage_credential exposes the real ~/.claude/.credentials.json
             # to the box. The STATIC broker token still never enters the sandbox.
             warn "credential broker: no token — this session uses the real credential instead." \
-                 "Mint a broker token any time so the real one stays host-only: cc --broker-login"
+                "Mint a broker token any time so the real one stays host-only: cc --broker-login"
             return 0
         fi
     fi
-    _write_broker_config                       # creates $BROKER_OUT / $BROKER_DIR (chmod 700)
+    _write_broker_config # creates $BROKER_OUT / $BROKER_DIR (chmod 700)
     rm -f "$BROKER_OUT/ready" 2>/dev/null || true
 
     if ! docker network inspect "$BROKER_NET" >/dev/null 2>&1; then
@@ -936,9 +957,9 @@ start_broker() {
     local id delivery kind basename
     local -a tok_mounts=()
     while IFS='|' read -r id delivery kind basename; do
-        case "$delivery" in base_url_env|reverse_proxy_mcp) ;; *) continue ;; esac
+        case "$delivery" in base_url_env | reverse_proxy_mcp) ;; *) continue ;; esac
         [ -s "$KIB_DIR/$basename" ] || continue
-        tok_mounts+=( -v "$KIB_DIR/$basename:/run/broker/token/$id:ro" )
+        tok_mounts+=(-v "$KIB_DIR/$basename:/run/broker/token/$id:ro")
     done <<EOF
 $(_broker_list_providers)
 EOF
@@ -951,7 +972,7 @@ EOF
     # them onto the LLM built-ins, exactly as the host-side --list/--host-config calls do.
     local -a prov_mount=()
     [ -d "$PROVIDERS_DIR" ] && prov_mount=(
-        -v "$PROVIDERS_DIR:/run/broker/providers.d:ro" -e CC_PROVIDERS_DIR=/run/broker/providers.d )
+        -v "$PROVIDERS_DIR:/run/broker/providers.d:ro" -e CC_PROVIDERS_DIR=/run/broker/providers.d)
 
     local -a broker_run=(
         docker run -d --name "$BROKER_CNAME"
@@ -973,9 +994,10 @@ EOF
     fi
 
     local _
-    for _ in $(seq 1 100); do                       # ≤5s to mint the placeholder + bind
+    # ≤5s to mint the placeholder + bind
+    for _ in $(seq 1 100); do
         [ -f "$BROKER_OUT/ready" ] && break
-        broker_running || break                     # died early — fall through to the log dump
+        broker_running || break # died early — fall through to the log dump
         sleep 0.05
     done
     if [ ! -f "$BROKER_OUT/ready" ]; then
@@ -984,7 +1006,7 @@ EOF
         _broker_abort "the credential broker did not come up."
     fi
 
-    broker_config_hash > "$BROKER_HASH"
+    broker_config_hash >"$BROKER_HASH"
     start_broker_notifier
     BROKER_ENABLED=1
     echo "🔐 credential broker: active — the real token is NOT in the sandbox (sidecar: $BROKER_CNAME)." >&2
@@ -1006,25 +1028,28 @@ EOF
 # NOTE (verify on first real use, like the codex/gemini rows): needs `uv`/`uvx` + `npx` and
 # network in the image to fetch supergateway and the server; HOME/cache dirs are pointed at
 # /tmp so the unprivileged sidecar user can write them.
-HOSTED_MCP_UP=""            # space-separated ids whose sidecar came up (read by inject_brokered_mcps)
+HOSTED_MCP_UP="" # space-separated ids whose sidecar came up (read by inject_brokered_mcps)
 start_hosted_mcp() {
-    local ids id; ids="$(hosted_mcp_providers)"
+    local ids id
+    ids="$(hosted_mcp_providers)"
     [ -n "$ids" ] || return 0
     for id in $ids; do
         local CCB_TOKEN_BASENAME="" CCB_CREDENTIAL_ENV="" CCB_MCP_PORT="" \
-              CCB_HOST_RUN="" CCB_EXTRA_ENV=""
+            CCB_HOST_RUN="" CCB_EXTRA_ENV=""
         if ! _broker_host_config "$id"; then
             warn "hosted MCP '$id': could not read its host-config — skipping."
             continue
         fi
         [ -n "$CCB_HOST_RUN" ] && [ -n "$CCB_MCP_PORT" ] && [ -n "$CCB_TOKEN_BASENAME" ] || {
-            warn "hosted MCP '$id': incomplete registry entry — skipping."; continue; }
+            warn "hosted MCP '$id': incomplete registry entry — skipping."
+            continue
+        }
 
         local cname="${CNAME}-hmcp-${id}"
-        docker rm -f "$cname" >/dev/null 2>&1 || true      # clear a crashed leftover
+        docker rm -f "$cname" >/dev/null 2>&1 || true # clear a crashed leftover
         # extra_env (KEY=VAL, constants) → -e flags; word-split is safe (no metacharacters).
         local -a env_args=() kv
-        for kv in $CCB_EXTRA_ENV; do env_args+=( -e "$kv" ); done
+        for kv in $CCB_EXTRA_ENV; do env_args+=(-e "$kv"); done
         local -a run=(
             docker run -d --name "$cname"
             --cap-drop=ALL --security-opt no-new-privileges
@@ -1065,8 +1090,15 @@ inject_brokered_mcps() {
     while IFS='|' read -r id delivery kind basename; do
         local host="" port="" active=0
         case "$delivery" in
-            reverse_proxy_mcp) [ -s "$KIB_DIR/$basename" ] && { host="cc-broker"; active=1; } ;;
-            hosted_mcp) case " $HOSTED_MCP_UP " in *" $id "*) host="$id"; active=1 ;; esac ;;
+            reverse_proxy_mcp) [ -s "$KIB_DIR/$basename" ] && {
+                host="cc-broker"
+                active=1
+            } ;;
+            hosted_mcp) case " $HOSTED_MCP_UP " in *" $id "*)
+                host="$id"
+                active=1
+                ;;
+            esac ;;
             *) continue ;;
         esac
         [ "$active" = 1 ] || continue
@@ -1127,7 +1159,7 @@ add_broker_env_args() {
     local id delivery
     for id in $(broker_enabled_providers); do
         local CCB_BASE_URL_ENV="" CCB_TOKEN_ENV="" CCB_PLACEHOLDER_TOKEN="" \
-              CCB_LISTEN_PORT="" CCB_PLACEHOLDER_CONTAINER_PATH="" CCB_DELIVERY=""
+            CCB_LISTEN_PORT="" CCB_PLACEHOLDER_CONTAINER_PATH="" CCB_DELIVERY=""
         _broker_host_config "$id" \
             || _broker_abort "could not read the broker's host-config for '$id'."
         [ "$CCB_DELIVERY" = base_url_env ] || continue
@@ -1140,7 +1172,7 @@ add_broker_env_args() {
         )
         # Only claude shadows a real credential file; codex/gemini have no file to overlay.
         [ -n "$CCB_PLACEHOLDER_CONTAINER_PATH" ] \
-            && ARGS+=( -v "$BROKER_OUT/$id.cred.json:$CCB_PLACEHOLDER_CONTAINER_PATH:ro" )
+            && ARGS+=(-v "$BROKER_OUT/$id.cred.json:$CCB_PLACEHOLDER_CONTAINER_PATH:ro")
     done
 }
 
@@ -1162,13 +1194,16 @@ stage_credential() {
     fi
     # Mark the fallback path BEFORE the copy: even with nothing to copy (never logged in), an
     # in-box login writes the credential here and still has to be folded back out on exit.
-    : > "$CRED_WITNESS" 2>/dev/null || true
-    [ -f "$CLAUDE_HOME/.credentials.json" ] || return 0    # never logged in — nothing to copy
+    : >"$CRED_WITNESS" 2>/dev/null || true
+    [ -f "$CLAUDE_HOME/.credentials.json" ] || return 0 # never logged in — nothing to copy
     # Unlink first, same as stage_shared_settings: the broker-on path binds a synthetic file
     # here, so switching the broker off leaves a root-owned Docker mountpoint that cp cannot
     # overwrite — the symptom would be a login prompt with no explanation.
     rm -f "$SHARED_BASE/.credentials.json" 2>/dev/null || true
-    ( umask 077; cp "$CLAUDE_HOME/.credentials.json" "$SHARED_BASE/.credentials.json" ) \
+    (
+        umask 077
+        cp "$CLAUDE_HOME/.credentials.json" "$SHARED_BASE/.credentials.json"
+    ) \
         || warn "could not stage the real credential into the session (login may be needed in-box)."
 }
 
@@ -1178,10 +1213,15 @@ merge_out_credential() {
     [ -f "${CRED_WITNESS:-}" ] || return 0
     local src="$SHARED_BASE/.credentials.json" dst="$CLAUDE_HOME/.credentials.json"
     [ -f "$src" ] || return 0
-    cmp -s "$src" "$dst" 2>/dev/null && return 0           # unchanged — don't touch canonical
-    ( umask 077; cp "$src" "$dst.cc.tmp" ) && mv -f "$dst.cc.tmp" "$dst" \
-        || { rm -f "$dst.cc.tmp" 2>/dev/null || true
-             warn "could not fold the refreshed credential back to ~/.claude/.credentials.json."; }
+    cmp -s "$src" "$dst" 2>/dev/null && return 0 # unchanged — don't touch canonical
+    (
+        umask 077
+        cp "$src" "$dst.cc.tmp"
+    ) && mv -f "$dst.cc.tmp" "$dst" \
+        || {
+            rm -f "$dst.cc.tmp" 2>/dev/null || true
+            warn "could not fold the refreshed credential back to ~/.claude/.credentials.json."
+        }
 }
 
 # ── Shared settings: copy in, validate, fold out ──────────────────
@@ -1208,7 +1248,10 @@ stage_shared_settings() {
         # copy is 0600 instead of inheriting whatever mode was already there.
         rm -f "$SHARED_BASE/$f" 2>/dev/null || true
         [ -f "$CLAUDE_HOME/$f" ] || continue
-        ( umask 077; cp "$CLAUDE_HOME/$f" "$SHARED_BASE/$f" ) \
+        (
+            umask 077
+            cp "$CLAUDE_HOME/$f" "$SHARED_BASE/$f"
+        ) \
             || warn "could not stage $f into this session — the box starts from defaults."
     done
 }
@@ -1222,38 +1265,47 @@ merge_out_shared_settings() {
     for f in settings.json keybindings.json; do
         src="$SHARED_BASE/$f"
         [ -f "$src" ] || continue
-        cmp -s "$src" "$CLAUDE_HOME/$f" 2>/dev/null && continue      # unchanged — leave canonical alone
+        cmp -s "$src" "$CLAUDE_HOME/$f" 2>/dev/null && continue # unchanged — leave canonical alone
         if [ "$f" = settings.json ]; then
             # No vet, no fold-back — an unvetted settings.json is exactly what this closes.
             command -v python3 >/dev/null 2>&1 || {
                 warn "python3 not found on the host — cannot vet this session's settings.json," \
-                     "so it was NOT merged back into ~/.claude/settings.json."
+                    "so it was NOT merged back into ~/.claude/settings.json."
                 continue
             }
-            rc=0; bad="$(_settings_bad_keys "$src")" || rc=$?
+            rc=0
+            bad="$(_settings_bad_keys "$src")" || rc=$?
             case "$rc" in
                 0) ;;
                 1) # Move it aside, don't just name it in place: the next launch re-stages
-                   # canonical over $src, so a path we told the user to go and look at would
-                   # be gone by the time they looked. Not farmed by the entrypoint (its asset
-                   # list is explicit), so the extra file is inert.
-                   mv -f "$src" "$src.rejected" 2>/dev/null || true
-                   warn "this session's settings.json added a key that runs a command or" \
+                    # canonical over $src, so a path we told the user to go and look at would
+                    # be gone by the time they looked. Not farmed by the entrypoint (its asset
+                    # list is explicit), so the extra file is inert.
+                    mv -f "$src" "$src.rejected" 2>/dev/null || true
+                    warn "this session's settings.json added a key that runs a command or" \
                         "redirects your credentials:" \
                         "" \
                         "$(printf '%s\n' "$bad" | sed 's/^/    /')" \
                         "" \
                         "NOT merged back — ~/.claude/settings.json is unchanged. The rejected" \
                         "copy is kept at $src.rejected if you want to look at it."
-                   continue ;;
-                *) warn "this session's settings.json is unreadable or not valid JSON —" \
+                    continue
+                    ;;
+                *)
+                    warn "this session's settings.json is unreadable or not valid JSON —" \
                         "not merging it back into ~/.claude/settings.json."
-                   continue ;;
+                    continue
+                    ;;
             esac
         fi
-        ( umask 077; cp "$src" "$CLAUDE_HOME/$f.cc.tmp" ) && mv -f "$CLAUDE_HOME/$f.cc.tmp" "$CLAUDE_HOME/$f" \
-            || { rm -f "$CLAUDE_HOME/$f.cc.tmp" 2>/dev/null || true
-                 warn "could not fold $f back to ~/.claude/$f."; }
+        (
+            umask 077
+            cp "$src" "$CLAUDE_HOME/$f.cc.tmp"
+        ) && mv -f "$CLAUDE_HOME/$f.cc.tmp" "$CLAUDE_HOME/$f" \
+            || {
+                rm -f "$CLAUDE_HOME/$f.cc.tmp" 2>/dev/null || true
+                warn "could not fold $f back to ~/.claude/$f."
+            }
     done
 }
 
@@ -1289,7 +1341,7 @@ verify_broker_attach() {
 stop_broker() {
     local pid
     pid="$(cat "$BROKER_DIR/notify.pid" 2>/dev/null || true)"
-    case "$pid" in ''|*[!0-9]*) pid="" ;; esac
+    case "$pid" in '' | *[!0-9]*) pid="" ;; esac
     # Negative pid: the notifier is a setsid'd pipeline — kill the whole process group.
     [ -n "$pid" ] && kill -TERM "-$pid" 2>/dev/null || true
     docker rm -f "$BROKER_CNAME" >/dev/null 2>&1 || true
@@ -1320,10 +1372,16 @@ _broker_need_python() {
 # caller's scope; returns 1 for an unknown id.
 _provider_lookup() {
     local id delivery kind basename
-    _P_DELIVERY=""; _P_KIND=""; _P_BASENAME=""; _P_FILE=""
+    _P_DELIVERY=""
+    _P_KIND=""
+    _P_BASENAME=""
+    _P_FILE=""
     while IFS='|' read -r id delivery kind basename; do
         [ "$id" = "$1" ] || continue
-        _P_DELIVERY="$delivery"; _P_KIND="$kind"; _P_BASENAME="$basename"; _P_FILE="$KIB_DIR/$basename"
+        _P_DELIVERY="$delivery"
+        _P_KIND="$kind"
+        _P_BASENAME="$basename"
+        _P_FILE="$KIB_DIR/$basename"
         return 0
     done <<EOF
 $(_broker_list_providers)
@@ -1342,8 +1400,14 @@ EOF
 # Atomic mode-600 write of a secret to a host file (never briefly world-readable).
 _store_secret_file() {
     local tmp="$1.tmp.$$"
-    ( umask 077; printf '%s\n' "$2" > "$tmp" ) || die "could not write $1"
-    chmod 600 "$tmp" && mv -f "$tmp" "$1" || { rm -f "$tmp"; die "could not install $1"; }
+    (
+        umask 077
+        printf '%s\n' "$2" >"$tmp"
+    ) || die "could not write $1"
+    chmod 600 "$tmp" && mv -f "$tmp" "$1" || {
+        rm -f "$tmp"
+        die "could not install $1"
+    }
 }
 
 # Per-provider "how to obtain it" guidance (human hints, not machine facts — kept here rather
@@ -1353,21 +1417,23 @@ _provider_login_hint() {
         claude)
             if command -v claude >/dev/null 2>&1; then
                 echo "   Running \`claude setup-token\`; complete the browser flow, then copy the"
-                echo "   token it prints (starts sk-ant-oat01-)."; echo
+                echo "   token it prints (starts sk-ant-oat01-)."
+                echo
                 claude setup-token || echo "   ⚠️  claude setup-token exited non-zero — paste a token anyway, or Ctrl-C." >&2
             else
                 echo "   \`claude\` is not on PATH — run this on the host and copy the token:"
                 echo "     claude setup-token"
-            fi ;;
-        codex)  echo "   Create an OpenAI API key (starts sk-…): https://platform.openai.com/api-keys" ;;
+            fi
+            ;;
+        codex) echo "   Create an OpenAI API key (starts sk-…): https://platform.openai.com/api-keys" ;;
         gemini) echo "   Create a Gemini API key: https://aistudio.google.com/apikey" ;;
         # Everything else is a user-defined MCP (providers.d/); service-specific guidance lives
         # with its provider def (e.g. examples/providers/*.json), not in this hardcoded table.
-        *)      if [ "$_P_KIND" = file_path ]; then
-                    echo "   Provide the path to the credential file for '$1'."
-                else
-                    echo "   Paste the credential for '$1'."
-                fi ;;
+        *) if [ "$_P_KIND" = file_path ]; then
+            echo "   Provide the path to the credential file for '$1'."
+        else
+            echo "   Paste the credential for '$1'."
+        fi ;;
     esac
     echo
 }
@@ -1394,9 +1460,15 @@ provider_login() {
         case "$path" in "~/"*) path="$HOME/${path#\~/}" ;; esac
         [ -n "$path" ] || die "no path entered — nothing was written."
         [ -f "$path" ] || die "no such file: $path"
-        ( umask 077; cp "$path" "$_P_FILE.tmp.$$" ) || die "could not read $path"
+        (
+            umask 077
+            cp "$path" "$_P_FILE.tmp.$$"
+        ) || die "could not read $path"
         chmod 600 "$_P_FILE.tmp.$$" && mv -f "$_P_FILE.tmp.$$" "$_P_FILE" \
-            || { rm -f "$_P_FILE.tmp.$$"; die "could not install $_P_FILE"; }
+            || {
+                rm -f "$_P_FILE.tmp.$$"
+                die "could not install $_P_FILE"
+            }
         echo "   ✅ copied to $_P_FILE (mode 600)."
     else
         local secret=""
@@ -1404,13 +1476,13 @@ provider_login() {
         read -rs secret || true
         echo
         case "$secret" in
-            "")        die "nothing entered — nothing was written." ;;
+            "") die "nothing entered — nothing was written." ;;
             *[!\ -~]*) die "that contains control characters — not stored." ;;
         esac
         # Claude token shape is advisory only; the probe decides. Other providers accept anything.
         if [ "$id" = claude ]; then
             case "$secret" in
-                sk-ant-oat01-*|sk-ant-api*) ;;
+                sk-ant-oat01-* | sk-ant-api*) ;;
                 *) echo "   ⚠️  that doesn't start with sk-ant-oat01-/sk-ant-api — storing anyway; the probe decides." >&2 ;;
             esac
         fi
@@ -1450,7 +1522,10 @@ provider_probe() {
     local id="${1:-claude}"
     _broker_need_python
     _provider_lookup "$id" || return 1
-    [ -s "$_P_FILE" ] || { echo "🔐 no credential stored for '$id' ($_P_FILE)"; return 1; }
+    [ -s "$_P_FILE" ] || {
+        echo "🔐 no credential stored for '$id' ($_P_FILE)"
+        return 1
+    }
     echo "   checking the stored credential for '$id'…"
     python3 "$SCRIPT_DIR/cc-broker.py" --probe "$_P_FILE" "$id"
 }
@@ -1464,7 +1539,7 @@ provider_status() {
         file="$KIB_DIR/$basename"
         if [ -s "$file" ]; then
             mode="$(ls -l "$file" 2>/dev/null | cut -c1-10)"
-            size="$(wc -c < "$file" 2>/dev/null | tr -d ' ')"
+            size="$(wc -c <"$file" 2>/dev/null | tr -d ' ')"
             printf '   %-11s stored  (%s bytes, %s) [%s]\n' "$id" "$size" "$mode" "$delivery"
         else
             printf '   %-11s —       add: cc --login %s   [%s]\n' "$id" "$id" "$delivery"
@@ -1474,16 +1549,16 @@ $(_broker_list_providers)
 EOF
     if broker_has_token; then
         echo
-        provider_probe claude     # propagate its tri-state: 0 accepted / 1 rejected / 2 inconclusive
-        return $?                  # so `cc --status` distinguishes a revoked token (re-login) from a healthy one
+        provider_probe claude # propagate its tri-state: 0 accepted / 1 rejected / 2 inconclusive
+        return $?             # so `cc --status` distinguishes a revoked token (re-login) from a healthy one
     fi
-    return 1                       # no claude token stored → the required cred is absent
+    return 1 # no claude token stored → the required cred is absent
 }
 
 # Back-compat aliases: the original --broker-* subcommands act on the claude provider.
-broker_login()  { provider_login  claude; }
+broker_login() { provider_login claude; }
 broker_logout() { provider_logout claude; }
-broker_probe()  { provider_probe  claude; }
+broker_probe() { provider_probe claude; }
 broker_status() { provider_status; }
 
 # ── Inline-credential detector (C4) + cc --mcp-adopt ───────────────────────────
@@ -1498,7 +1573,7 @@ broker_status() { provider_status; }
 warn_inline_mcp_secrets() {
     command -v python3 >/dev/null 2>&1 || return 0
     CC_MCP_JSON="$PWD/.mcp.json" CC_CLAUDE_JSON="$CLAUDE_JSON" \
-    CC_WARN_BROKER_PY="$SCRIPT_DIR/cc-broker.py" \
+        CC_WARN_BROKER_PY="$SCRIPT_DIR/cc-broker.py" \
         python3 - <<'PY' || true
 import importlib.util, json, os, sys
 # Same secret-shape tests as the interceptor (cc-broker.py) so the warner and the front-line
@@ -1547,8 +1622,8 @@ mcp_adopt() {
     [ -n "$name" ] || die "usage: cc --mcp-adopt <server-name>"
     _broker_need_python
     CC_ADOPT_NAME="$name" CC_KIB_DIR="$KIB_DIR" CC_BROKER_PY="$SCRIPT_DIR/cc-broker.py" \
-    CC_PROVIDERS_DIR="$PROVIDERS_DIR" \
-    CC_MCP_JSON="$PWD/.mcp.json" CC_CLAUDE_JSON="$CLAUDE_JSON" \
+        CC_PROVIDERS_DIR="$PROVIDERS_DIR" \
+        CC_MCP_JSON="$PWD/.mcp.json" CC_CLAUDE_JSON="$CLAUDE_JSON" \
         python3 - <<'PY' || return $?
 import importlib.util, json, os, sys
 name    = os.environ["CC_ADOPT_NAME"]
@@ -1636,18 +1711,40 @@ PY
 mcp_add() {
     _broker_need_python
     local name="" url="" header="" run="" cred_env="" cred_kind="paste_token" port="" envs=""
-    name="$1"; shift || true
+    name="$1"
+    shift || true
     [ -n "$name" ] && [ "${name#--}" = "$name" ] || die "usage: cc --add-mcp <name> --url <url> [--header \"H: Scheme\"]  (or --run <cmd> --cred-env <ENV> [--env KEY=VAL]...)"
     while [ $# -gt 0 ]; do
         case "$1" in
-            --url)       url="$2"; shift 2 ;;
-            --header)    header="$2"; shift 2 ;;
-            --run)       run="$2"; shift 2 ;;
-            --cred-env)  cred_env="$2"; shift 2 ;;
-            --cred-kind) cred_kind="$2"; shift 2 ;;
-            --port)      port="$2"; shift 2 ;;
-            --env)       envs="${envs}${2}
-"; shift 2 ;;
+            --url)
+                url="$2"
+                shift 2
+                ;;
+            --header)
+                header="$2"
+                shift 2
+                ;;
+            --run)
+                run="$2"
+                shift 2
+                ;;
+            --cred-env)
+                cred_env="$2"
+                shift 2
+                ;;
+            --cred-kind)
+                cred_kind="$2"
+                shift 2
+                ;;
+            --port)
+                port="$2"
+                shift 2
+                ;;
+            --env)
+                envs="${envs}${2}
+"
+                shift 2
+                ;;
             *) die "cc --add-mcp: unknown option '$1'" ;;
         esac
     done
@@ -1655,9 +1752,9 @@ mcp_add() {
     [ -z "$port" ] && port="$(python3 "$SCRIPT_DIR/cc-broker.py" --next-port)"
 
     CC_ADD_NAME="$name" CC_ADD_URL="$url" CC_ADD_HEADER="$header" CC_ADD_RUN="$run" \
-    CC_ADD_CRED_ENV="$cred_env" CC_ADD_CRED_KIND="$cred_kind" CC_ADD_PORT="$port" \
-    CC_ADD_ENV="$envs" CC_ADD_DIR="$PROVIDERS_DIR" CC_ADD_BROKER_PY="$SCRIPT_DIR/cc-broker.py" \
-    python3 - <<'PY' || return $?
+        CC_ADD_CRED_ENV="$cred_env" CC_ADD_CRED_KIND="$cred_kind" CC_ADD_PORT="$port" \
+        CC_ADD_ENV="$envs" CC_ADD_DIR="$PROVIDERS_DIR" CC_ADD_BROKER_PY="$SCRIPT_DIR/cc-broker.py" \
+        python3 - <<'PY' || return $?
 import importlib.util, os, sys
 e = os.environ
 _spec = importlib.util.spec_from_file_location("ccbroker", e["CC_ADD_BROKER_PY"])
@@ -1724,22 +1821,22 @@ PY
 # way): this one PREVENTS the write. Host-global + identity-free, like `cc --add-mcp`.
 intercept_mcp_add() {
     # Cheap bash gate: engage only for `[claude] mcp add|add-json`; everything else passes through.
-    local -a a=( "$@" )
+    local -a a=("$@")
     # Drop leading `claude` token(s) (bash-3.2 slice). One is injected by the `cc`=`kib claude`
     # alias; a second appears only if the user also typed it (`cc claude mcp add`) — strip in a
     # loop so that habit can't slip an inline secret past the gate into the container's argv.
-    while [ "${a[0]:-}" = claude ]; do a=( "${a[@]:1}" ); done
+    while [ "${a[0]:-}" = claude ]; do a=("${a[@]:1}"); done
     [ "${a[0]:-}" = mcp ] || return 1
-    case "${a[1]:-}" in add|add-json) ;; *) return 1 ;; esac
+    case "${a[1]:-}" in add | add-json) ;; *) return 1 ;; esac
     # No python → we can't classify/broker; passthrough (rare: python3 is a broker prerequisite).
     command -v python3 >/dev/null 2>&1 || return 1
 
     mkdir -p "$PROVIDERS_DIR" && chmod 700 "$PROVIDERS_DIR"
     CC_IC_KIB="$KIB_DIR" CC_IC_DIR="$PROVIDERS_DIR" CC_IC_ALLOW="${CC_ALLOW_INLINE_MCP_SECRET:-0}" \
-    CC_IC_BROKER_ON="$(broker_wanted && echo 1 || echo 0)" \
-    CC_IC_BROKER_PY="$SCRIPT_DIR/cc-broker.py" \
-    CC_IC_NEXT_PORT="$(python3 "$SCRIPT_DIR/cc-broker.py" --next-port 2>/dev/null || echo 8100)" \
-    python3 - "${a[@]}" <<'PY'
+        CC_IC_BROKER_ON="$(broker_wanted && echo 1 || echo 0)" \
+        CC_IC_BROKER_PY="$SCRIPT_DIR/cc-broker.py" \
+        CC_IC_NEXT_PORT="$(python3 "$SCRIPT_DIR/cc-broker.py" --next-port 2>/dev/null || echo 8100)" \
+        python3 - "${a[@]}" <<'PY'
 import importlib.util, json, os, re, sys
 env = os.environ
 # Shared secret-shape tests + reverse-proxy synthesis live in cc-broker.py (the single source of
@@ -1882,7 +1979,7 @@ PY
 # the current inode. Best-effort: no systemd-resolved (no /run/systemd/resolve/resolv.conf) →
 # no mount, no watcher, and the container keeps Docker's default resolv.conf, frozen at
 # creation — exactly the pre-fix behaviour, never worse.
-RESOLV_SRC_DIR=/run/systemd/resolve                 # host dir systemd-resolved rewrites live
+RESOLV_SRC_DIR=/run/systemd/resolve # host dir systemd-resolved rewrites live
 RESOLV_SRC_FILE="$RESOLV_SRC_DIR/resolv.conf"
 
 host_has_resolved() { [ -r "$RESOLV_SRC_FILE" ]; }
