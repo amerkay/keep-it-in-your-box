@@ -236,3 +236,103 @@ def test_cli_rejects_wrong_arity() -> None:
     with pytest.raises(cli.AbortError) as exc:
         cs.main(["scope-in-json", "only-one-arg"])
     assert exc.value.code == cli.USAGE
+
+
+# ── host key vs box key (single mode) ────────────────────────────
+# Single mode has no $PWD bind and $HOST_HOME is a symlink to the container home, so Claude's
+# resolved cwd — and therefore every key it writes — is the CONTAINER path, not the host one.
+# Canonical must still only ever hold the host key, or the host's --resume and ↑ history stop
+# seeing the box's sessions and vice versa.
+BOX = "/home/hostuser/proj-a"
+
+
+def test_scope_in_rekeys_the_project_entry_to_the_box_path(
+    tmp_path: Path, write_json: Callable[[str, object], Path]
+) -> None:
+    src = write_json(
+        "canonical.json",
+        {"projects": {PA: {"allowedTools": ["A"]}}, "githubRepoPaths": {"repo": [PA, PB]}},
+    )
+    dst = tmp_path / "session.json"
+    cs.scope_in_json(str(src), PA, str(dst), BOX)
+    out = read(dst)
+    assert list(out["projects"]) == [BOX]
+    assert out["projects"][BOX]["allowedTools"] == ["A"]
+    assert out["githubRepoPaths"] == {"repo": [BOX]}
+
+
+def test_merge_out_writes_the_box_entry_back_under_the_host_key(
+    tmp_path: Path, write_json: Callable[[str, object], Path]
+) -> None:
+    scratch = write_json("session.json", {"projects": {BOX: {"allowedTools": ["NEW"]}}})
+    canonical = write_json(
+        "canonical.json", {"projects": {PA: {"allowedTools": ["OLD"]}, PB: {"keep": True}}}
+    )
+    assert cs.merge_out_json(str(scratch), PA, str(canonical), BOX) == cli.OK
+    out = read(canonical)
+    assert out["projects"][PA]["allowedTools"] == ["NEW"]
+    assert BOX not in out["projects"], "the container path must never reach canonical"
+    assert out["projects"][PB] == {"keep": True}
+
+
+def test_a_fresh_canonical_is_seeded_without_the_box_key(
+    tmp_path: Path, write_json: Callable[[str, object], Path]
+) -> None:
+    """The no-canonical path rebuilds from the session's globals, which are box-keyed."""
+    scratch = write_json(
+        "session.json", {"onboardingComplete": True, "projects": {BOX: {"allowedTools": ["A"]}}}
+    )
+    canonical = tmp_path / "fresh.json"
+    assert cs.merge_out_json(str(scratch), PA, str(canonical), BOX) == cli.OK
+    out = read(canonical)
+    assert list(out["projects"]) == [PA]
+    assert out["onboardingComplete"] is True
+
+
+def test_history_round_trips_through_the_box_key(
+    tmp_path: Path, write_file: Callable[[str, str], Path]
+) -> None:
+    canonical = write_file(
+        "history.jsonl", hline(PA, "mine") + "\n" + hline(PB, "OTHER-PROJECT") + "\n"
+    )
+    seeded = tmp_path / "session-history.jsonl"
+    cs.seed_history(str(canonical), PA, str(seeded), BOX)
+
+    lines = [json.loads(ln) for ln in seeded.read_text().splitlines()]
+    assert [ln["project"] for ln in lines] == [BOX], "the box sees only its own key"
+    assert all(ln["display"] != "OTHER-PROJECT" for ln in lines)
+
+    # The box appends under its own key; the merge must file it under the host's.
+    with open(seeded, "a") as fh:
+        fh.write(hline(BOX, "typed-in-the-box") + "\n")
+    cs.merge_history(str(seeded), PA, str(canonical), BOX)
+
+    back = [json.loads(ln) for ln in canonical.read_text().splitlines()]
+    assert {ln["project"] for ln in back} == {PA, PB}, "no container path in canonical"
+    assert [ln["display"] for ln in back if ln["project"] == PA] == ["mine", "typed-in-the-box"]
+
+
+def test_merge_history_does_not_duplicate_a_seeded_line(
+    tmp_path: Path, write_file: Callable[[str, str], Path]
+) -> None:
+    """Seeding re-keys every line, so the merge must re-key back and still match canonical's
+    copy — otherwise every launch appends the whole history again."""
+    canonical = write_file("history.jsonl", hline(PA, "mine") + "\n")
+    seeded = tmp_path / "session-history.jsonl"
+    cs.seed_history(str(canonical), PA, str(seeded), BOX)
+    cs.merge_history(str(seeded), PA, str(canonical), BOX)
+    assert len(canonical.read_text().splitlines()) == 1
+
+
+def test_dedupe_survives_claudes_own_json_style(
+    tmp_path: Path, write_file: Callable[[str, str], Path]
+) -> None:
+    """Claude writes history with JS `JSON.stringify` — no space after separators. Re-keying a
+    line round-trips it through Python's dumps, so a RAW compare matched nothing and every
+    launch re-appended the entire seeded history."""
+    js_style = f'{{"display":"mine","project":"{PA}"}}'
+    canonical = write_file("history.jsonl", js_style + "\n")
+    seeded = tmp_path / "session-history.jsonl"
+    cs.seed_history(str(canonical), PA, str(seeded), BOX)
+    cs.merge_history(str(seeded), PA, str(canonical), BOX)
+    assert canonical.read_text() == js_style + "\n", "canonical was appended to, or rewritten"

@@ -5,6 +5,9 @@
 # shim is covered the moment it is added, which is exactly how the old hand-written arrays
 # fell behind. Only the *classification* is declared here, because it cannot be inferred.
 
+# shellcheck source=SCRIPTDIR/_guard.sh
+. "${BASH_SOURCE%/*}/_guard.sh" # sourced by tests/check.sh, never run directly
+
 # Host-side (runs on the user's Mac/Linux): bash, under the portability contract.
 HOST_BASH=(bin/kib host/*.sh tools/*.sh dev.sh tests/check.sh tests/lib.sh tests/check/*.sh)
 # Host-side POSIX sh.

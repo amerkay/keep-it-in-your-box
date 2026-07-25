@@ -26,6 +26,19 @@ HOST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KIB_ROOT="$(dirname "$HOST_DIR")"
 # shellcheck source=SCRIPTDIR/core.sh
 . "$HOST_DIR/core.sh" # KIB_LOG_DIR — the log must not land in the project being diagnosed
+# shellcheck source=SCRIPTDIR/portable.sh
+. "$HOST_DIR/portable.sh" # is_macos — this whole diagnostic is Linux-only
+
+# Every source this samples (systemd-inhibit, KDE qdbus, /proc) is Linux-only, and the verb is
+# host-global so it execs before preflight_platform could say so. Without this it ran to
+# completion on macOS and wrote an EMPTY log, which reads as "nothing is holding the machine
+# awake" rather than "this tool does not apply here".
+if is_macos; then
+    echo "kib sleep-monitor is Linux-only: it reads systemd inhibitors, the KDE idle clock" >&2
+    echo "and /proc, none of which exist on macOS. The sleep guard there is 'caffeinate -is'," >&2
+    echo "so the equivalent diagnostic is:  pmset -g assertions" >&2
+    exit 2
+fi
 # SOURCED, never copied — a second copy of the metric would drift from the guard's.
 # shellcheck source=SCRIPTDIR/sleep-sample.sh
 . "$HOST_DIR/sleep-sample.sh"

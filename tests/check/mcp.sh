@@ -8,6 +8,9 @@
 # shellcheck disable=SC2016  # every _mcp_run argument is a script body for the inner shell,
 # so its $vars must survive this shell unexpanded. Single quotes are the point, not a slip.
 
+# shellcheck source=SCRIPTDIR/_guard.sh
+. "${BASH_SOURCE%/*}/_guard.sh" # sourced by tests/check.sh, never run directly
+
 section "MCP brokering (registry / enabled / inject / adopt / detector / intercept)"
 
 _mcp_tmp="$(mktemp -d)"

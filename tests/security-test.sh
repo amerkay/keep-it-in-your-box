@@ -97,13 +97,20 @@ is "all capabilities dropped (CapEff)" "0000000000000000" "$(awk '/^CapEff:/{pri
 is "CAP_SYS_ADMIN not in the bounding set" "0" "$((0x$(awk '/^CapBnd:/{print $2}' /proc/self/status) & 0x200000 ? 1 : 0))"
 is "no-new-privileges set" "1" "$(awk '/^NoNewPrivs:/{print $2}' /proc/self/status)"
 is "seccomp in filter mode" "2" "$(awk '/^Seccomp:/{print $2}' /proc/self/status)"
-if [ "$SINGLE_FUSE" = 1 ]; then
+_lsm_label="$(tr -d '\0' </proc/self/attr/current 2>/dev/null)"
+if [ -z "$_lsm_label" ]; then
+    # Docker Desktop's LinuxKit kernel ships no AppArmor, so NEITHER label is achievable and
+    # asserting one is a guaranteed failure that says nothing. Skipped rather than relaxed:
+    # the caps, seccomp and no-new-privs assertions above carry the same weight and still run.
+    skip "AppArmor label" "no AppArmor in this kernel (LinuxKit / Docker Desktop)"
+elif [ "$SINGLE_FUSE" = 1 ]; then
     # Single mode drops apparmor confinement so the in-container FUSE mount is permitted;
     # SYS_ADMIN is dropped from the bounding set instead (asserted just above + below).
-    is "AppArmor unconfined (single-container FUSE mount needs it)" "unconfined" "$(tr -d '\0' </proc/self/attr/current 2>/dev/null)"
+    is "AppArmor unconfined (single-container FUSE mount needs it)" "unconfined" "$_lsm_label"
 else
-    is "AppArmor confined" "docker-default (enforce)" "$(tr -d '\0' </proc/self/attr/current 2>/dev/null)"
+    is "AppArmor confined" "docker-default (enforce)" "$_lsm_label"
 fi
+unset _lsm_label
 is "/proc/sys mounted read-only" "ro" "$(awk '$5=="/proc/sys"{split($6,o,",");print o[1]}' /proc/self/mountinfo | head -1)"
 is "/sys mounted read-only" "ro" "$(awk '$5=="/sys"{split($6,o,",");print o[1]}' /proc/self/mountinfo | head -1)"
 is "no docker socket" "absent" "$([ -S /var/run/docker.sock ] && echo present || echo absent)"
@@ -295,7 +302,12 @@ rm -rf "$CFG/skills/.sectest" "$CFG/agents/.sectest.md" 2>/dev/null
 # canonical ~/.claude holds every project's transcripts, ↑ history and .claude.json entries.
 # kib assembles each box from only this project's slice; a leak would surface another
 # project's data here. Compared, NEVER printed (other project paths are PII).
-MINE="${HOST_PWD:-$PWD}"
+#
+# The key is the path Claude RESOLVES to in here — the container path — which in single mode is
+# not the host path config_scope translates to and from. `pwd -P` is that resolved path by
+# definition, so it is right in both modes; $HOST_PWD is the host's and would fail on macOS
+# alone, where the two differ.
+MINE="$(pwd -P)"
 
 if command -v python3 >/dev/null 2>&1 && [ -f "$CFG/.claude.json" ]; then
     _proj="$(

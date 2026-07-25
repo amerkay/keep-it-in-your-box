@@ -49,9 +49,28 @@ GITDIR_MARKERS = ("HEAD", "objects", "refs")
 class Redact(Operations):  # type: ignore[misc]
     """Passthrough of `src`, filtered through an ordered rule list."""
 
-    def __init__(self, src: str, rule_list: Sequence[rules.Rule]) -> None:
+    def __init__(
+        self,
+        src: str,
+        rule_list: Sequence[rules.Rule],
+        uid: int | None = None,
+        gid: int | None = None,
+    ) -> None:
         self.src = os.path.realpath(src)
         self.rules = rule_list
+        # Ownership squash. In single mode the project arrives over the engine VM's virtiofs,
+        # which reports every file as root:root; the agent is HOST_UID, so git refuses the whole
+        # tree as "dubious ownership" and takes dev.sh/CI down with it. Reporting the agent's
+        # own ids is safe because the view is single-user by construction and every rule check
+        # is uid-independent. None = passthrough (the Linux sidecar, where the ids are real).
+        self.uid = uid
+        self.gid = gid
+
+    def _own(self, st_uid: int, st_gid: int) -> tuple[int, int]:
+        return (
+            st_uid if self.uid is None else self.uid,
+            st_gid if self.gid is None else self.gid,
+        )
 
     def _real(self, path: str) -> str:
         return os.path.join(self.src, path.lstrip("/"))
@@ -102,6 +121,7 @@ class Redact(Operations):  # type: ignore[misc]
     def _stub_attr(self, mode: int, nlink: int, size: int) -> dict[str, Any]:
         """Synthetic stat for a masked path, timestamped from the project root."""
         st = os.lstat(self.src)
+        uid, gid = self._own(st.st_uid, st.st_gid)
         return {
             "st_mode": mode,
             "st_nlink": nlink,
@@ -109,8 +129,8 @@ class Redact(Operations):  # type: ignore[misc]
             "st_ctime": st.st_ctime,
             "st_mtime": st.st_mtime,
             "st_atime": st.st_atime,
-            "st_uid": st.st_uid,
-            "st_gid": st.st_gid,
+            "st_uid": uid,
+            "st_gid": gid,
         }
 
     # ── read-only metadata ───────────────────────────────────────
@@ -126,7 +146,7 @@ class Redact(Operations):  # type: ignore[misc]
                 return self._stub_attr(0o100444, 1, len(STUB))
             raise FuseOSError(errno.ENOENT)
         st = os.lstat(self._real(path))
-        return {
+        attr = {
             k: getattr(st, k)
             for k in (
                 "st_mode",
@@ -139,6 +159,8 @@ class Redact(Operations):  # type: ignore[misc]
                 "st_gid",
             )
         }
+        attr["st_uid"], attr["st_gid"] = self._own(st.st_uid, st.st_gid)
+        return attr
 
     def readdir(self, path: str, fh: int) -> list[str]:
         kind, _ = self._classify(path)
@@ -310,6 +332,13 @@ class Redact(Operations):  # type: ignore[misc]
 
     def chown(self, path: str, uid: int, gid: int) -> None:
         self._deny_if_masked(path)
+        # Under a squash the caller is echoing back the ids we invented (`cp -p`, `tar -x`,
+        # `git checkout` all do), so forwarding them would rewrite the real file's owner to a
+        # uid the backing store never had. -1 keeps that component unchanged.
+        if self.uid is not None and uid == self.uid:
+            uid = -1
+        if self.gid is not None and gid == self.gid:
+            gid = -1
         os.chown(self._real(path), uid, gid)
 
     def utimens(self, path: str, times: tuple[float, float] | None = None) -> None:
@@ -346,6 +375,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     ap.add_argument("--mnt", required=True)
     ap.add_argument("--patterns-file", required=True)
     ap.add_argument("--guard-file")
+    # Single mode passes the agent's ids; the sidecar omits them (its files already carry the
+    # host user's real ownership, and inventing one there would hide a genuine mismatch).
+    ap.add_argument("--uid", type=int, default=None, help="report this owner for every path")
+    ap.add_argument("--gid", type=int, default=None, help="report this group for every path")
     args = ap.parse_args(argv)
 
     # Guard rules first for readability only: verdict() tallies immune rules separately, so
@@ -356,13 +389,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     rule_list += rules.load(args.patterns_file)
     print(
         f"kib-fuse: src={args.src} mnt={args.mnt} guard={guard_count} "
-        f"rules={[str(r) for r in rule_list]}",
+        f"squash={args.uid}:{args.gid} rules={[str(r) for r in rule_list]}",
         file=sys.stderr,
         flush=True,
     )
 
     FUSE(
-        Redact(args.src, rule_list),
+        Redact(args.src, rule_list, uid=args.uid, gid=args.gid),
         args.mnt,
         foreground=True,
         allow_other=True,

@@ -6,6 +6,9 @@
 # KIB_OS is saved and restored around the section: everything after it in the run would
 # otherwise silently execute the macOS branches too.
 
+# shellcheck source=SCRIPTDIR/_guard.sh
+. "${BASH_SOURCE%/*}/_guard.sh" # sourced by tests/check.sh, never run directly
+
 section "Shim unit tests (host/portable.sh, darwin paths forced)"
 
 # shellcheck disable=SC2034  # host/portable.sh's preflight reads it; unused on Linux
@@ -27,24 +30,46 @@ t_hash8() {
     fi
 }
 
+# Oracle. NOT flock(1): it is GNU-only, so on a real Mac every call here failed
+# "command not found" — which read as "the lock is held", turning two assertions into false
+# passes and three into false failures. The suite looked like it was testing lock_fd and was
+# testing nothing. perl is the one flock binding present on both platforms (it is what the
+# darwin shim itself uses, and `preflight_platform` already requires it on macOS).
+_probe_locked() { # true if the file is locked by SOMEONE ELSE
+    ! perl -e '
+        open(my $fh, "<", $ARGV[0]) or exit 2;
+        exit(flock($fh, 2 | 4) ? 0 : 1);   # LOCK_EX | LOCK_NB
+    ' "$1" 2>/dev/null
+}
+
+_hold_lock() { # <file> <seconds> — background holder, echoes its pid
+    # stdout redirected, or the command substitution that reads the pid would block until the
+    # holder exits — the pipe stays open as long as a child holds it.
+    perl -e '
+        open(my $fh, ">", $ARGV[0]) or exit 2;
+        flock($fh, 2) or exit 2;           # LOCK_EX, blocking
+        sleep $ARGV[1];
+    ' "$1" "$2" >/dev/null 2>&1 &
+    echo $!
+}
+
 t_lockfd() {
     local tmp tmp2 tmp3 hp t0 t1
     tmp="$(mktemp)"
     exec 200>"$tmp"
     if lock_fd -n -x 200; then pass "lock_fd: acquire -n -x"; else fail "lock_fd acquire"; fi
-    if flock -n -x "$tmp" -c true 2>/dev/null; then
-        fail "lock_fd: lock did not persist across the shim call"
-    else
+    if _probe_locked "$tmp"; then
         pass "lock_fd: lock persists via the held fd (OFD semantics)"
+    else
+        fail "lock_fd: lock did not persist across the shim call"
     fi
     lock_fd -u 200
-    if flock -n -x "$tmp" -c true 2>/dev/null; then pass "lock_fd: -u releases"; else fail "lock_fd -u"; fi
+    if _probe_locked "$tmp"; then fail "lock_fd -u"; else pass "lock_fd: -u releases"; fi
     exec 200>&-
 
     # timeout: hold it elsewhere, -w1 must fail in ~1s
     tmp2="$(mktemp)"
-    flock -x "$tmp2" -c "sleep 3" &
-    hp=$!
+    hp="$(_hold_lock "$tmp2" 3)"
     sleep 0.3
     exec 201>"$tmp2"
     t0="$(date +%s)"
@@ -66,8 +91,7 @@ t_lockfd() {
     else
         fail "lock_fd file-form (free)"
     fi
-    flock -x "$tmp3" -c "sleep 2" &
-    hp=$!
+    hp="$(_hold_lock "$tmp3" 2)"
     sleep 0.3
     if lock_fd -n "$tmp3" true; then
         fail "lock_fd: file-form succeeded on a held lock"
@@ -91,6 +115,32 @@ t_detach() {
     fi
     kill "$pid" 2>/dev/null
     wait "$pid" 2>/dev/null || true
+}
+
+# A detached daemon must inherit NO descriptor above stderr, and the shim must guarantee it on
+# its own — note this deliberately passes no `200>&- 201>&-`. Closing by number at the call site
+# is not enough on macOS: bash 3.2 saves an fd redirected on a *function call* to a dup >=10 for
+# the post-call restore without close-on-exec, so the child inherited the project lock as fd 10.
+# The clipboard bridge then held it for life, and since teardown is what kills the bridge,
+# teardown could never run — containers stranded until killed by hand.
+#
+# Probed on fd 3, not 200: bash >=4 sets close-on-exec on fds >9, so the real fd cannot leak on
+# this Linux box at all — which is precisely why the bug was macOS-only. Low fds carry no such
+# flag, so they reproduce the inheritance the shim has to sever.
+t_detach_fds() {
+    local d
+    d="$(mktemp -d)"
+    exec 3>"$d/leak"
+    detach_pgrp /bin/sh -c 'printf LEAKED 2>/dev/null >&3'
+    sleep 0.3
+    exec 3>&-
+    if [ -s "$d/leak" ]; then
+        fail "detach_pgrp leaks inherited fds to the daemon" \
+            "a daemon holding the project lock blocks the teardown that would kill it"
+    else
+        pass "detach_pgrp: the daemon inherits no fd above stderr (lock cannot leak)"
+    fi
+    rm -rf "$d"
 }
 
 # The sleep guard's metric, called through the SHARED implementation both it and
@@ -129,6 +179,7 @@ t_wait_until() {
 t_hash8
 t_lockfd
 t_detach
+t_detach_fds
 t_busiest
 t_wait_until
 

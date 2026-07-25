@@ -5,6 +5,9 @@
 # how a broken redaction matcher ships. It is pinned in requirements-dev.txt, baked into the
 # image and installed by CI, so "not found" means the environment is wrong.
 
+# shellcheck source=SCRIPTDIR/_guard.sh
+. "${BASH_SOURCE%/*}/_guard.sh" # sourced by tests/check.sh, never run directly
+
 section "Python suites (pytest)"
 
 # The project venv first (it pins the versions this checkout expects), then PATH, then the

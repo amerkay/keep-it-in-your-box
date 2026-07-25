@@ -53,7 +53,10 @@ check_for_updates() {
     # Its own process group, so `kill -TERM -PGID` kills the whole build tree. `--background`
     # plus the redirect are belt-and-braces for the same thing: setsid leaves fd 1 on the
     # user's terminal, so without them the build streams its BuildKit UI over the session.
-    detach_pgrp "$KIB_ROOT/tools/build-image.sh" --background >/dev/null 2>&1
+    # 200>&- 201>&- is LOAD-BEARING: a build outlives the session that started it, and an
+    # inherited shared lock stops the last terminal out from taking it exclusively — teardown
+    # is then skipped and the containers are stranded until the build ends.
+    detach_pgrp "$KIB_ROOT/tools/build-image.sh" --background >/dev/null 2>&1 200>&- 201>&-
     echo $! >"$BUILD_PID"
     disown
     echo "🔨 Starting background rebuild... (log: $BUILD_LOG)" >&2

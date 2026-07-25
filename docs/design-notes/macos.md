@@ -20,6 +20,56 @@ Header of `host/portable.sh`, enforced by `check.sh`: host-side scripts are bash
 
 **Host-side python is 3.9.** `kib_py` runs whatever `python3` the host has, and stock macOS ships 3.9 (`xcode-select --install`) — so `def f() -> str | None` is a launch-time `TypeError`, not a style question. `kib/host`, `kib/shared` and `kib/broker` therefore carry `from __future__ import annotations` and avoid 3.10+ runtime APIs; only `kib/guest` may assume the image's 3.13. Enforced two ways, because neither is sufficient alone: ruff's `per-file-target-version = py39` + `FA102` catches annotations, and `portability.sh` re-parses each module at `feature_version=(3, 9)` and greps the AST for 3.10-only calls (`zip(strict=)`, `dataclass(slots=)`, …) that fail only when *reached*, which an import smoke test would miss. mypy cannot help — 2.x refuses `--python-version 3.9`.
 
+## `fakeowner`: ownership and mode are advisory in the box
+
+Docker Desktop backs every bind with a `fakeowner` layer over virtiofs. Two consequences, both
+found on the first real Mac run and neither reproducible under `KIB_SINGLE_CONTAINER=1`:
+
+**Ownership is invented, so git refuses the project.** The project arrives at `/kib/real` owned
+by `root:root` whatever it is on the host. The FUSE server passed `st_uid`/`st_gid` straight
+through, the agent runs as `HOST_UID`, and git therefore reported *"detected dubious ownership
+in repository"* for the entire tree — taking `git status`, `./dev.sh` (its file discovery is
+`git ls-files`) and four of `security-test.sh`'s "the guard must not break ordinary git"
+assertions down with it. `entrypoint-fuse.sh` now passes `--uid`/`--gid` and the server reports
+those for every path, stub included. Redaction is unaffected: every rule check is
+uid-independent, which is what makes the squash safe rather than a hole. `chown` to the invented
+owner is translated to `-1` (no change) so `cp -p`, `tar -x` and `git checkout` do not try to
+rewrite the backing file to a uid it never had.
+
+**Mode bits do not gate access.** `chmod 0400` on a bind is *recorded* faithfully — `stat` reads
+back `400` — but `access(2)` still answers writable. Every chmod-based read-only control there is
+a silent no-op on macOS. That is how the broker's synthetic `.credentials.json` shipped writable:
+it was a `cp` + `chmod 0400`. It is a `:ro` bind now (via `bind_via_link`, since the destination
+nests inside the shared-dir mount). Nothing refreshes it under the broker, so a single-file bind
+carries none of the rename risk the real rotating credential does. Host-side `chmod 700` on kib's
+own scratch dirs is unaffected — that is APFS, not a bind — as is `chmod 700 /kib`, which is the
+container's own overlayfs and does still fence `/kib/real`.
+
+## Host key vs box key
+
+Claude keys `projects/`, `.claude.json` and `history.jsonl` by its **resolved** cwd. Sidecar mode
+binds the project at its host path, so host and box agree. Single mode adds no `$PWD` bind and the
+entrypoint symlinks `$HOST_HOME` → the container home, so `/Users/<u>/proj` resolves to
+`/home/hostuser/proj` and Claude keys everything by that. The symlink makes the host path
+*reachable*; it does not make Claude *use* it.
+
+Left alone this silently split every project in two: the box wrote a second set of entries under
+the container path, so the host's `--resume` and ↑ history could not see the box's sessions nor the
+box the host's — exactly the seamless switch `container-lifecycle.md` exists to protect. (It also
+made three `security-test.sh` cross-project assertions fail, which is how it surfaced; they were
+reporting a key mismatch, not a leak.)
+
+`kib_box_pwd` (host/config.sh) computes the box path, and every `config_scope` verb takes both:
+canonical is only ever keyed by the host path, the session only ever by the box path, translated
+in on assembly and back out on merge. A project *outside* `$HOME` needs no translation — the
+entrypoint mkdirs that path for real, so it resolves to itself. The transcripts bind takes its
+source from the host slug and its link name from the box slug.
+
+One trap this exposed: `merge_history`'s dedupe compared raw text. Claude writes those lines with
+JS `JSON.stringify` (no space after separators) and re-keying round-trips them through Python's
+`json.dumps`, which does not produce the same bytes — so nothing matched and every launch would
+have re-appended the whole seeded history. It compares parsed-and-normalised lines now.
+
 ## Clipboard and DNS on macOS
 
 macOS clipboard: `clipboard-bridge.sh` (host, POSIX sh) watches a spool dir at `/kib-clip`; the entrypoint installs `wl-paste`/`xclip` reader shims and `wl-copy`/`pbcopy` deny-marker shims; the host answers with `pbpaste`/osascript PNG extraction and **never calls `pbcopy`**. Started/stopped like the Wayland notifier including the `200>&- 201>&-`.
@@ -28,5 +78,18 @@ DNS sync is skipped on macOS (the engine VM tracks the host resolver). No migrat
 
 ## Still open — on-hardware VERIFY (Mac only)
 
-- Which reader Claude invokes for image paste (`WAYLAND_DISPLAY` routes to the `wl-paste` shim; if it's `xclip`/`DISPLAY`, a one-line flip — both shims installed).
-- virtiofs file ownership (affects passthrough reads only — `_deny_if_masked` is uid-independent).
+- Image paste end-to-end. Confirmed broken on the first Mac run (text paste kept working, which
+  proves nothing: a terminal pastes text over the pty and never calls a clipboard reader at all —
+  the reader is only invoked for an image). Three fixes went in, and which of them mattered is
+  still unknown:
+  - the `xclip` shim `exec`ed `wl-paste` **with no arguments**, so `-t image/png -o` silently
+    fetched the *text* selection;
+  - the reader's response budget was 2 s, and the host answers a png with `osascript`, whose cold
+    start plus a large image passes that routinely — the read then returns empty and the paste
+    produces nothing, with no error;
+  - neither of these was the whole story: the host half was never running (`clipboard-bridge.sh`
+    shipped non-executable), and the trigger is `Ctrl+V` — `⌘V` never leaves the terminal.
+
+  `tests/check/clipboard.sh` extracts both shims from the entrypoint and drives them against the
+  real host bridge, so both halves are covered on Linux. Which reader Claude reaches for is no
+  longer a guess: it runs `xclip … || wl-paste …`, trying both in turn.

@@ -22,8 +22,11 @@ everything else calls its shims or tests `is_macos` / `KIB_FUSE_MODE`.
 |---|---|---|---|---|
 | FUSE mode | `sidecar` — server in its own `cap-drop=ALL` container, reaching the main container by shared-mount propagation | `single` — no sidecar; the baked entrypoint mounts the redacted view in-container over `$PWD` | `macos.md` | 🧪 |
 | Real project path | Not exposed — the main container only ever sees the view | `/kib/real`, under a root-700 parent the capless agent cannot traverse | `macos.md` | 🧪 |
+| File ownership in the view | Passed through — the sidecar sees the host user's real uid/gid | Squashed to the agent's ids: `fakeowner` reports every bind as `root:root`, and git then refuses the whole tree as "dubious ownership" | `macos.md` | ✅ |
+| Mode bits inside the box | Enforced | **Advisory** — `fakeowner` records a mode but ignores it in `access(2)`, so no chmod-based control works; use a `:ro` mount | `macos.md` | ✅ |
+| Project config key | Claude's resolved cwd == the host path | Resolves to `$CONTAINER_HOME/<rel>` via the `$HOST_HOME` symlink; `kib_box_pwd` + `config_scope` translate so canonical stays host-keyed | `macos.md` | ✅ |
 | Cap posture | Capless **at creation** — the main container never holds `CAP_SYS_ADMIN` | Capless **at runtime** — created with `SYS_ADMIN`+`SETPCAP`+`/dev/fuse`; every `docker exec` re-drops them with `setpriv --bounding-set` then `gosu` | `macos.md` | 🧪 |
-| AppArmor | `docker-default (enforce)` | `unconfined` — the in-container mount requires it | `macos.md` | 🧪 |
+| AppArmor | `docker-default (enforce)` | Absent — Docker Desktop's LinuxKit kernel ships no AppArmor, so the suite skips the label assertion rather than failing it. (Under `KIB_SINGLE_CONTAINER=1` on Linux: `unconfined`, which the mount requires.) | `macos.md` | 🧪 |
 | Sidecars per project | Up to 3 (FUSE, Wayland guard, broker) + main | Up to 1 (broker) + main | `container-lifecycle.md` | — |
 | `.git/hooks` read-only bind | Added | Skipped — it would shadow the FUSE view; the guard covers it instead | `redaction-config-guard.md` | ✅ |
 
@@ -35,7 +38,8 @@ everything else calls its shims or tests `is_macos` / `KIB_FUSE_MODE`.
 | Reads | Relayed verbatim by the proxy | Answered host-side with `pbpaste` / osascript PNG extraction | `clipboard-and-dns.md`, `macos.md` | — |
 | Writes | Refused at the protocol level (`WLGUARD-DENY`) | Refused at the shim; the host **never** calls `pbcopy` | `clipboard-and-dns.md` | ✅ |
 | Write-denial alert | `notify-send`, one per 30 s | None | `clipboard-and-dns.md` | — |
-| Paste trigger env | `WAYLAND_DISPLAY=wayland-0` + proxied socket | `WAYLAND_DISPLAY=kib-clip` + spool; both `wl-paste` and `xclip` shims installed | `host/desktop.sh:137` | ⏳ |
+| Paste trigger env | `WAYLAND_DISPLAY=wayland-0` + proxied socket | `WAYLAND_DISPLAY=kib-clip` + spool. No `DISPLAY`: Claude's `xclip \|\| wl-paste` chain reads neither | `host/desktop.sh` | ✅ |
+| Reader request type | n/a — the proxy relays verbatim | `wl-paste`/`xclip` spellings both map to text/png/list; 10 s budget for osascript png extraction | `clipboard-and-dns.md` | ✅ |
 | No clipboard available | No Wayland socket → info line, paste disabled (fail-soft) | No `pbpaste` → info line, paste disabled | `clipboard-and-dns.md` | — |
 
 ## Network
@@ -55,7 +59,7 @@ everything else calls its shims or tests `is_macos` / `KIB_FUSE_MODE`.
 | Idle lid-shut suspend | Proactive `systemctl suspend` when idle + lid closed + no external display + no other kib lock, gated by the post-resume SETTLE window | Not applicable — macOS re-evaluates sleep itself once the assertion drops | `sleep-guard.md` | ✅ |
 | Activity metric | Same sampler, sourced by both the guard and the diagnostic | Identical | `sleep-guard.md` | ✅ |
 | Desktop notifications | `notify-send -u <urgency> -i <icon>` | `osascript display notification` (urgency and icon dropped) | `clipboard-and-dns.md` | 🧪 |
-| `kib sleep-monitor` | Full diagnostic: KDE idle clock, systemd block locks, `/proc` sampling | Its data sources do not exist — see [observations](#observed-while-writing-this-matrix) | `sleep-guard.md` | — |
+| `kib sleep-monitor` | Full diagnostic: KDE idle clock, systemd block locks, `/proc` sampling | Refuses (exit 2) and points at `pmset -g assertions` — none of its data sources exist | `sleep-guard.md` | ✅ |
 
 ## Launch, host toolchain and mounts
 
@@ -85,23 +89,34 @@ changes must pass it in **both** modes.
 
 Tracked upstream in `docs/FUTURE_TASKS.md` § "Open questions" and `macos.md` § "Still open".
 
-- [ ] **Image-paste reader (Mac hardware).** `WAYLAND_DISPLAY` is expected to steer Claude's image
-      paste to the `wl-paste` shim. If it turns out to use `xclip`/`DISPLAY` instead, flip the one
-      env line in `host/desktop.sh:137` — both shims are already installed, so only the trigger
-      changes.
-- [ ] **virtiofs file ownership (Mac hardware).** Affects passthrough reads only; `_deny_if_masked`
-      is uid-independent, so redaction correctness does not depend on the answer.
+- [ ] **Image paste end-to-end (Mac hardware).** Confirmed broken on the first Mac run, three
+      causes fixed (dropped `xclip` args, a 2 s budget against `osascript`, and only one trigger
+      env advertised). Needs a re-test on hardware. Note that *text* paste working proves nothing
+      here — a terminal pastes text over the pty and never invokes a clipboard reader.
 
-Everything else in this matrix is either covered by the Linux suite or proven on Linux through the
-`KIB_SINGLE_CONTAINER=1` / forced-darwin-path vehicles, which is why the two rows above are the only
-ones that genuinely need a Mac.
+**virtiofs file ownership** is answered: `fakeowner` reports `root:root` and treats mode bits as
+advisory. It was not benign — see `macos.md` § "`fakeowner`". Everything else in this matrix is
+either covered by the Linux suite or proven on Linux through the `KIB_SINGLE_CONTAINER=1` /
+forced-darwin-path vehicles.
 
-## Observed while writing this matrix
+## Found on the first real Mac run
 
-Not currently tracked in `docs/FUTURE_TASKS.md` — recorded here so the next reader does not
-rediscover it:
+Recorded because none of it was reproducible under the `KIB_SINGLE_CONTAINER=1` vehicle — that
+proves the *mode*, not the platform. All are fixed and regression-guarded.
 
-- `kib sleep-monitor` has no darwin guard. It is a host-global verb that `exec`s before
+| Symptom | Cause | Guard |
+|---|---|---|
+| Every git command refuses the repo; `dev.sh` finds no files | `fakeowner` reports the project `root:root` | `regressions.sh` (`--uid`/`--gid`), `test_fuse.py` |
+| The synthetic `.credentials.json` is writable | `chmod 0400` is a no-op on a bind | `regressions.sh` (`:ro` by mount) |
+| Two sets of `projects/`, `.claude.json`, `↑` history | box path ≠ host path in single mode | `wiring.sh`, `test_config_scope.py` |
+| No `commands/` in the box | the merge farm returned early with no shared source | — (entrypoint) |
+| 3 `lock_fd` failures + 2 false passes | the shim suite used GNU `flock(1)` as its own oracle | `portability.sh` now holds `shims.sh` to the contract |
+| AppArmor assertion cannot pass | LinuxKit ships no AppArmor | `security-test.sh` skips when the label is empty |
+
+## Fixed since
+
+- `kib sleep-monitor` had no darwin guard. It is a host-global verb that `exec`s before
   `preflight_platform`, and every source it samples (`systemd-inhibit`, KDE `qdbus`, `/proc`) is
-  Linux-only, so on macOS it writes an empty diagnostic log rather than saying it does not apply
-  (`bin/kib:114`, `host/sleep-monitor.sh`).
+  Linux-only, so on macOS it wrote an empty diagnostic log — which reads as "nothing is holding
+  the machine awake" rather than "this tool does not apply here". It now refuses with exit 2 and
+  points at `pmset -g assertions`, guarded in `wiring.sh` by stubbing `uname`.

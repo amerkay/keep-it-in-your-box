@@ -41,7 +41,13 @@ chmod 700 /kib 2>/dev/null || true
 # /usr/local/bin/fuse is the BAKED shim, so its execute bit is the image's. Only the kib package
 # is bind-mounted — a host file's execute bit may not survive a :ro bind (EACCES), which is why
 # invoking the mounted .py directly needed an explicit `python3`.
+#
+# --uid/--gid: the project reaches this container over the engine VM's virtiofs, which reports
+# every file as root:root. Without the squash git refuses the whole tree ("dubious ownership")
+# and nothing that shells out to it works. Redaction is uid-independent, so this is presentation
+# only.
 /usr/local/bin/fuse --src /kib/real --mnt "$KIB_FUSE_MNT" \
+    --uid "${HOST_UID:-1000}" --gid "${HOST_GID:-1000}" \
     --patterns-file /kib/patterns --guard-file /usr/local/share/global.kibignore &
 _KIB_FUSE_PID=$!
 
