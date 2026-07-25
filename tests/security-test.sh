@@ -498,9 +498,25 @@ except Exception:
 
     # CLAUDE_CODE_OAUTH_TOKEN takes precedence over the credentials file, so it is the value
     # the agent actually authenticates with — it MUST be the sentinel, never a real token.
-    case "${CLAUDE_CODE_OAUTH_TOKEN:-}" in
+    #
+    # "Unset" is NOT evidence of a missing control: Claude Code reads this at startup and
+    # scrubs it from the environment it hands tool shells and subagents, so running the suite
+    # from inside a session (a Bash tool call) sees nothing while `cc ./tests/security-test.sh`
+    # — its own docker exec — sees the placeholder. Fall back to the agent's own
+    # /proc/<pid>/environ, which is the exec-time snapshot and is unaffected by unsetenv(), so
+    # the control still holds either way. Matched, never printed.
+    _tok="${CLAUDE_CODE_OAUTH_TOKEN:-}"
+    if [ -z "$_tok" ]; then
+        for _p in $(pgrep -u "$(id -u)" -x claude 2>/dev/null); do
+            _tok="$(tr '\0' '\n' <"/proc/$_p/environ" 2>/dev/null \
+                | grep -m1 '^CLAUDE_CODE_OAUTH_TOKEN=' || true)"
+            [ -n "$_tok" ] && break
+        done
+    fi
+    case "$_tok" in
         *fake_value_*) pass "CLAUDE_CODE_OAUTH_TOKEN is a placeholder (fake_value_…)" ;;
-        "") fail "CLAUDE_CODE_OAUTH_TOKEN is set to a placeholder" "it is unset" ;;
+        "") fail "CLAUDE_CODE_OAUTH_TOKEN is set to a placeholder" \
+            "unset here and no running agent to read it from — run: cc ./tests/security-test.sh" ;;
         *) fail "CLAUDE_CODE_OAUTH_TOKEN is a placeholder" "it is NOT a fake_value_ sentinel — a real token may be in the sandbox" ;;
     esac
 
