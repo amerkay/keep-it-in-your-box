@@ -80,7 +80,7 @@ def _read_str(body, off):
     """Wayland string: uint32 length (including NUL), then that many bytes, padded to 4."""
     (n,) = struct.unpack_from("<I", body, off)
     off += 4
-    s = body[off:off + n - 1].decode("utf-8", "replace") if n else ""
+    s = body[off : off + n - 1].decode("utf-8", "replace") if n else ""
     return s, off + ((n + 3) & ~3)
 
 
@@ -132,20 +132,20 @@ class Connection:
             obj_id, word = HEADER.unpack_from(buf, off)
             size, opcode = word >> 16, word & 0xFFFF
             if size < HEADER.size or len(buf) - off < size:
-                break                                   # partial message; wait for more
-            body = buf[off + HEADER.size:off + size]
+                break  # partial message; wait for more
+            body = buf[off + HEADER.size : off + size]
             if to_server:
                 denied = self._denied(obj_id, opcode)
                 if denied:
                     raise Denied(f"{self.objects.get(obj_id)}.{denied}")
                 self._track_request(obj_id, opcode, body)
-            out += buf[off:off + size]         # server->client is always forwarded
+            out += buf[off : off + size]  # server->client is always forwarded
             off += size
         return bytes(out), buf[off:]
 
     def run(self):
-        bufs = {True: b"", False: b""}      # keyed by to_server
-        held = {True: [], False: []}        # fds received but not yet forwarded
+        bufs = {True: b"", False: b""}  # keyed by to_server
+        held = {True: [], False: []}  # fds received but not yet forwarded
         try:
             while True:
                 ready, _, _ = select.select([self.client, self.server], [], [])
@@ -154,7 +154,7 @@ class Connection:
                     dst = self.server if to_server else self.client
                     data, fds = recv_with_fds(sock)
                     if not data and not fds:
-                        return                          # peer closed
+                        return  # peer closed
                     held[to_server] += fds
                     bufs[to_server] += data
                     out, bufs[to_server] = self._filter(bufs[to_server], to_server)
@@ -189,7 +189,7 @@ def recv_with_fds(sock):
     for level, ctype, cdata in anc:
         if level == socket.SOL_SOCKET and ctype == socket.SCM_RIGHTS:
             a = array.array("i")
-            a.frombytes(cdata[:len(cdata) - (len(cdata) % a.itemsize)])
+            a.frombytes(cdata[: len(cdata) - (len(cdata) % a.itemsize)])
             fds += list(a)
     return msg, fds
 
@@ -199,7 +199,7 @@ def send_with_fds(sock, data, fds):
     if fds:
         anc = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", fds))]
     sent = sock.sendmsg([data], anc)
-    while sent < len(data):                              # ancillary rides the first send
+    while sent < len(data):  # ancillary rides the first send
         sent += sock.send(data[sent:])
     for fd in fds:
         os.close(fd)
@@ -225,9 +225,7 @@ def serve(listen_path, upstream_path):
             log("ERROR", f"upstream connect failed: {e}")
             client.close()
             continue
-        threading.Thread(
-            target=Connection(client, upstream, f"conn{n}").run, daemon=True
-        ).start()
+        threading.Thread(target=Connection(client, upstream, f"conn{n}").run, daemon=True).start()
 
 
 def main():

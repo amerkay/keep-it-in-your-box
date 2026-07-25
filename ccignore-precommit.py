@@ -51,7 +51,9 @@ def git_config_list(args):
     try:
         return subprocess.run(
             ["git", "config", *args, "--list", "--includes"],
-            capture_output=True, text=True, check=False,
+            capture_output=True,
+            text=True,
+            check=False,
         ).stdout
     except OSError:
         return ""
@@ -168,11 +170,7 @@ def matches(rel, rules):
 
 def main():
     try:
-        top = (
-            subprocess.check_output(["git", "rev-parse", "--show-toplevel"])
-            .decode()
-            .strip()
-        )
+        top = subprocess.check_output(["git", "rev-parse", "--show-toplevel"]).decode().strip()
     except subprocess.CalledProcessError:
         return 0
 

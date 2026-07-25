@@ -39,25 +39,31 @@ def test_scope_in_json(tmp):
     src = os.path.join(tmp, "canonical.json")
     dst = os.path.join(tmp, "session.json")
     with open(src, "w") as fh:
-        json.dump({
-            "oauthAccount": {"email": "u@example.com"},
-            "onboardingComplete": True,
-            "projects": {
-                PA: {"mcpServers": {"a-mcp": {}}, "allowedTools": ["A"]},
-                PB: {"mcpServers": {"b-mcp": {}}, "allowedTools": ["B-SENTINEL"]},
+        json.dump(
+            {
+                "oauthAccount": {"email": "u@example.com"},
+                "onboardingComplete": True,
+                "projects": {
+                    PA: {"mcpServers": {"a-mcp": {}}, "allowedTools": ["A"]},
+                    PB: {"mcpServers": {"b-mcp": {}}, "allowedTools": ["B-SENTINEL"]},
+                },
+                "githubRepoPaths": {"repo": [PA, PB]},
             },
-            "githubRepoPaths": {"repo": [PA, PB]},
-        }, fh)
+            fh,
+        )
 
     cs.scope_in_json(src, PA, dst)
     out = read_json(dst)
     check("scope-in keeps global keys", out.get("onboardingComplete") is True)
-    check("scope-in keeps oauthAccount", out.get("oauthAccount", {}).get("email") == "u@example.com")
+    check(
+        "scope-in keeps oauthAccount", out.get("oauthAccount", {}).get("email") == "u@example.com"
+    )
     check("scope-in keeps only this project", list(out["projects"].keys()) == [PA])
-    check("scope-in drops other project entirely",
-          "B-SENTINEL" not in json.dumps(out))
-    check("scope-in filters githubRepoPaths to this project",
-          out.get("githubRepoPaths") == {"repo": [PA]})
+    check("scope-in drops other project entirely", "B-SENTINEL" not in json.dumps(out))
+    check(
+        "scope-in filters githubRepoPaths to this project",
+        out.get("githubRepoPaths") == {"repo": [PA]},
+    )
 
 
 def test_scope_in_absent_and_bad(tmp):
@@ -70,37 +76,50 @@ def test_scope_in_absent_and_bad(tmp):
         fh.write("{not json")
     dst3 = os.path.join(tmp, "s3.json")
     cs.scope_in_json(bad, PA, dst3)
-    check("scope-in on corrupt canonical → empty projects (no crash)",
-          read_json(dst3)["projects"] == {})
+    check(
+        "scope-in on corrupt canonical → empty projects (no crash)",
+        read_json(dst3)["projects"] == {},
+    )
 
 
 def test_merge_out_json(tmp):
     canonical = os.path.join(tmp, "canon.json")
     with open(canonical, "w") as fh:
-        json.dump({
-            "onboardingComplete": True,
-            "projects": {
-                PA: {"allowedTools": ["OLD"]},
-                PB: {"allowedTools": ["B-SENTINEL"]},
+        json.dump(
+            {
+                "onboardingComplete": True,
+                "projects": {
+                    PA: {"allowedTools": ["OLD"]},
+                    PB: {"allowedTools": ["B-SENTINEL"]},
+                },
             },
-        }, fh)
+            fh,
+        )
     scratch = os.path.join(tmp, "scr.json")
     with open(scratch, "w") as fh:
-        json.dump({
-            "onboardingComplete": True,
-            "extraGlobalWrittenInBox": "ignored",
-            "projects": {PA: {"allowedTools": ["NEW"], "mcpServers": {"added": {}}}},
-        }, fh)
+        json.dump(
+            {
+                "onboardingComplete": True,
+                "extraGlobalWrittenInBox": "ignored",
+                "projects": {PA: {"allowedTools": ["NEW"], "mcpServers": {"added": {}}}},
+            },
+            fh,
+        )
 
     rc = cs.merge_out_json(scratch, PA, canonical)
     out = read_json(canonical)
     check("merge-out returns 0", rc == 0)
-    check("merge-out updates this project's subtree", out["projects"][PA]["allowedTools"] == ["NEW"])
+    check(
+        "merge-out updates this project's subtree", out["projects"][PA]["allowedTools"] == ["NEW"]
+    )
     check("merge-out lands new mcpServers", "added" in out["projects"][PA]["mcpServers"])
-    check("merge-out leaves OTHER project byte-identical",
-          out["projects"][PB] == {"allowedTools": ["B-SENTINEL"]})
-    check("merge-out does not import session-only global keys",
-          "extraGlobalWrittenInBox" not in out)
+    check(
+        "merge-out leaves OTHER project byte-identical",
+        out["projects"][PB] == {"allowedTools": ["B-SENTINEL"]},
+    )
+    check(
+        "merge-out does not import session-only global keys", "extraGlobalWrittenInBox" not in out
+    )
 
 
 def test_merge_out_failclosed(tmp):
@@ -134,8 +153,10 @@ def test_merge_out_absent_canonical(tmp):
     rc = cs.merge_out_json(scratch, PA, canonical)
     out = read_json(canonical)
     check("merge-out creates canonical from skeleton", rc == 0 and out["projects"][PA] == {"y": 2})
-    check("merge-out carries session globals into fresh canonical",
-          out.get("onboardingComplete") is True)
+    check(
+        "merge-out carries session globals into fresh canonical",
+        out.get("onboardingComplete") is True,
+    )
 
 
 def test_merge_out_never_deletes(tmp):
@@ -145,26 +166,34 @@ def test_merge_out_never_deletes(tmp):
         json.dump({"projects": {PA: {"allowedTools": ["KEEP"]}}}, fh)
     scratch = os.path.join(tmp, "scr4.json")
     with open(scratch, "w") as fh:
-        json.dump({"projects": {}}, fh)     # e.g. Claude re-created a reset config in-box
+        json.dump({"projects": {}}, fh)  # e.g. Claude re-created a reset config in-box
     rc = cs.merge_out_json(scratch, PA, canonical)
     out = read_json(canonical)
-    check("merge-out never deletes a canonical entry the session lacks",
-          rc == 0 and out["projects"].get(PA, {}).get("allowedTools") == ["KEEP"])
+    check(
+        "merge-out never deletes a canonical entry the session lacks",
+        rc == 0 and out["projects"].get(PA, {}).get("allowedTools") == ["KEEP"],
+    )
 
 
 def test_merge_out_drops_cc_pins(tmp):
     """cc's forced sandbox pins are not the user's choice — never export them."""
-    canonical = os.path.join(tmp, "fresh2.json")   # absent
+    canonical = os.path.join(tmp, "fresh2.json")  # absent
     scratch = os.path.join(tmp, "scr5.json")
     with open(scratch, "w") as fh:
-        json.dump({"leftArrowOpensAgents": False, "onboardingComplete": True,
-                   "projects": {PA: {"z": 3}}}, fh)
+        json.dump(
+            {"leftArrowOpensAgents": False, "onboardingComplete": True, "projects": {PA: {"z": 3}}},
+            fh,
+        )
     cs.merge_out_json(scratch, PA, canonical)
     out = read_json(canonical)
-    check("merge-out never exports cc's sandbox pins into a fresh canonical",
-          "leftArrowOpensAgents" not in out)
-    check("merge-out still carries real globals into a fresh canonical",
-          out.get("onboardingComplete") is True)
+    check(
+        "merge-out never exports cc's sandbox pins into a fresh canonical",
+        "leftArrowOpensAgents" not in out,
+    )
+    check(
+        "merge-out still carries real globals into a fresh canonical",
+        out.get("onboardingComplete") is True,
+    )
 
 
 def _hline(project, text):
@@ -193,25 +222,29 @@ def test_merge_history(tmp):
         fh.write(_hline(PB, "b-SENTINEL") + "\n")
     scratch = os.path.join(tmp, "sess-history2.jsonl")
     with open(scratch, "w") as fh:
-        fh.write(_hline(PA, "a-one") + "\n")     # already present
-        fh.write(_hline(PA, "a-three") + "\n")   # new
+        fh.write(_hline(PA, "a-one") + "\n")  # already present
+        fh.write(_hline(PA, "a-three") + "\n")  # new
     cs.merge_history(scratch, PA, canonical)
     got = open(canonical).read().splitlines()
     check("merge-history appends the new line", any("a-three" in l for l in got))
     check("merge-history does not duplicate existing", sum("a-one" in l for l in got) == 1)
     check("merge-history leaves other project's line intact", any("b-SENTINEL" in l for l in got))
-    check("merge-history never rewrote other project's line count",
-          sum("b-SENTINEL" in l for l in got) == 1)
+    check(
+        "merge-history never rewrote other project's line count",
+        sum("b-SENTINEL" in l for l in got) == 1,
+    )
 
     # Canonical cut short mid-append (no trailing newline) must not have our first line
     # glued onto its last one.
     torn = os.path.join(tmp, "torn-history.jsonl")
     with open(torn, "w") as fh:
-        fh.write(_hline(PB, "b-TORN"))      # deliberately no "\n"
+        fh.write(_hline(PB, "b-TORN"))  # deliberately no "\n"
     cs.merge_history(scratch, PA, torn)
     lines = [l for l in open(torn).read().splitlines() if l]
-    check("merge-history repairs a missing trailing newline before appending",
-          all(json.loads(l) for l in lines) and len(lines) == 3)
+    check(
+        "merge-history repairs a missing trailing newline before appending",
+        all(json.loads(l) for l in lines) and len(lines) == 3,
+    )
 
 
 def test_classify(tmp):
@@ -225,21 +258,32 @@ def test_classify(tmp):
             os.makedirs(p, exist_ok=True)
     import io
     import contextlib
+
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         cs.classify(home)
     unknown = set(buf.getvalue().split())
     check("classify flags unrecognised entries", {"brand-new-store", "mystery.db"} <= unknown)
-    check("classify does not flag known entries",
-          not ({"settings.json", "projects", "daemon.lock"} & unknown))
+    check(
+        "classify does not flag known entries",
+        not ({"settings.json", "projects", "daemon.lock"} & unknown),
+    )
 
 
 def main():
     with tempfile.TemporaryDirectory() as tmp:
-        for fn in (test_scope_in_json, test_scope_in_absent_and_bad, test_merge_out_json,
-                   test_merge_out_failclosed, test_merge_out_absent_canonical,
-                   test_merge_out_never_deletes, test_merge_out_drops_cc_pins,
-                   test_seed_history, test_merge_history, test_classify):
+        for fn in (
+            test_scope_in_json,
+            test_scope_in_absent_and_bad,
+            test_merge_out_json,
+            test_merge_out_failclosed,
+            test_merge_out_absent_canonical,
+            test_merge_out_never_deletes,
+            test_merge_out_drops_cc_pins,
+            test_seed_history,
+            test_merge_history,
+            test_classify,
+        ):
             print(fn.__name__)
             fn(tmp)
     if _fails:

@@ -8,6 +8,7 @@ starting the sidecar needs a docker daemon the sandbox does not have.
 
     python3 test-ccignore-fuse.py
 """
+
 import importlib.util
 import os
 import sys
@@ -56,13 +57,26 @@ def write(text):
 r = build()
 
 print("\n== .env placeholders are readable (committed, hold no secrets) ==")
-for p in (".env.example", ".env.sample", ".env.template", ".env.dist",
-          ".env.defaults", "newd/.env.example", "a/b/c/.env.sample"):
+for p in (
+    ".env.example",
+    ".env.sample",
+    ".env.template",
+    ".env.dist",
+    ".env.defaults",
+    "newd/.env.example",
+    "a/b/c/.env.sample",
+):
     check(p, r._verdict(p), None)
 
 print("\n== secret-bearing .env variants are redacted ==")
-for p in (".env", ".env.local", ".env.production", ".env.staging",
-          "newd/.env", ".env.example.local"):
+for p in (
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.staging",
+    "newd/.env",
+    ".env.example.local",
+):
     check(p, r._verdict(p), "redact")
 
 print("\n== a project's '!' cannot un-protect itself ==")
@@ -76,15 +90,26 @@ print("\n== a project may still ADD redaction over a placeholder ==")
 check("project redacts .env.example", build(".env.example\n")._verdict(".env.example"), "redact")
 
 print("\n== guard patterns are tail-matched at any depth ==")
-for p in (".vscode/tasks.json", "deep/.vscode/settings.json", ".envrc",
-          "a/b/.devcontainer/devcontainer.json", ".idea/workspace.xml"):
+for p in (
+    ".vscode/tasks.json",
+    "deep/.vscode/settings.json",
+    ".envrc",
+    "a/b/.devcontainer/devcontainer.json",
+    ".idea/workspace.xml",
+):
     check(p, r._verdict(p), "protect")
 
 print("\n== git paths are structural: submodules, worktrees, nested repos ==")
-for p in (".git/config", "sub/.git/config", ".git/modules/x/config",
-          ".git/modules/x/modules/y/config", ".git/worktrees/w/config.worktree",
-          ".git/hooks/pre-commit", "sub/.git/hooks/pre-push",
-          ".git/modules/x/hooks/pre-commit"):
+for p in (
+    ".git/config",
+    "sub/.git/config",
+    ".git/modules/x/config",
+    ".git/modules/x/modules/y/config",
+    ".git/worktrees/w/config.worktree",
+    ".git/hooks/pre-commit",
+    "sub/.git/hooks/pre-push",
+    ".git/modules/x/hooks/pre-commit",
+):
     check(p, r._protected("/" + p), True)
 for p in ("src/main.py", "hooks/deploy.sh", "config", "src/config"):
     check("not protected: " + p, r._protected("/" + p), False)
@@ -111,14 +136,32 @@ SAFE = '[core]\n\trepositoryformatversion = 0\n[remote "origin"]\n\turl = https:
 LFS = SAFE + '[filter "lfs"]\n\tclean = git-lfs clean\n'
 old_safe, old_lfs = write(SAFE), write(LFS)
 check("unchanged safe config", r._git_config_write_ok(write(SAFE), old_safe), True)
-check("adds core.fsmonitor", r._git_config_write_ok(write(SAFE + "[core]\n\tfsmonitor = /e\n"), old_safe), False)
-check("adds core.hooksPath", r._git_config_write_ok(write(SAFE + "[core]\n\thooksPath = .git/alt\n"), old_safe), False)
-check("adds an alias", r._git_config_write_ok(write(SAFE + "[alias]\n\tst = !/e\n"), old_safe), False)
+check(
+    "adds core.fsmonitor",
+    r._git_config_write_ok(write(SAFE + "[core]\n\tfsmonitor = /e\n"), old_safe),
+    False,
+)
+check(
+    "adds core.hooksPath",
+    r._git_config_write_ok(write(SAFE + "[core]\n\thooksPath = .git/alt\n"), old_safe),
+    False,
+)
+check(
+    "adds an alias", r._git_config_write_ok(write(SAFE + "[alias]\n\tst = !/e\n"), old_safe), False
+)
 check("adds a filter", r._git_config_write_ok(write(LFS), old_safe), False)
 # A pre-existing dangerous entry is the user's own host-side config: adding an
 # unrelated remote must not trip over it, but adding a NEW one must still fail.
-check("pre-existing lfs + new remote", r._git_config_write_ok(write(LFS + '[remote "n"]\n\turl = h\n'), old_lfs), True)
-check("pre-existing lfs + NEW fsmonitor", r._git_config_write_ok(write(LFS + "[core]\n\tfsmonitor = /e\n"), old_lfs), False)
+check(
+    "pre-existing lfs + new remote",
+    r._git_config_write_ok(write(LFS + '[remote "n"]\n\turl = h\n'), old_lfs),
+    True,
+)
+check(
+    "pre-existing lfs + NEW fsmonitor",
+    r._git_config_write_ok(write(LFS + "[core]\n\tfsmonitor = /e\n"), old_lfs),
+    False,
+)
 check("unreadable source fails closed", r._git_config_write_ok("/nonexistent", old_safe), False)
 
 print()

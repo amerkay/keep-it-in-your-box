@@ -67,7 +67,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # regards its token as valid and never tries to refresh or /login — it just sends the
 # placeholder to the broker, which swaps in the real token. 2286-11-20 in ms.
 FAR_FUTURE_MS = 10_000_000_000_000
-FAKE_PREFIX = "fake_value_"          # sandbox-runtime's sentinel shape
+FAKE_PREFIX = "fake_value_"  # sandbox-runtime's sentinel shape
 
 
 def _fake(prefix=""):
@@ -85,7 +85,7 @@ def _fake(prefix=""):
 PROVIDERS = {
     "claude": {
         "delivery": "base_url_env",
-        "credential_kind": "paste_token",   # a token the user pastes (vs a file path)
+        "credential_kind": "paste_token",  # a token the user pastes (vs a file path)
         "agent_base_url_env": "ANTHROPIC_BASE_URL",
         # The agent's auth env var, set to a PLACEHOLDER. CLAUDE_CODE_OAUTH_TOKEN takes
         # precedence over .credentials.json, so the agent authenticates through the broker
@@ -104,7 +104,7 @@ PROVIDERS = {
         "placeholder_container_path": "/home/hostuser/.claude-shared/.credentials.json",
         "placeholder_template": {
             "claudeAiOauth": {
-                "accessToken": None,          # filled with a fake at mint time
+                "accessToken": None,  # filled with a fake at mint time
                 "refreshToken": None,
                 "expiresAt": FAR_FUTURE_MS,
                 "refreshTokenExpiresAt": FAR_FUTURE_MS,
@@ -127,13 +127,16 @@ PROVIDERS = {
             "body": {
                 "model": "claude-haiku-4-5-20251001",
                 "max_tokens": 1,
-                "system": [{"type": "text",
-                            "text": "You are Claude Code, Anthropic's official CLI for Claude."}],
+                "system": [
+                    {
+                        "type": "text",
+                        "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+                    }
+                ],
                 "messages": [{"role": "user", "content": "hi"}],
             },
         },
     },
-
     # ── ready-but-unstarted (enable by dropping a host token file; no code change) ──
     # Same contract: a STATIC key. For Codex/Gemini that means an api-key, not the
     # ChatGPT/Google OAuth credential — those rotate exactly like Anthropic's.
@@ -171,7 +174,6 @@ PROVIDERS = {
         "placeholder_fake_pointers": [],
         "probe": {"path": "/v1beta/models", "method": "GET", "headers": {}, "body": None},
     },
-
     # ── No MCP routes are built in ───────────────────────────────────────────────
     # Only the LLMs Claude Code natively speaks (above) are hardcoded. Every MCP — DataForSEO,
     # mcp-gsc, or a service we've never heard of — is USER-DEFINED, added without touching this
@@ -235,10 +237,12 @@ def _merge_user_providers():
             with open(os.path.join(d, fn)) as fh:
                 p = json.load(fh)
         except (OSError, ValueError) as e:
-            sys.stderr.write("cc-broker: skipping bad provider def %s (%s)\n" % (fn, type(e).__name__))
+            sys.stderr.write(
+                "cc-broker: skipping bad provider def %s (%s)\n" % (fn, type(e).__name__)
+            )
             continue
         pid = p.get("id") or fn[:-5]
-        if pid in PROVIDERS:                       # never override a built-in preset
+        if pid in PROVIDERS:  # never override a built-in preset
             sys.stderr.write("cc-broker: ignoring user def %s — '%s' is a built-in\n" % (fn, pid))
             continue
         need = _REQUIRED.get(p.get("delivery"))
@@ -252,8 +256,12 @@ def _merge_user_providers():
 # (8080–8082), so user MCP routes never collide with a built-in. Read after _merge_user_providers
 # so it also counts ports already claimed by existing user defs.
 def next_free_port():
-    used = [v for p in PROVIDERS.values() for v in (p.get("listen_port"), p.get("mcp_port"))
-            if isinstance(v, int)]
+    used = [
+        v
+        for p in PROVIDERS.values()
+        for v in (p.get("listen_port"), p.get("mcp_port"))
+        if isinstance(v, int)
+    ]
     return max(used + [8099]) + 1
 
 
@@ -264,8 +272,16 @@ def next_port():
 # Hop-by-hop headers never forwarded (RFC 7230 §6.1); we terminate + re-originate, so these
 # are ours to manage, not the peer's.
 HOP_BY_HOP = {
-    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-    "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length",
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+    "host",
+    "content-length",
 }
 
 
@@ -292,13 +308,13 @@ def mint_placeholder(out_path, provider):
     template = provider.get("placeholder_template")
     if template is None:
         return False
-    data = json.loads(json.dumps(template))       # deep copy
+    data = json.loads(json.dumps(template))  # deep copy
     for ptr in provider.get("placeholder_fake_pointers", []):
         json_set(data, ptr, _fake())
     tmp = out_path + ".tmp"
     with open(tmp, "w") as fh:
         json.dump(data, fh)
-    os.chmod(tmp, 0o600)      # fake tokens only, but claude warns on a world-readable cred
+    os.chmod(tmp, 0o600)  # fake tokens only, but claude warns on a world-readable cred
     os.replace(tmp, out_path)
     return True
 
@@ -365,14 +381,13 @@ def make_handler(provider, cred):
                 # fire the notifier with it (BROKER-ERR pages the user; a benign transient
                 # reset must not cry wolf). Leave a non-matching breadcrumb for log spelunking.
                 log("BROKER-PEER-GONE %s %s" % (provider_id_of(provider), e))
-            except Exception as e:        # noqa: BLE001
+            except Exception as e:  # noqa: BLE001
                 # Exception TYPE only, never str(e): a failure raised while handling
                 # credential bytes must not put those bytes into a log the notifier tails.
-                log("BROKER-ERR %s relay failed: %s" % (provider_id_of(provider),
-                                                        type(e).__name__))
+                log("BROKER-ERR %s relay failed: %s" % (provider_id_of(provider), type(e).__name__))
                 try:
                     self.send_error(502, "broker upstream error")
-                except Exception:         # noqa: BLE001
+                except Exception:  # noqa: BLE001
                     pass
 
         def _read_body(self):
@@ -382,7 +397,7 @@ def make_handler(provider, cred):
                     size_line = self.rfile.readline().strip()
                     size = int(size_line.split(b";")[0], 16) if size_line else 0
                     if size == 0:
-                        self.rfile.readline()      # trailing CRLF
+                        self.rfile.readline()  # trailing CRLF
                         break
                     chunks.append(self.rfile.read(size))
                     self.rfile.readline()
@@ -408,16 +423,19 @@ def make_handler(provider, cred):
                 # diagnose. current_secret() already logged the specific cause.
                 self.send_error(502, "broker credential unavailable")
                 return
-            out_headers[provider["inject_header"]] = \
-                provider["inject_template"].format(secret=secret)
+            out_headers[provider["inject_header"]] = provider["inject_template"].format(
+                secret=secret
+            )
             # Host is intentionally NOT set: it is in HOP_BY_HOP, so the agent's
             # "Host: cc-broker:8080" was already dropped, and http.client re-generates the
             # correct upstream Host (with :port only when non-default) from the connection.
 
             ctx = ssl.create_default_context() if origin.scheme == "https" else None
-            conn = (http.client.HTTPSConnection(up_host, up_port, context=ctx, timeout=600)
-                    if origin.scheme == "https"
-                    else http.client.HTTPConnection(up_host, up_port, timeout=600))
+            conn = (
+                http.client.HTTPSConnection(up_host, up_port, context=ctx, timeout=600)
+                if origin.scheme == "https"
+                else http.client.HTTPConnection(up_host, up_port, timeout=600)
+            )
             conn.request(self.command, self.path, body=body, headers=out_headers)
             resp = conn.getresponse()
 
@@ -527,6 +545,7 @@ def _emit(key, value):
     value contains spaces (CCB_HOST_RUN='uvx mcp-search-console') — an unquoted space would be
     read as `VAR=word cmd` and try to run `cmd`."""
     import shlex
+
     print("%s=%s" % (key, shlex.quote(str(value))))
 
 
@@ -541,7 +560,7 @@ def host_config(pid):
     _emit("CCB_BASE_URL_ENV", p.get("agent_base_url_env", ""))
     _emit("CCB_TOKEN_ENV", p.get("agent_token_env", ""))
     _emit("CCB_PLACEHOLDER_TOKEN", _fake(p.get("token_prefix", "")))
-    _emit("CCB_LISTEN_PORT", p.get("listen_port") or "")   # empty for hosted_mcp
+    _emit("CCB_LISTEN_PORT", p.get("listen_port") or "")  # empty for hosted_mcp
     _emit("CCB_PLACEHOLDER_CONTAINER_PATH", p.get("placeholder_container_path", ""))
     _emit("CCB_TOKEN_BASENAME", p.get("token_basename", ""))
     _emit("CCB_DELIVERY", p["delivery"])
@@ -556,8 +575,7 @@ def host_config(pid):
     # hosted_mcp only: how to run the MCP server inside its sidecar, plus its extra env
     # (KEY=VAL pairs). Constants in the table; word-split by cc after the eval un-quotes them.
     _emit("CCB_HOST_RUN", " ".join(p.get("host_run", [])))
-    _emit("CCB_EXTRA_ENV", " ".join("%s=%s" % (k, v)
-                                    for k, v in p.get("extra_env", {}).items()))
+    _emit("CCB_EXTRA_ENV", " ".join("%s=%s" % (k, v) for k, v in p.get("extra_env", {}).items()))
 
 
 # ── registry listing (drives the bash-side provider loop; one line per route) ────
@@ -567,8 +585,10 @@ def list_providers():
     table — the single source of truth stays here. Fields are all `[a-z0-9._-]`, safe to
     word-split in POSIX sh."""
     for pid, p in PROVIDERS.items():
-        print("%s|%s|%s|%s" % (pid, p["delivery"],
-                               p.get("credential_kind", ""), p.get("token_basename", "")))
+        print(
+            "%s|%s|%s|%s"
+            % (pid, p["delivery"], p.get("credential_kind", ""), p.get("token_basename", ""))
+        )
 
 
 # ── Shared cc-side helpers (imported by cc-lib.sh's adopt/add/intercept/warn heredocs) ──
@@ -581,7 +601,7 @@ def list_providers():
 # state; none prints a secret.
 AUTH_HEADER_NAMES = frozenset(("authorization", "x-api-key", "api-key", "x-goog-api-key"))
 _SECRET_KEY_RE = re.compile(r"(TOKEN|KEY|SECRET|PASSWORD|PASSWD|AUTH|CREDENTIAL)", re.I)
-_AUTH_SCHEME_RE = re.compile(r"(sk-|Bearer |Basic )")     # a credential-scheme prefix
+_AUTH_SCHEME_RE = re.compile(r"(sk-|Bearer |Basic )")  # a credential-scheme prefix
 _B64_VAL_RE = re.compile(r"[A-Za-z0-9+/]{16,}={0,2}$")
 _HEX_VAL_RE = re.compile(r"[0-9a-fA-F]{24,}$")
 
@@ -630,10 +650,10 @@ def find_auth_header(headers):
         else:
             n, _, v = h.partition(":")
         pairs.append((n.strip(), v.strip()))
-    for n, v in pairs:                       # 1st preference: a recognised auth header name
+    for n, v in pairs:  # 1st preference: a recognised auth header name
         if v and (n or "").lower() in AUTH_HEADER_NAMES:
             return n, v
-    for n, v in pairs:                       # 2nd: a value carrying an explicit auth scheme
+    for n, v in pairs:  # 2nd: a value carrying an explicit auth scheme
         if v and value_has_auth_scheme(v):
             return n, v
     return None, None
@@ -651,7 +671,7 @@ def recover_secret(header_value, scheme):
     """The raw secret with its scheme prefix (if any) stripped."""
     v = header_value
     if scheme and v.startswith(scheme + " "):
-        v = v[len(scheme) + 1:]
+        v = v[len(scheme) + 1 :]
     return v.strip()
 
 
@@ -663,13 +683,17 @@ def synthesize_reverse_proxy(name, url, header_name, scheme, port, transport="ht
     if u.scheme not in ("http", "https") or not u.hostname:
         raise ValueError("cannot parse an http(s) upstream from url %r" % url)
     return {
-        "id": name, "delivery": "reverse_proxy_mcp", "credential_kind": "paste_token",
+        "id": name,
+        "delivery": "reverse_proxy_mcp",
+        "credential_kind": "paste_token",
         "upstream_origin": "%s://%s" % (u.scheme, u.netloc),
         "mcp_path": u.path or "",
         "mcp_transport": transport if transport in ("http", "sse") else "http",
         "inject_header": header_name or "Authorization",
         "inject_template": (scheme + " {secret}") if scheme else "{secret}",
-        "listen_port": port, "token_basename": "%s-token" % name, "mcp_server_name": name,
+        "listen_port": port,
+        "token_basename": "%s-token" % name,
+        "mcp_server_name": name,
     }
 
 
@@ -763,33 +787,38 @@ def probe(token_path, pid):
     method = spec.get("method", "POST" if body else "GET")
 
     try:
-        conn = http.client.HTTPSConnection(origin.hostname, origin.port or 443,
-                                           context=ssl.create_default_context(), timeout=30)
+        conn = http.client.HTTPSConnection(
+            origin.hostname, origin.port or 443, context=ssl.create_default_context(), timeout=30
+        )
         conn.request(method, spec["path"], body=body, headers=headers)
         resp = conn.getresponse()
         status = resp.status
         raw = resp.read(4096)
         conn.close()
-    except Exception as e:                # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
         print("could not reach %s: %s" % (origin.hostname, type(e).__name__))
         return 2
 
     kind = ""
     try:
         kind = (json.loads(raw).get("error") or {}).get("type", "")
-    except Exception:                     # noqa: BLE001
+    except Exception:  # noqa: BLE001
         pass
 
     if status == 200:
         print("✅ token accepted by %s (HTTP 200)" % origin.hostname)
         return 0
     if status in (401, 403):
-        print("❌ token REJECTED by %s (HTTP %d%s) — mint a new one with: cc --broker-login"
-              % (origin.hostname, status, ", " + kind if kind else ""))
+        print(
+            "❌ token REJECTED by %s (HTTP %d%s) — mint a new one with: cc --broker-login"
+            % (origin.hostname, status, ", " + kind if kind else "")
+        )
         return 1
-    print("⚠️  inconclusive: %s answered HTTP %d%s. The token was not rejected, so this is "
-          "probably rate limiting or an upstream problem — retry."
-          % (origin.hostname, status, ", " + kind if kind else ""))
+    print(
+        "⚠️  inconclusive: %s answered HTTP %d%s. The token was not rejected, so this is "
+        "probably rate limiting or an upstream problem — retry."
+        % (origin.hostname, status, ", " + kind if kind else "")
+    )
     return 2
 
 
@@ -798,17 +827,26 @@ def main():
     ap.add_argument("--serve", action="store_true")
     ap.add_argument("--config")
     ap.add_argument("--host-config", metavar="PROVIDER_ID")
-    ap.add_argument("--list-providers", action="store_true",
-                    help="emit `id|delivery|credential_kind|token_basename` per route")
-    ap.add_argument("--match-upstream", metavar="URL",
-                    help="print `id|token_basename|auth_scheme` for the route serving URL's host")
-    ap.add_argument("--next-port", action="store_true",
-                    help="print the next free listen port for a new user-defined route")
+    ap.add_argument(
+        "--list-providers",
+        action="store_true",
+        help="emit `id|delivery|credential_kind|token_basename` per route",
+    )
+    ap.add_argument(
+        "--match-upstream",
+        metavar="URL",
+        help="print `id|token_basename|auth_scheme` for the route serving URL's host",
+    )
+    ap.add_argument(
+        "--next-port",
+        action="store_true",
+        help="print the next free listen port for a new user-defined route",
+    )
     ap.add_argument("--make-placeholder", nargs=2, metavar=("OUT", "PROVIDER_ID"))
     ap.add_argument("--placeholder-token", metavar="PROVIDER_ID")
     ap.add_argument("--probe", nargs=2, metavar=("TOKENFILE", "PROVIDER_ID"))
     args = ap.parse_args()
-    _merge_user_providers()          # fold ~/.keep-it-in-your-box/providers.d/*.json onto the LLM built-ins
+    _merge_user_providers()  # fold ~/.keep-it-in-your-box/providers.d/*.json onto the LLM built-ins
 
     if args.host_config:
         host_config(args.host_config)
@@ -833,8 +871,10 @@ def main():
             ap.error("--serve requires --config")
         serve(args.config)
     else:
-        ap.error("one of --serve / --host-config / --list-providers / --make-placeholder / "
-                 "--placeholder-token / --probe is required")
+        ap.error(
+            "one of --serve / --host-config / --list-providers / --make-placeholder / "
+            "--placeholder-token / --probe is required"
+        )
 
 
 if __name__ == "__main__":

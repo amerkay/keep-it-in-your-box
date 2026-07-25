@@ -81,9 +81,7 @@ def load_rules(path, guard=False):
             if guard and line.startswith("[") and line.endswith("]"):
                 section = line[1:-1].strip().lower()
                 if section not in GUARD_ACTIONS:
-                    print(
-                        f"ccignore-fuse: unknown guard section {line!r}", file=sys.stderr
-                    )
+                    print(f"ccignore-fuse: unknown guard section {line!r}", file=sys.stderr)
                     continue
                 action = section
                 continue

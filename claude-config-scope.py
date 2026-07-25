@@ -49,19 +49,46 @@ MANIFEST_VERSION = 1
 
 # Shared/global — same for every project (bound from canonical, rw or ro).
 KNOWN_SHARED = {
-    ".credentials.json", "settings.json", "keybindings.json", "CLAUDE.md",
-    "plugins", "skills", "agents", "commands", "hooks",
+    ".credentials.json",
+    "settings.json",
+    "keybindings.json",
+    "CLAUDE.md",
+    "plugins",
+    "skills",
+    "agents",
+    "commands",
+    "hooks",
 }
 # Per-project — naturally keyed; this project's slice is bound/scoped in.
 KNOWN_PROJECT = {"projects", "history.jsonl"}
 # Machine-runtime singletons + caches — always container-private, never shared with host.
 KNOWN_PRIVATE = {
-    "daemon", "daemon.lock", "daemon.log", "daemon.status.json",
-    "sessions", "session-env", "tasks", "jobs", "todos", "file-history",
-    "shell-snapshots", "statsig", "cache", "stats-cache.json",
-    "mcp-needs-auth-cache.json", "paste-cache", "debug", "backups", "downloads",
-    "plans", "ide", ".last-cleanup", ".sleep-inhibit", ".claude.json",
-    ".claude.json.backup", ".claude.json.lock",
+    "daemon",
+    "daemon.lock",
+    "daemon.log",
+    "daemon.status.json",
+    "sessions",
+    "session-env",
+    "tasks",
+    "jobs",
+    "todos",
+    "file-history",
+    "shell-snapshots",
+    "statsig",
+    "cache",
+    "stats-cache.json",
+    "mcp-needs-auth-cache.json",
+    "paste-cache",
+    "debug",
+    "backups",
+    "downloads",
+    "plans",
+    "ide",
+    ".last-cleanup",
+    ".sleep-inhibit",
+    ".claude.json",
+    ".claude.json.backup",
+    ".claude.json.lock",
 }
 KNOWN = KNOWN_SHARED | KNOWN_PROJECT | KNOWN_PRIVATE
 
@@ -114,8 +141,9 @@ def scope_in_json(src, path, dst):
     if status == "bad":
         # A corrupt canonical file must not abort the launch; start the box from an empty
         # global config (Claude repopulates onboarding flags). Warn on stderr.
-        sys.stderr.write("cc-scope: canonical .claude.json is unparseable — "
-                         "seeding an empty session config.\n")
+        sys.stderr.write(
+            "cc-scope: canonical .claude.json is unparseable — seeding an empty session config.\n"
+        )
         cfg = {}
     elif status == "absent":
         cfg = {}
@@ -129,8 +157,11 @@ def scope_in_json(src, path, dst):
 
     grp_all = cfg.get("githubRepoPaths") or {}
     if isinstance(grp_all, dict):
-        grp = {repo: [p for p in paths if p == path]
-               for repo, paths in grp_all.items() if isinstance(paths, list)}
+        grp = {
+            repo: [p for p in paths if p == path]
+            for repo, paths in grp_all.items()
+            if isinstance(paths, list)
+        }
         grp = {repo: paths for repo, paths in grp.items() if paths}
         if grp:
             out["githubRepoPaths"] = grp
@@ -143,14 +174,17 @@ def merge_out_json(scratch, path, canonical):
     sc, sc_status = _load_json(scratch)
     if sc_status != "ok" or not isinstance(sc, dict):
         # Fail-closed: never touch canonical from an unreadable scratch.
-        sys.stderr.write("cc-scope: session .claude.json unreadable — "
-                         "not merging back (canonical left untouched).\n")
+        sys.stderr.write(
+            "cc-scope: session .claude.json unreadable — "
+            "not merging back (canonical left untouched).\n"
+        )
         return 2
 
     base, base_status = _load_json(canonical)
     if base_status == "bad":
-        sys.stderr.write("cc-scope: canonical .claude.json unparseable — "
-                         "refusing to overwrite it.\n")
+        sys.stderr.write(
+            "cc-scope: canonical .claude.json unparseable — refusing to overwrite it.\n"
+        )
         return 3
     if base_status == "absent" or not isinstance(base, dict):
         # No canonical yet (fresh skeleton): rebuild it from this session's globals, minus the
@@ -253,11 +287,11 @@ def main(argv):
         return 2
     cmd, rest = argv[1], argv[2:]
     table = {
-        "scope-in-json":  (scope_in_json,  3),
+        "scope-in-json": (scope_in_json, 3),
         "merge-out-json": (merge_out_json, 3),
-        "seed-history":   (seed_history,   3),
-        "merge-history":  (merge_history,  3),
-        "classify":       (classify,       1),
+        "seed-history": (seed_history, 3),
+        "merge-history": (merge_history, 3),
+        "classify": (classify, 1),
     }
     if cmd not in table:
         sys.stderr.write("cc-scope: unknown subcommand %r\n" % cmd)
