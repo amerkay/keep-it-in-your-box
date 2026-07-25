@@ -4,7 +4,7 @@
 #
 # Reads:  KIB_ROOT
 # Writes: the KIB_STATE_ROOT / BUILD_* paths below, read by the other host units and by
-#         tools/build-bg.sh (which sources this file directly)
+#         tools/build-image.sh (which sources this file directly)
 # shellcheck disable=SC2034
 
 # ── Messaging ────────────────────────────────────────────────────
@@ -60,7 +60,7 @@ KIB_STATE_ROOT="${KIB_STATE_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/keep-it-
 KIB_BUILD_DIR="$KIB_STATE_ROOT/build"
 KIB_LOG_DIR="$KIB_STATE_ROOT/logs"
 
-# Never unlink BUILD_LOCK: tools/build-bg.sh holds flock on that *inode*, so removing it
+# Never unlink BUILD_LOCK: tools/build-image.sh holds flock on that *inode*, so removing it
 # would let the next build lock a fresh one — two concurrent builds, both truncating
 # build.log and racing on `docker tag`.
 BUILD_LOCK="$KIB_BUILD_DIR/build.lock"

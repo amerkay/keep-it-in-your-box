@@ -13,7 +13,7 @@ bin/kib     host entry: verb dispatch and nothing else
 host/       runs as YOU, on the host. One file per subsystem, loaded by host/_load.sh
 guest/      crosses into a container: baked entrypoints, 3-line shims, policy files
 kib/        the one importable package — shared/ (both sides) host/ guest/ broker/
-tools/      build-bg.sh
+tools/      build-image.sh
 tests/      lib.sh + check.sh runner + check/*.sh sections + the pytest suites
 ```
 
@@ -60,12 +60,12 @@ Dockerfile's `ARG SHFMT_VERSION` / `ARG SHELLCHECK_VERSION`; keep the latter in 
 
 Security-relevant changes must pass `security-test.sh` in **both** redaction modes: once
 normally, once with the container launched under `KIB_SINGLE_CONTAINER=1` (the macOS topology).
-Image build (host-side): **`kib build`** (or `./tools/build-bg.sh`) — run it directly and it
+Image build (host-side): **`kib build`** (or `./tools/build-image.sh`) — run it directly and it
 streams the build and exits non-zero on failure; kib backgrounds the same script for the upgrade
 prompt. Do **not** use a bare `docker build`: `CLAUDE_VERSION` then stays the literal string
 `latest`, Docker keys its cache on that string rather than what it resolves to, so the install
 layer is reused forever, the image keeps an old Claude, and kib prompts for the same upgrade every
-launch. `build-bg.sh` resolves the version number first, which is what busts that cache.
+launch. `build-image.sh` resolves the version number first, which is what busts that cache.
 
 ## The CLI: verbs win over programs
 
@@ -76,8 +76,8 @@ word; everything else is a `kib` verb (`broker`, `mcp`, `audit`, `exec`, `build`
 
 ## Portability contract
 
-Host-side scripts (`bin/kib`, `host/*.sh`, `tools/build-bg.sh`, …) must be **bash-3.2/BSD-clean** —
-stock macOS, no brew. GNU-only tools (`flock`, `setsid`, `sha256sum`, `grep -P`, `notify-send`) and
+Host-side scripts (`bin/kib`, `host/*.sh`, `tools/build-image.sh`, …) must be
+**bash-3.2/BSD-clean** — stock macOS, no brew. GNU-only tools (`flock`, `setsid`, `sha256sum`, `grep -P`, `notify-send`) and
 bash-4isms (`declare -A`, `${var,,}`, `readarray`) are allowed only inside `host/portable.sh`'s
 linux branches — call its shims instead (`lock_fd`, `hash8`, `detach_pgrp`, `notify_desktop`).
 **All OS branching lives in `host/portable.sh`.** Enforced by `tests/check/portability.sh`, which

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Loaded second by host/_load.sh, and directly by tools/build-bg.sh and host/sleep-guard.sh.
+# Loaded second by host/_load.sh, and directly by tools/build-image.sh and host/sleep-guard.sh.
 # The ONE file that branches on OS: everywhere else calls the shims defined here.
 #
 # ── Portability contract (enforced by tests/check/portability.sh) ─

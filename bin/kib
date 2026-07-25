@@ -110,7 +110,7 @@ fi
 # their own status. `&& exit 0 || exit $?` is deliberate: called bare, a function returning
 # non-zero would trip `set -e` before its own reporting ran. An && / || list suspends errexit.
 case "$VERB" in
-    build) exec "$KIB_ROOT/tools/build-bg.sh" "$@" ;;
+    build) exec "$KIB_ROOT/tools/build-image.sh" "$@" ;;
     sleep-monitor) exec "$KIB_ROOT/host/sleep-monitor.sh" "$@" ;;
     broker) broker_cli "$@" && exit 0 || exit $? ;;
 esac

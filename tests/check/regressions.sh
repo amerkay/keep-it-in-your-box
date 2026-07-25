@@ -69,12 +69,12 @@ fi
 # A backgrounded rebuild must not decide "nobody is watching" from the tty alone. setsid drops
 # the controlling terminal but leaves fd 1 on the user's terminal, so `[ -t 1 ]` stayed true
 # and BuildKit drew its progress UI over the running Claude session while the log got nothing.
-if grep -qE '^if \[ "\$\{1:-\}" != --background \] && \[ -t 1 \]' "$KIB_ROOT/tools/build-bg.sh" \
-    && grep -q 'build-bg.sh" --background >/dev/null 2>&1' "$KIB_ROOT/host/image.sh"; then
+if grep -qE '^if \[ "\$\{1:-\}" != --background \] && \[ -t 1 \]' "$KIB_ROOT/tools/build-image.sh" \
+    && grep -q 'build-image.sh" --background >/dev/null 2>&1' "$KIB_ROOT/host/image.sh"; then
     pass "backgrounded rebuild stays off the terminal (--background + redirect, not just [ -t 1 ])"
 else
     fail "background rebuild can stream over the session" \
-        "build-bg.sh must honour --background, and host/image.sh must pass it AND redirect"
+        "build-image.sh must honour --background, and host/image.sh must pass it AND redirect"
 fi
 
 # FUSE reads must be pread, not lseek+read. With nothreads=False several worker threads serve
