@@ -14,4 +14,5 @@ debugging time.
 | [clipboard-and-dns.md](clipboard-and-dns.md) | Wayland clipboard proxy, live-DNS sync |
 | [sleep-guard.md](sleep-guard.md) | Per-session sleep inhibition, proactive suspend |
 | [macos.md](macos.md) | Plan H: single-container redaction, portability contract, pbpaste bridge |
+| [platform-matrix.md](platform-matrix.md) | Ubuntu vs macOS, row by row: what differs, how each row is proven, what still needs a Mac |
 | [terminal-and-security.md](terminal-and-security.md) | `tput`/left-arrow/daemon.log quirks, security posture, accepted risks |
