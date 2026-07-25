@@ -28,8 +28,10 @@ __pycache__/
 .venv/
 
 # tests/security-test.sh fixtures. Kept between runs on purpose: the guard rightly refuses to
-# unlink a .git/config, so they can only be cleared from the host. The two pre-refactor
-# locations are listed until the stale directories are removed host-side.
+# unlink a .git/config, so they can only be cleared from the host.
+# Current: tests/.state/ is security-test.sh's ARTIFACTS root; .sectest-probe/ is created per
+# run by the shared-assets probe. .sectest/ is the pre-refactor location — drop that line once
+# no host still has one lying around.
 tests/.state/
-.sectest/
 .sectest-probe/
+.sectest/
