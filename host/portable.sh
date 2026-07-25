@@ -114,7 +114,15 @@ hash8() {
 # shell's process group, so setsid() succeeds and $! is the new group leader, as with setsid(1).
 detach_pgrp() {
     if [ "$KIB_OS" = darwin ]; then
-        perl -MPOSIX -e 'POSIX::setsid() or exit 127; exec @ARGV or exit 127' "$@" &
+        # Close EVERY inherited descriptor above stderr before exec — closing 200/201 by number
+        # at the call site is not enough on macOS. bash 3.2 implements a redirection applied to a
+        # function call by saving the original fd to a dup ≥10 for the post-call restore, and does
+        # not set close-on-exec on it; the detached child then inherits the project lock as fd 10.
+        # A daemon that outlives kib holding that lock blocks teardown forever — and because
+        # teardown is what would kill it, it never gets killed. (`container-lifecycle.md`)
+        perl -MPOSIX -e 'POSIX::setsid() or exit 127;
+            POSIX::close($_) for 3 .. 255;
+            exec @ARGV or exit 127' "$@" &
     else
         setsid "$@" &
     fi
