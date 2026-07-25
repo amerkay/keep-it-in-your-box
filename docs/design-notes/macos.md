@@ -3,10 +3,10 @@
 Part of the Keep It in Your Box design notes (`docs/design-notes/`). See `CLAUDE.md` for the rules
 that reference this.
 
-`cc` runs on any macOS Docker engine. macOS can't host the Linux FUSE sidecar (Docker Desktop refuses shared-mount propagation and blocks unprivileged-userns FUSE — measured, `../FUTURE_TASKS.md` Gate B). Two redaction modes behind one interface (`prepare_redaction`/`verify_redaction_attach`/`teardown_redaction`; `cc` calls only those), chosen by `KIB_FUSE_MODE`:
+`kib` runs on any macOS Docker engine. macOS can't host the Linux FUSE sidecar (Docker Desktop refuses shared-mount propagation and blocks unprivileged-userns FUSE — measured, `../FUTURE_TASKS.md` Gate B). Two redaction modes behind one interface (`prepare_redaction`/`verify_redaction_attach`/`teardown_redaction`; `kib` calls only those), chosen by `KIB_FUSE_MODE`:
 
 - **`sidecar`** (Linux): unchanged, strongest isolation.
-- **`single`** (macOS; Linux under `KIB_SINGLE_CONTAINER=1` as a **test vehicle**): no sidecar; the container is created with `SYS_ADMIN`+`SETPCAP`+`/dev/fuse`+`apparmor=unconfined` and the baked `guest/entrypoint/entrypoint-fuse.sh` mounts the redacted view over the project path; the real project sits at `/cc/real` under a root-700 parent. Accepted R2 trade: capless-at-runtime, not capless-at-creation. **The cap drop happens per session in `cc`'s `docker exec`, not at PID 1** — exec gets the *container's* cap set, not PID 1's reduced bounding set, so `cc` enters as root and runs `setpriv --bounding-set -sys_admin,-setpcap gosu <uid> …` itself (`setpriv` needs `CAP_SETPCAP` effective, which a `--user` session lacks). `security-test.sh` asserts `CapBnd` lacks both, auto-detects single mode via `KIB_FUSE_INTERNAL=1`, and adjusts the two differing expectations. **Both modes must pass the full suite.**
+- **`single`** (macOS; Linux under `KIB_SINGLE_CONTAINER=1` as a **test vehicle**): no sidecar; the container is created with `SYS_ADMIN`+`SETPCAP`+`/dev/fuse`+`apparmor=unconfined` and the baked `guest/entrypoint/entrypoint-fuse.sh` mounts the redacted view over the project path; the real project sits at `/kib/real` under a root-700 parent. Accepted R2 trade: capless-at-runtime, not capless-at-creation. **The cap drop happens per session in `kib`'s `docker exec`, not at PID 1** — exec gets the *container's* cap set, not PID 1's reduced bounding set, so `kib` enters as root and runs `setpriv --bounding-set -sys_admin,-setpcap gosu <uid> …` itself (`setpriv` needs `CAP_SETPCAP` effective, which a `--user` session lacks). `security-test.sh` asserts `CapBnd` lacks both, auto-detects single mode via `KIB_FUSE_INTERNAL=1`, and adjusts the two differing expectations. **Both modes must pass the full suite.**
 
 ## Portability contract
 
@@ -14,7 +14,7 @@ Header of `host/portable.sh`, enforced by `check.sh`: host-side scripts are bash
 
 ## Clipboard and DNS on macOS
 
-macOS clipboard: `clipboard-bridge.sh` (host, POSIX sh) watches a spool dir at `/cc/clip`; the entrypoint installs `wl-paste`/`xclip` reader shims and `wl-copy`/`pbcopy` deny-marker shims; the host answers with `pbpaste`/osascript PNG extraction and **never calls `pbcopy`**. Started/stopped like the Wayland notifier including the `200>&- 201>&-`.
+macOS clipboard: `clipboard-bridge.sh` (host, POSIX sh) watches a spool dir at `/kib-clip`; the entrypoint installs `wl-paste`/`xclip` reader shims and `wl-copy`/`pbcopy` deny-marker shims; the host answers with `pbpaste`/osascript PNG extraction and **never calls `pbcopy`**. Started/stopped like the Wayland notifier including the `200>&- 201>&-`.
 
 DNS sync is skipped on macOS (the engine VM tracks the host resolver). No migration step: on a fresh Mac `ensure_claude_home` creates a minimal `~/.claude` skeleton on first launch (first login populates it); nothing to bootstrap.
 

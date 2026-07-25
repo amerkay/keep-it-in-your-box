@@ -1,8 +1,6 @@
-"""The audit gate: what the pre-commit hook used to do, run where kib already runs.
-
-kib used to copy a hook into every project's `.git/hooks/pre-commit`. It was always a
-workaround — kib's own guard refuses `core.hooksPath`, so the git-native way was closed — and
-it littered every repo the sandbox touched. The two audits now run in this host-side gate.
+"""The audit gate, run host-side where kib already runs rather than from a file written into
+every project's `.git/hooks/pre-commit` — kib's own guard refuses `core.hooksPath`, so a
+git-native hook was never an option, and a copied-in one would litter every repo touched.
 
 Two severities, and the asymmetry is deliberate:
 

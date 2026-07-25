@@ -54,8 +54,8 @@ need_python() {
 
 # ── Host-only state root ─────────────────────────────────────────
 # kib-owned scratch and logs, separate from canonical ~/.claude and from the never-mounted
-# ~/.keep-it-in-your-box/. Deliberately OUTSIDE the checkout: build.log/lock/pid used to sit in
-# the repo root, where they showed up in `git status` and in the sandbox's view of the project.
+# ~/.keep-it-in-your-box/. Deliberately OUTSIDE the checkout — inside the repo root,
+# build.log/lock/pid would show up in `git status` and in the sandbox's view of the project.
 KIB_STATE_ROOT="${KIB_STATE_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/keep-it-in-your-box}"
 KIB_BUILD_DIR="$KIB_STATE_ROOT/build"
 KIB_LOG_DIR="$KIB_STATE_ROOT/logs"

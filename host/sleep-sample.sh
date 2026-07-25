@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The sleep guard's activity metric. SOURCED by both host/sleep-guard.sh and the diagnostic
-# host/sleep-monitor.sh — never copied: the diagnostic can only judge the guard by computing
-# the identical number, and the copy it used to keep drifted. bash-3.2/BSD-clean.
+# host/sleep-monitor.sh — never copied: a copy can drift out of sync, and then the diagnostic
+# is silently judging the guard against a different number than the one it actually uses.
+# bash-3.2/BSD-clean.
 
 # "<pid> <bytes-written>" per process in one terminal's session; empty if none or if the
 # container is unreachable.

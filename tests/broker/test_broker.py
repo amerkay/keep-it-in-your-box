@@ -393,7 +393,7 @@ def test_find_auth_header_returns_none_when_absent() -> None:
     ("kv", "secret"),
     [
         ("DATAFORSEO_PASSWORD=hunter2", True),
-        ("BASIC_AUTH=x", True),  # the warner used to miss AUTH-named keys
+        ("BASIC_AUTH=x", True),  # AUTH-named keys are the case a naive matcher misses
         ("X=sk-ant-abc123", True),
         ("X=" + "a" * 24, True),
         ("REGION=us-east-1", False),

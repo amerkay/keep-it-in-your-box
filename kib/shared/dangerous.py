@@ -52,7 +52,7 @@ def git_ini_entries(text: str) -> set[tuple[str, str, str]]:
     Used by the FUSE guard, which sees the candidate file before the rename that installs
     it. Git's parser resumes scanning after `]`, so `[core]hooksPath = x` on a single line
     is a valid setting — keep the remainder of the line instead of dropping it, which is
-    the one-line form a header-only parser used to miss.
+    exactly the form a header-only parser misses.
     """
     found: set[tuple[str, str, str]] = set()
     section = ""

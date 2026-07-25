@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400" width="1200" height="400" role="img" aria-labelledby="t d">
-  <title id="t">Sandbox Comparison — cc measured against 30 open-source agent sandboxes</title>
-  <desc id="d">cc leads on 4 containment controls and is behind on 3. A scorecard shows how many of the 30 surveyed projects share each control: clipboard mediation 0, in-project secret redaction 3, host-config guard 4, default-deny egress 10.</desc>
+  <title id="t">Sandbox Comparison — kib measured against 30 open-source agent sandboxes</title>
+  <desc id="d">kib leads on 4 containment controls and is behind on 3. A scorecard shows how many of the 30 surveyed projects share each control: clipboard mediation 0, in-project secret redaction 3, host-config guard 4, default-deny egress 10.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#0d1424"/>
@@ -20,11 +20,11 @@
 
   <!-- ── left: title + verdict ─────────────────────────────────────────── -->
   <g id="title-block">
-    <text x="64" y="112" class="mono" font-size="17" letter-spacing="3.5" fill="#58a6ff">cc &#183; CLAUDE CODE DOCKER SANDBOX</text>
+    <text x="64" y="112" class="mono" font-size="17" letter-spacing="3.5" fill="#58a6ff">kib &#183; CLAUDE CODE DOCKER SANDBOX</text>
 
     <text x="61" y="188" class="sans" font-size="58" font-weight="800" fill="#e6edf3" letter-spacing="-1">Sandbox Comparison</text>
 
-    <text x="64" y="232" class="sans" font-size="22" fill="#adbac7">30 open-source agent sandboxes, measured against cc.</text>
+    <text x="64" y="232" class="sans" font-size="22" fill="#adbac7">30 open-source agent sandboxes, measured against kib.</text>
 
     <g class="mono" font-weight="700">
       <rect x="64" y="278" width="286" height="44" rx="22" fill="#0f2417" stroke="#238636" stroke-width="1.5"/>

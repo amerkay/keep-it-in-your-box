@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Credential broker: keep the real token OUT of the sandbox.
 #
-# The agent used to get ~/.claude/.credentials.json mounted read-write — under open egress a
-# compromised session could exfiltrate the account token (audit H3/H4, the widest hole). Now a
-# host-side sidecar holds it and the agent gets a base-URL env var pointing at the broker, a
-# PLACEHOLDER token, and a synthetic .credentials.json shadowing the real one: it can *use* the
-# API but never read the credential.
+# Mounting ~/.claude/.credentials.json read-write into the agent would let a compromised
+# session exfiltrate the account token under open egress (audit H3/H4, the widest hole).
+# Instead a host-side sidecar holds it and the agent gets a base-URL env var pointing at the
+# broker, a PLACEHOLDER token, and a synthetic .credentials.json shadowing the real one: it
+# can *use* the API but never read the credential.
 #
 # THE BROKERED CREDENTIAL IS STATIC — a long-lived token from `kib broker login` (wrapping
 # `claude setup-token`), host-only at ~/.keep-it-in-your-box/claude-token, mounted READ-ONLY.

@@ -171,9 +171,11 @@ What to annotate, when a `# noqa` earns its place, and the shell rules are in
 ### Editor setup (VS Code)
 
 Run VS Code **on the host**, against the real directory — not attached to the box. The sandbox's
-redacted view exists only inside the container, so the editor sees ordinary files, and the four
-extensions below drive the *same* `pyproject.toml` / `.editorconfig` the CLI and CI read. Nothing
-is configured twice.
+redacted view exists only inside the container, so the editor sees ordinary files.
+
+[`.vscode/extensions.json`](.vscode/extensions.json) and [`.vscode/settings.json`](.vscode/settings.json)
+are checked in — a fresh clone gets prompted to install, and they wire straight into the same
+`pyproject.toml` / `.editorconfig` the CLI and CI read. Nothing to configure by hand:
 
 ```bash
 code --install-extension charliermarsh.ruff
@@ -183,72 +185,11 @@ code --install-extension timonwong.shellcheck
 code --install-extension EditorConfig.EditorConfig
 ```
 
-`.vscode/settings.json` — wiring only; every actual rule still lives in the repo-root config:
-
-```jsonc
-{
-  // Ruff is formatter, linter and import sorter. importStrategy already defaults to
-  // fromEnvironment; pinned so an extension default can never quietly outrank the
-  // version in requirements-dev.txt.
-  "ruff.importStrategy": "fromEnvironment",
-  "[python]": {
-    "editor.defaultFormatter": "charliermarsh.ruff",
-    "editor.formatOnSave": true,
-    "editor.codeActionsOnSave": {
-      "source.fixAll.ruff": "explicit",
-      "source.organizeImports.ruff": "explicit"
-    }
-  },
-
-  // The extension bundles its own mypy and prefers it by default. This repo pins a
-  // newer one and runs it --strict, so the default makes the editor disagree with CI.
-  "mypy-type-checker.importStrategy": "fromEnvironment",
-  // Report on the whole workspace, not just open files — matches `./dev.sh lint`.
-  "mypy-type-checker.reportingScope": "workspace",
-
-  // shfmt reads .editorconfig only when passed no style flags, so nothing is passed.
-  // bin/kib and the three guest shims are shell scripts with no extension.
-  "[shellscript]": {
-    "editor.defaultFormatter": "mkhl.shfmt",
-    "editor.formatOnSave": true
-  },
-  "files.associations": {
-    "kib": "shellscript",
-    "fuse": "shellscript",
-    "wayland-guard": "shellscript",
-    "broker": "shellscript"
-  },
-
-  // -x follows `source`d files. The host/ units are sourced by bin/kib and share its
-  // globals, so without it half of each file reads as undefined. Same flag the check
-  // suite uses.
-  "shellcheck.customArgs": ["-x"],
-
-  // The EditorConfig extension implements indent, EOL and charset but not
-  // max_line_length — the one setting that has to be restated here.
-  "editor.rulers": [100]
-}
-```
-
-`.vscode/extensions.json`, so a fresh clone gets prompted:
-
-```json
-{
-  "recommendations": [
-    "charliermarsh.ruff",
-    "ms-python.mypy-type-checker",
-    "mkhl.shfmt",
-    "timonwong.shellcheck",
-    "EditorConfig.EditorConfig"
-  ]
-}
-```
-
 Four things that will bite otherwise:
 
-- **`.vscode/` is write-denied from inside the box** — it's on the host-executed-config guard list,
-  so create these files from a host terminal. An agent in the sandbox getting EACCES here is the
-  guard working, not a bug.
+- **`.vscode/` is write-denied from inside the box** — it's on the host-executed-config guard list.
+  An agent in the sandbox getting EACCES if it edits these files is the guard working, not a bug;
+  edit them from a host terminal.
 - **Point VS Code at `.venv`** (`Python: Select Interpreter`). `fromEnvironment` resolves ruff and
   mypy through the selected interpreter; without it both fall back to bundled versions and you get
   diagnostics CI doesn't have — or miss ones it does.

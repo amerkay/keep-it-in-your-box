@@ -166,7 +166,7 @@ resolves_to_nothing "C1/C4 none of it resolves" "$REPO" core.hooksPath
 resolves_to_nothing "    core.fsmonitor resolves to nothing" "$REPO" core.fsmonitor
 
 # C3: the write IS the rename — git never edits config in place, so the validator runs there.
-# The inline form is the one a header-only parser used to miss.
+# The inline form is the one a header-only parser misses.
 config_rename() { # config_rename <repo> <config body>
     local tmp="$1/.git/cfg.candidate"
     printf '%s\n' "$2" >"$tmp" 2>/dev/null || return 1

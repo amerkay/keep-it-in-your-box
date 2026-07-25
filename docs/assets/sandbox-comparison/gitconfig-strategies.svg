@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" width="1200" height="600" role="img" aria-labelledby="t2 d2">
   <title id="t2">Four strategies for the .git/config problem</title>
-  <desc id="d2">How six sandboxes handle a git config file the host will later execute. cc validates the content, allowing git remote add while refusing core.hooksPath. fence, sandbox-runtime, aicontainer and cplt on macOS block all writes, which breaks git remote add. yoloAI leaves the file writable but hardens every git invocation with core.hooksPath=/dev/null. cplt on Linux leaves it writable by design, and its own docs concede this leaves core.hooksPath open.</desc>
+  <desc id="d2">How six sandboxes handle a git config file the host will later execute. kib validates the content, allowing git remote add while refusing core.hooksPath. fence, sandbox-runtime, aicontainer and cplt on macOS block all writes, which breaks git remote add. yoloAI leaves the file writable but hardens every git invocation with core.hooksPath=/dev/null. cplt on Linux leaves it writable by design, and its own docs concede this leaves core.hooksPath open.</desc>
   <defs>
     <linearGradient id="bgg" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#0d1424"/>
@@ -28,7 +28,7 @@
     <rect x="64" y="190" width="5" height="88" rx="2.5" fill="#3fb950"/>
     <text x="96" y="224" class="mono" font-size="19" font-weight="700" fill="#56d364">VALIDATE</text>
     <text x="96" y="256" class="sans" font-size="19" fill="#8b949e">Read the bytes on rename. Allow <tspan class="mono" fill="#adbac7">remote add</tspan>, refuse <tspan class="mono" fill="#adbac7">core.hooksPath</tspan>.</text>
-    <text x="1108" y="224" class="mono" font-size="21" font-weight="700" fill="#e6edf3" text-anchor="end">cc</text>
+    <text x="1108" y="224" class="mono" font-size="21" font-weight="700" fill="#e6edf3" text-anchor="end">kib</text>
     <text x="1108" y="254" class="sans" font-size="17" fill="#6e7681" text-anchor="end">git keeps working</text>
   </g>
 

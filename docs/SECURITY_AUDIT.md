@@ -1,7 +1,7 @@
 <!-- Hero: rendered from assets/security-audit/hero.svg -->
 <p align="center">
   <img src="assets/security-audit/hero.svg" width="100%"
-       alt="Security Audit of the cc Claude Code Docker sandbox. Six host-RCE paths were found by live exploitation and all six are now closed; zero container escapes. A terminal pane shows each exploit re-run against the patched guard and refused with EACCES." />
+       alt="Security Audit of the kib Claude Code Docker sandbox. Six host-RCE paths were found by live exploitation and all six are now closed; zero container escapes. A terminal pane shows each exploit re-run against the patched guard and refused with EACCES." />
 </p>
 
 <p align="center">
@@ -146,7 +146,7 @@ Security-relevant work, oldest first. Everything before the audit built the boun
 
 ## Prior art & references
 
-These are not novel bug classes — they are the **known** AI-coding-agent boundary failures, reproduced against `cc`.
+These are not novel bug classes — they are the **known** AI-coding-agent boundary failures, reproduced against `kib`.
 
 - **Justin Steven (2022)** — *buried bare repos and `fsmonitor` abuses*, the foundational git-config-indirection advisory (C1, H1) · [github.com/justinsteven/advisories](https://github.com/justinsteven/advisories/blob/main/2022_git_buried_bare_repos_and_fsmonitor_various_abuses.md)
 - **Pillar Security** — *The Week of Sandbox Escapes* (Cursor / Codex / Gemini CLI / Antigravity), the exact "sandboxed writer hands executable config to an unsandboxed reader" class (C1–C4, H4) · [pillar.security](https://www.pillar.security/blog/the-week-of-sandbox-escapes)

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400" width="1200" height="400" role="img" aria-labelledby="t d">
-  <title id="t">Head to head — cc measured against five agent sandboxes</title>
-  <desc id="d">cc compared with fence, sandbox-runtime, cplt, yoloAI and aicontainer. Of those five: none content-validate .git/config, none mediate the clipboard read versus write, two default-deny egress, and two broker credentials. cc has the first two and lacks the last two.</desc>
+  <title id="t">Head to head — kib measured against five agent sandboxes</title>
+  <desc id="d">kib compared with fence, sandbox-runtime, cplt, yoloAI and aicontainer. Of those five: none content-validate .git/config, none mediate the clipboard read versus write, two default-deny egress, and two broker credentials. kib has the first two and lacks the last two.</desc>
   <defs>
     <linearGradient id="bgh" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#0d1424"/>
@@ -20,7 +20,7 @@
 
   <!-- ── left: title + verdict ─────────────────────────────────────────── -->
   <g>
-    <text x="64" y="108" class="mono" font-size="17" letter-spacing="3.5" fill="#58a6ff">cc &#183; HEAD-TO-HEAD SECURITY REVIEW</text>
+    <text x="64" y="108" class="mono" font-size="17" letter-spacing="3.5" fill="#58a6ff">kib &#183; HEAD-TO-HEAD SECURITY REVIEW</text>
 
     <text x="61" y="172" class="sans" font-size="56" font-weight="800" fill="#e6edf3" letter-spacing="-1">Six sandboxes,</text>
     <text x="61" y="226" class="sans" font-size="56" font-weight="800" fill="#e6edf3" letter-spacing="-1">side by side</text>

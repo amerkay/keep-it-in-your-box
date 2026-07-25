@@ -1,10 +1,10 @@
 <p align="center">
   <img src="../assets/sandbox-comparison/hero.svg" width="100%"
-       alt="Sandbox Comparison — cc measured against 30 open-source agent sandboxes. cc leads on 4 containment controls and is behind on 3. Of the 30 other projects, 0 mediate the clipboard, 3 redact in-project secrets, 4 guard host-executed config, and 10 enforce default-deny egress.">
+       alt="Sandbox Comparison — kib measured against 30 open-source agent sandboxes. kib leads on 4 containment controls and is behind on 3. Of the 30 other projects, 0 mediate the clipboard, 3 redact in-project secrets, 4 guard host-executed config, and 10 enforce default-deny egress.">
 </p>
 
 A survey of open-source projects that sandbox AI coding agents, compared against this
-repository's `cc` on **security and containment**. Compiled 2026-07-22.
+repository's `kib` on **security and containment**. Compiled 2026-07-22.
 
 **Every cell comes from a project's own documentation.** Nothing is inferred from a
 project's category, and `❓` means *"the docs don't say"* — never *"the project lacks it."*
@@ -13,38 +13,38 @@ project's category, and `❓` means *"the docs don't say"* — never *"the proje
 
 ## The finding
 
-`cc` is unusually strong on the threat class the industry only just started naming — files
+`kib` is unusually strong on the threat class the industry only just started naming — files
 the agent writes that the **host** executes later — and unusually weak on the one the field
 has already standardised: **egress control and credential exposure**.
 
 <p align="center">
   <img src="../assets/sandbox-comparison/control-rarity.svg" width="100%"
-       alt="Bar chart of how many of 30 surveyed sandboxes implement each control. Clipboard mediation 0 of 30, cc has it. In-project secret redaction 3, cc has it. Host-executed config guard 4, cc has it. Credential brokering 5, cc lacks it. VM-class boundary 6, cc lacks it. Default-deny egress 10, cc lacks it. Security regression suite 13, cc has it.">
+       alt="Bar chart of how many of 30 surveyed sandboxes implement each control. Clipboard mediation 0 of 30, kib has it. In-project secret redaction 3, kib has it. Host-executed config guard 4, kib has it. Credential brokering 5, kib lacks it. VM-class boundary 6, kib lacks it. Default-deny egress 10, kib lacks it. Security regression suite 13, kib has it.">
 </p>
 
-> **If you change one thing in `cc`, change credential handling.** Five surveyed projects
+> **If you change one thing in `kib`, change credential handling.** Five surveyed projects
 > keep the API token host-side entirely and hand the agent a placeholder plus a rewritten
-> base URL. That retires `cc`'s accepted risk H3/H4 — which currently reasons that the
+> base URL. That retires `kib`'s accepted risk H3/H4 — which currently reasons that the
 > token "cannot be made unreadable — Claude needs it."
 
 ---
 
-## Where `cc` leads
+## Where `kib` leads
 
 ### 1. Host-executed config guard — validated two days before this survey
 
 On **2026-07-20**, Pillar Security published
 ["The Week of Sandbox Escapes"](https://www.pillar.security/blog/the-week-of-sandbox-escapes):
 seven attack chains in which the agent **stays inside its sandbox** but writes a file the
-host later executes. That is `cc`'s founding thesis, independently confirmed.
+host later executes. That is `kib`'s founding thesis, independently confirmed.
 
-| Pillar attack chain | Product | Status | `cc` control |
+| Pillar attack chain | Product | Status | `kib` control |
 |---|---|---|---|
 | "Git directories do not have to be called `.git`" — fsmonitor indirection | Cursor | patched 3.0.0 | `_is_git_config()` detects a git dir by **layout** (`HEAD`+`objects`+`refs`), never by name |
 | "The hook was already in the workspace" — `.claude` hook config | Cursor | CVE-2026-48124 | `validate_shared_settings` refuses inline `hooks[].command` |
 | "A time bomb in `.vscode`" — `tasks.json` | Antigravity | **unpatched** | `guest/policy/global.kibignore` `[protect]` — writes refused |
 | "One Docker socket to rule them all" | Codex, Cursor, Gemini CLI | GHSA-v4xv-rqh3-w9mc | no socket mounted |
-| "GitPwned: allowlist to RCE" | Codex CLI | patched v0.95.0 | n/a — `cc` has no command allowlist to bypass |
+| "GitPwned: allowlist to RCE" | Codex CLI | patched v0.95.0 | n/a — `kib` has no command allowlist to bypass |
 
 Only **4 of 30** projects guard host-executed config at all:
 [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) (the most
@@ -52,8 +52,8 @@ complete path enumeration in the field), [cplt](https://github.com/navikt/cplt),
 [agent-seatbelt](https://github.com/CJHwong/agent-seatbelt), and
 [aicontainer](https://github.com/stefanoginella/aicontainer).
 
-**None of them content-validates `.git/config`.** All four deny writes outright — which `cc`
-deliberately rejected because it breaks `git remote add`. `cc` appears alone in validating
+**None of them content-validates `.git/config`.** All four deny writes outright — which `kib`
+deliberately rejected because it breaks `git remote add`. `kib` appears alone in validating
 at the *rename*, diffing against the current file, following `include`/`includeIf`
 indirection, and handling `.git/modules/` and `.git/worktrees/` structurally.
 
@@ -61,7 +61,7 @@ indirection, and handling `.git/modules/` and `.git/worktrees/` structurally.
 
 | Project | Mechanism | Enforced below the agent? | On by default? |
 |---|---|---|---|
-| **`cc`** | FUSE passthrough — stub on read, `EACCES` on write | ✅ | ✅ |
+| **`kib`** | FUSE passthrough — stub on read, `EACCES` on write | ✅ | ✅ |
 | [cplt](https://github.com/navikt/cplt) | Landlock blocks `.env*`, `.pem`, `.key` | ✅ | ✅ |
 | [aicontainer](https://github.com/stefanoginella/aicontainer) | `PreToolUse` hook blocks `.env*` reads | ❌ agent-level | ✅ |
 | [yoloai](https://github.com/kstenerud/yoloai) | `:copy` honours `.gitignore` | ✅ by omission | ✅ |
@@ -69,13 +69,13 @@ indirection, and handling `.git/modules/` and `.git/worktrees/` structurally.
 | [yolobox](https://github.com/finbarr/yolobox) | `--exclude ".env*"` | ✅ | ❌ opt-in |
 | [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) | `denyRead` config | ✅ | ❌ opt-in |
 
-`cc` and `cplt` are the only two that are kernel/FS-enforced, on by default, **and** cover
+`kib` and `cplt` are the only two that are kernel/FS-enforced, on by default, **and** cover
 files created after launch — which a launch-time bind mask structurally cannot do.
 
 ### 3. Clipboard mediation — no other implementation found
 
 **0 of 30.** [agent-safehouse](https://github.com/eugene1g/agent-safehouse) has clipboard
-entries in its policy tests, but that is a *block*. `cc`'s Wayland proxy passing reads while
+entries in its policy tests, but that is a *block*. `kib`'s Wayland proxy passing reads while
 refusing writes appears to be unique. Searches surfaced the underlying attack — bracketed-paste
 truncation via `ESC[201~`, pastejacking — but no other agent sandbox mitigating it.
 
@@ -83,14 +83,14 @@ truncation via `ESC[201~`, pastejacking — but no other agent sandbox mitigatin
 
 Nearly every container project mounts `~/.claude`, several read-write, and only
 `aicontainer` reasons about one project's session poisoning **every other project's next
-session**. `cc`'s read-only asset mounts + per-project merge farm + host-side
+session**. `kib`'s read-only asset mounts + per-project merge farm + host-side
 `settings.json` validation is the most developed treatment found.
 
 ---
 
-## Where `cc` is behind
+## Where `kib` is behind
 
-| Gap | The field | `cc` today |
+| Gap | The field | `kib` today |
 |---|---|---|
 | **Egress** | 10 of 30 enforce default-deny | Open — documented accepted risk |
 | **Credentials** | 5 broker the token host-side, so the agent never holds it | Shared OAuth token readable on disk (H3/H4) |
@@ -115,7 +115,7 @@ untrusted repos that fetch from arbitrary registries. **The credential position 
 
 | Project | Kernel boundary | Egress control | Credential exposure | Host-config guard | In-project redaction | Clipboard | Shared-config guard | Hardening | Docker socket | Multi-session | Security tests | Platforms |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| **`cc` (baseline)** | ❌ shared kernel | ❌ **open (accepted risk)** | ⚠️ shared OAuth token readable | ✅ **FUSE + structural git detection + content-validated `.git/config`** | ✅ **FUSE stub-on-read, covers mid-session files** | ✅ **Wayland proxy, writes refused** | ✅ RO mounts + host-side validator | ✅ cap-drop ALL, no-new-privs, seccomp, AppArmor | ❌ none | ✅ 1 container/project, N terminals | ✅ `security-test.sh`, 8 sections | ⚠️ **Linux only** |
+| **`kib` (baseline)** | ❌ shared kernel | ❌ **open (accepted risk)** | ⚠️ shared OAuth token readable | ✅ **FUSE + structural git detection + content-validated `.git/config`** | ✅ **FUSE stub-on-read, covers mid-session files** | ✅ **Wayland proxy, writes refused** | ✅ RO mounts + host-side validator | ✅ cap-drop ALL, no-new-privs, seccomp, AppArmor | ❌ none | ✅ 1 container/project, N terminals | ✅ `security-test.sh`, 8 sections | ⚠️ **Linux only** |
 | [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) | ❌ OS sandbox | ✅ deny-all + allowlist proxy | ⚠️ opt-in `denyRead` | ✅ mandatory deny-write: `.git/config`, `.git/hooks`, `.vscode`, `.idea`, shell rc, `.mcp.json` | ⚠️ opt-in | ❓ | n/a | ✅ seccomp BPF, nested PID ns, WFP fence | n/a | ❓ | ✅ mandatory-deny-paths suite | macOS, Linux, Win (alpha) |
 | [microsandbox](https://github.com/superradcompany/microsandbox) | ✅ microVM | ✅ deny-default, DNS+TCP, airgap | ✅ **keys never enter VM** | ❓ | ❓ | ❓ | n/a | ✅ hardware-level VM | ❓ | ⚠️ named sandboxes | ✅ domain/port/secret tests | Linux, macOS, Windows |
 | [matchlock](https://github.com/jingkaihe/matchlock) | ✅ microVM | ✅ deny-all, nftables + MITM | ✅ **in-flight injection; VM sees placeholder** | ❓ | ⚠️ VFS hook rules, no default | ❓ | n/a | ✅ VM + gVisor netstack | ❓ | ⚠️ `exec <vm-id>` | ❓ tests exist, not claimed | Linux (KVM), macOS AS |
@@ -153,7 +153,7 @@ untrusted repos that fetch from arbitrary registries. **The credential position 
 
 | # | Project | Stars | Contrib. | Created | Last activity | License | Primitive |
 |---|---|---:|---:|---|---|---|---|
-| — | **`cc` (this repo)** | *unpublished* | 1 | — | 2026-07-22 | none | Docker, long-lived per project |
+| — | **`kib` (this repo)** | *unpublished* | 1 | — | 2026-07-22 | none | Docker, long-lived per project |
 | 1 | [microsandbox](https://github.com/superradcompany/microsandbox) | 6995 | ≥30 | 2024-10-03 | 2026-07-22 | Apache-2.0 | microVM (libkrun) |
 | 2 | [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) | 4733 | 31 | 2025-10-20 | 2026-07-22 | Apache-2.0 | Seatbelt / bubblewrap |
 | 3 | [container-use](https://github.com/dagger/container-use) | 3917 | ≥30 | 2025-05-23 | 2026-06-12 | Apache-2.0 | Container + git branch |
@@ -194,12 +194,12 @@ untrusted repos that fetch from arbitrary registries. **The credential position 
 
 ## Read these four
 
-| Project | Why it matters to `cc` |
+| Project | Why it matters to `kib` |
 |---|---|
-| [navikt/cplt](https://github.com/navikt/cplt) | **Closest philosophical match.** The same two rare controls as `cc` — host-config guard *and* in-project secret blocking — but kernel-enforced via Landlock instead of FUSE, plus the egress allowlist `cc` lacks. Organisationally backed (NAV, Norway), 10 contributors. |
+| [navikt/cplt](https://github.com/navikt/cplt) | **Closest philosophical match.** The same two rare controls as `kib` — host-config guard *and* in-project secret blocking — but kernel-enforced via Landlock instead of FUSE, plus the egress allowlist `kib` lacks. Organisationally backed (NAV, Norway), 10 contributors. |
 | [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) | Anthropic's own mandatory deny-write list is the most complete enumeration of host-executed config paths in the field. Worth diffing against `guest/policy/global.kibignore`. |
 | [aicontainer](https://github.com/stefanoginella/aicontainer) | The only other **container** project treating `.git/config`, `.git/hooks` and cross-project config as first-class. Also ships a digest-pinned Docker socket proxy. |
-| [yoloai](https://github.com/kstenerud/yoloai) | Reference implementation of **credential brokering** — the concrete fix for `cc`'s accepted risk H3/H4. |
+| [yoloai](https://github.com/kstenerud/yoloai) | Reference implementation of **credential brokering** — the concrete fix for `kib`'s accepted risk H3/H4. |
 
 ---
 

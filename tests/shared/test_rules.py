@@ -1,9 +1,8 @@
 """The single `.kibignore` implementation — matcher AND gitignore emitter.
 
 This suite carries the weight for three consumers at once: the FUSE guard, the launch-time
-audit gate, and the `.gitignore` sync. They used to be three separate implementations, so
-every case here is one that could previously have been true in one place and false in
-another.
+audit gate, and the `.gitignore` sync. One ruleset, so a case that passes in one context
+can't silently diverge in another.
 """
 
 from collections.abc import Callable

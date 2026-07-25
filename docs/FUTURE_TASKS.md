@@ -20,11 +20,11 @@ open questions.
 |---|---|---|
 | **CAP** | The **agent** container runs `cap-drop=ALL`. A quarantined sidecar the agent cannot reach *may* hold `CAP_SYS_ADMIN`. | **Settled on Linux** (sidecar, verified). **On macOS it is the open decision** — held only via Colima (Plan A), or relaxed to *capless-at-runtime* with a `SYS_ADMIN`-at-creation window if Colima is refused (Plans H/U). See "macOS: the A/H/U decision". |
 | **OS** | Works on **Ubuntu and macOS** from one design. | **Verified 2026-07-23.** Ubuntu native. macOS in-place FUSE is a *measured trade*: `cap-drop=ALL` needs Colima; no-Colima needs a `SYS_ADMIN` cap. Both proven; neither avoidable. |
-| **POST** | Redaction covers files **created after launch**, not only files present at start. | **Settled.** Non-negotiable — it is the row where `cc` leads the field. |
+| **POST** | Redaction covers files **created after launch**, not only files present at start. | **Settled.** Non-negotiable — it is the row where `kib` leads the field. |
 | **LIVE** | Preserves the **live, same-absolute-path** project mount Claude's path-keyed configs depend on. | **Settled.** A copy-and-apply model is a different product, not a fix to this one. |
 
 **The decisive consequence.** `CAP` eliminates every in-agent mount mechanism (FUSE-in-container,
-overlayfs) outright, and forces the design *toward* the sidecar `cc` already has — the sidecar is the
+overlayfs) outright, and forces the design *toward* the sidecar `kib` already has — the sidecar is the
 thing that keeps the agent capless by holding the cap somewhere the agent can't touch. **You cannot
 have both `cap-drop=ALL` and the simpler single-container topology.** The `:rslave` propagation,
 `fuse_mounted()`, the unmount-ordering rule and the refuse-to-delete-a-live-mountpoint guard are the
@@ -105,11 +105,11 @@ So the broker cannot "log in" for the agent, and the access token expires in hou
 which every field implementation uses — is **the sandbox never logs in**:
 
 - `/login` happens **once, host-side, by a human in a browser.** The result is the existing shared
-  `~/.claude-shared/.credentials.json` (already how `cc` stores it, via `CLAUDE_SECURESTORAGE_CONFIG_DIR`).
+  `~/.claude-shared/.credentials.json` (already how `kib` stores it, via `CLAUDE_SECURESTORAGE_CONFIG_DIR`).
 - The broker **owns refresh**: it holds the refresh token, watches expiry, and refreshes against the
   OAuth endpoint itself, updating its own copy. The agent keeps sending its placeholder; the broker
   always injects a currently-valid access token.
-- The change to `cc`: **stop mounting `.credentials.json` into the container.** The broker reads it
+- The change to `kib`: **stop mounting `.credentials.json` into the container.** The broker reads it
   host-side and injects on egress. `/login` inside a sandbox is disabled with a message pointing the
   user at the host.
 - **The placeholder is not "no credential."** Claude Code parses and expiry-checks `.credentials.json`
@@ -117,7 +117,7 @@ which every field implementation uses — is **the sandbox never logs in**:
   well-formed, non-expired *fake* token — exactly sandbox-runtime's `fake_value_<uuid4>` shape.
 
 **Tension to resolve:** `validate_shared_settings` currently refuses `env.ANTHROPIC_BASE_URL` as a
-poisoning vector. `cc` setting it is fine; the rule needs a carve-out distinguishing "cc set this"
+poisoning vector. `kib` setting it is fine; the rule needs a carve-out distinguishing "kib set this"
 from "a repo set this."
 
 **Contingent on Gate A** — does Claude Code honour `ANTHROPIC_BASE_URL` in subscription/OAuth mode? If
@@ -151,7 +151,7 @@ a CA in the container trust store. Passes all gates; strictly more machinery tha
 >    holding the credential; the agent reaches it over the broker net at `http://<id>:<port>`. Trade: the
 >    MCP server's own code runs in that sidecar (isolated from the agent, but trusted).
 > 3. **Unified UX:** `kib broker login <name>` / `--logout <name>` / `--status` (registry-driven, generalizing
->    `--broker-login`) add any credential the Anthropic-token way — cc fails-hard on a missing *required*
+>    `--broker-login`) add any credential the Anthropic-token way — kib fails-hard on a missing *required*
 >    cred and prints the exact fix. See CLAUDE.md "Credential broker" for the delivery-mode reference.
 >
 > The design record below stands as written.
@@ -194,7 +194,7 @@ header. Reusable for any future header-authed remote MCP, which is why it is wor
 | Broker sidecar (separate namespace) | Yes, in memory/env |
 | Host | Yes, `600` file / keychain, **not** mounted into the agent |
 
-`cc` reads the host-only file and passes it to the **broker's** env at creation, never to the agent
+`kib` reads the host-only file and passes it to the **broker's** env at creation, never to the agent
 container. A fully compromised agent can *use* the MCP through the broker but **cannot read the
 credential** — the win holds with egress wide open, same as C1.
 
@@ -225,7 +225,7 @@ Delivery of that plugin uses the friendly `--unlock-shared` path below.
 > **BUILT:** `warn_inline_mcp_secrets` runs on every launch (create + attach) and warns — never blocks —
 > when an MCP entry in the project `.mcp.json` or this session's `.claude.json` carries an inline auth
 > header or a secret-shaped `env` value, naming the server + reason and **never printing the value**.
-> Entries cc itself brokered (`_kibBroker`) are skipped. Companion `kib mcp adopt <name>` migrates an
+> Entries kib itself brokered (`_kibBroker`) are skipped. Companion `kib mcp adopt <name>` migrates an
 > inline remote-MCP credential into the broker: it stores the secret host-side (mode 600), strips it from
 > the config, and lets the next launch inject a header-free brokered entry. It refuses a local/stdio MCP
 > (needs a `hosted_mcp` row) or an unknown upstream. The heuristic (open question below) is intentionally
@@ -234,7 +234,7 @@ Delivery of that plugin uses the friendly `--unlock-shared` path below.
 > **EXTENDED 2026-07-24 — detection → PREVENTION (`intercept_mcp_add`):** the detector alone can't stop
 > the common leak. A user who won't learn `kib mcp add`/`--mcp-adopt` takes a vendor's own
 > `claude mcp add … --header "Authorization: …" …` line and swaps `claude`→`cc`; run verbatim, that puts
-> the raw secret in the **container's argv** before any warning fires — nothing in-box can undo it. So `cc`
+> the raw secret in the **container's argv** before any warning fires — nothing in-box can undo it. So `kib`
 > now intercepts `[claude] mcp add|add-json` **host-side, before the `docker exec`**: the remote `--header`
 > form is **auto-brokered** (secret peeled off, stored mode-600, header-free route written — never enters
 > the box), the local/stdio `--env`-secret form is **blocked** (opt-out `KIB_ALLOW_INLINE_MCP_SECRET=1`), and
@@ -242,7 +242,7 @@ Delivery of that plugin uses the friendly `--unlock-shared` path below.
 > other way (an edited config, a teammate's commit). This makes C4 a *preventer* for the swap path, not only
 > a detector.
 
-A host-side scan in `cc` at launch — sibling to `validate_shared_settings` — that reads the
+A host-side scan in `kib` at launch — sibling to `validate_shared_settings` — that reads the
 container-visible config about to be mounted and **warns** when a **literal** credential is present,
 recommending migration to the C3 broker. **Advisory, not blocking** (decided): it names the file/field
 and the fix, then continues — consistent with the don't-break-workflows stance, and it is a *detector*
@@ -273,7 +273,7 @@ the **shared/all-projects** install, which writes to the `:ro` `~/.claude-shared
 raw `EACCES`. Intercept that specific failure and print the **existing** unlock-shared block (already in
 CLAUDE.md's EACCES message) — "to install a plugin for EVERY project, close every session and relaunch
 with `kib unlock-shared`" — so the flag is discoverable rather than folklore. No new command surface
-(decided: friendly error, not a `cc plugin add` subcommand); per-project install stays silent and
+(decided: friendly error, not a `kib plugin add` subcommand); per-project install stays silent and
 working. This is the delivery on-ramp for C3's secret-free broker plugin.
 
 ### Rejected baseline
@@ -356,11 +356,11 @@ Open egress (today) — the accepted-risk position. E1 makes an opt-in available
 ## G3 — Redaction topology and macOS
 
 **Baseline today:** `kib/guest/fuse.py` runs in a **separate sidecar container** (`--cap-add=SYS_ADMIN
---device /dev/fuse`, as the host uid). It mounts the redacted view at `/tmp/cc-fuse.<hash>/mnt`; the
+--device /dev/fuse`, as the host uid). It mounts the redacted view at `/tmp/kib-fuse.<hash>/mnt`; the
 **main container bind-mounts that back over `$PWD` with `:rslave`.** That two-container mount hand-off
 is the source of the `/tmp`-shared precondition, the `:rslave` propagation, `fuse_mounted()`, the
 unmount-ordering rule and the never-`rm`-a-live-mountpoint guard — and it is the only thing standing
-between `cc` and macOS.
+between `kib` and macOS.
 
 ### R1 · Keep the quarantined FUSE sidecar, extend it to macOS ★★★★★ — **PICK**
 
@@ -400,18 +400,18 @@ Desktop and **does** on Colima:
 the two-container sidecar (propagation refused, above) *and* a single-container unprivileged user
 namespace (kernel refuses the `uid_map` write — `unshare: write failed /proc/self/uid_map: Operation
 not permitted`; LinuxKit locks down unprivileged userns). So on macOS, in-place FUSE with a truly
-capless agent-at-creation exists **only inside a real Linux VM**. That is **Plan A**: `cc`'s existing
+capless agent-at-creation exists **only inside a real Linux VM**. That is **Plan A**: `kib`'s existing
 sidecar, hosted by Colima (or Lima/Rancher — same VM class), adding no macOS-specific code and no second
 FUSE backend. It is not "adding a VM": a Mac already runs a Linux VM for Docker at all — Colima
 *replaces* Desktop's VM with one whose root is shared. Its only cost is the Colima dependency, which is
 the whole subject of the A/H/U decision at the end of this section.
 
-**No new flags needed.** `cc`'s existing sidecar config (the `host/` units) is exactly what the test used and
+**No new flags needed.** `kib`'s existing sidecar config (the `host/` units) is exactly what the test used and
 what works on Colima: `--cap-drop=ALL --cap-add=SYS_ADMIN --device /dev/fuse --security-opt
 apparmor=unconfined`. The AppArmor exception is load-bearing on any AppArmor-enforcing host —
 `docker-default` denies `mount` even with `CAP_SYS_ADMIN`, which is why a bare `--cap-add SYS_ADMIN`
 test first failed with `fuse: mount failed: Permission denied`. Colima's Ubuntu VM enforces AppArmor
-exactly like a native Ubuntu host, so the same exception cc already ships covers both.
+exactly like a native Ubuntu host, so the same exception kib already ships covers both.
 
 **Honest cost, restated:** the propagation complexity does **not** go away under this plan. It is the
 price of `cap-drop=ALL`. The "delete the sidecar" simplification was only ever purchasable with
@@ -455,7 +455,7 @@ Needs `CAP_SYS_ADMIN` for the mount (fails CAP), *and* the mount is composed at 
 
 The Docker daemon does the bind, so the agent stays `cap-drop=ALL` and it is portable — but a bind
 mount **cannot cover a file that does not exist yet**. sandbox-runtime documents this against itself
-(*"mandatory deny paths only block files that already exist"*). Fails POST, the row where `cc` leads.
+(*"mandatory deny paths only block files that already exist"*). Fails POST, the row where `kib` leads.
 
 ### R6 · Copy-in / copy-out (yoloAI `:copy`) — **DISQUALIFIED (LIVE)**
 
@@ -499,7 +499,7 @@ Evidence is in "Verification gates". This is the last open architectural decisio
 **Why third at all.** It is the one gap where the field agrees the control is *not a boundary anyway*
 (fence: *"assume determined attackers may escape via kernel/OS vulnerabilities"*; Claude Code's docs:
 *"Sandboxing reduces risk but is not a complete isolation boundary"*). A microVM also closes **none** of
-`cc`'s documented risks — those cross through files the host executes later, orthogonal to hardware virt.
+`kib`'s documented risks — those cross through files the host executes later, orthogonal to hardware virt.
 
 ### K1 · Tighter custom seccomp profile ★★★☆☆ — **PICK (now)**
 
@@ -511,7 +511,7 @@ existing boundary rather than moving it — near-zero risk. Passes every gate.
 
 One line in `docker run`. Collapses the host syscall surface substantially, no KVM, no guest kernel.
 Three load-bearing caveats: **VERIFY** `runsc`'s FUSE support is incomplete and gated — if it can't
-service `/dev/fuse` the way R1 needs, gVisor is dead for `cc`; yoloAI documents Claude Code hanging in
+service `/dev/fuse` the way R1 needs, gVisor is dead for `kib`; yoloAI documents Claude Code hanging in
 `epoll_pwait` under gVisor on macOS; and runsc **ignores iptables** (a reason E2 is a no-op there, and a
 reason to prefer the E1 proxy). Linux-only, so it fails OS as a *unified* answer — hence opt-in, not
 default, and sequenced **after** R1 so the FUSE-compat check is a five-minute test against a working
@@ -568,29 +568,29 @@ The macOS gate is settled: **Docker Desktop cannot host the sidecar; Colima can.
 #   findmnt on the VM root -> "private"
 docker run --rm --privileged --pid=host alpine nsenter -t 1 -m -- findmnt -no PROPAGATION /
 #   two containers sharing a macOS-path medium:
-mkdir -p /tmp/ccprobe
-docker run -d --name ccprobe-src --privileged \
-  --mount type=bind,src=/tmp/ccprobe,dst=/tmp/ccprobe,bind-propagation=rshared \
-  alpine sh -c 'mkdir -p /tmp/ccprobe/mnt && mount -t tmpfs none /tmp/ccprobe/mnt && sleep 300'
-#   -> "path /host_mnt/private/tmp/ccprobe ... is not a shared mount"  (DD cannot; structural)
-docker rm -f ccprobe-src
+mkdir -p /tmp/kibprobe
+docker run -d --name kibprobe-src --privileged \
+  --mount type=bind,src=/tmp/kibprobe,dst=/tmp/kibprobe,bind-propagation=rshared \
+  alpine sh -c 'mkdir -p /tmp/kibprobe/mnt && mount -t tmpfs none /tmp/kibprobe/mnt && sleep 300'
+#   -> "path /host_mnt/private/tmp/kibprobe ... is not a shared mount"  (DD cannot; structural)
+docker rm -f kibprobe-src
 
 # Colima context: shared root + real cross-container propagation + real FUSE mount.
 colima start ; docker context use colima
 docker run --rm --privileged --pid=host alpine nsenter -t 1 -m -- findmnt -no PROPAGATION /   # -> shared
-docker run -d --name ccprobe-src --privileged \
-  --mount type=bind,src=/var/ccprobe,dst=/var/ccprobe,bind-propagation=rshared \
-  alpine sh -c 'mkdir -p /var/ccprobe/mnt && mount -t tmpfs none /var/ccprobe/mnt && echo hello > /var/ccprobe/mnt/marker && sleep 300'
-docker run --rm --mount type=bind,src=/var/ccprobe,dst=/work,bind-propagation=rslave \
+docker run -d --name kibprobe-src --privileged \
+  --mount type=bind,src=/var/kibprobe,dst=/var/kibprobe,bind-propagation=rshared \
+  alpine sh -c 'mkdir -p /var/kibprobe/mnt && mount -t tmpfs none /var/kibprobe/mnt && echo hello > /var/kibprobe/mnt/marker && sleep 300'
+docker run --rm --mount type=bind,src=/var/kibprobe,dst=/work,bind-propagation=rslave \
   alpine sh -c 'cat /work/mnt/marker && echo COLIMA-PROPAGATION-OK'   # -> hello / COLIMA-PROPAGATION-OK
-docker rm -f ccprobe-src
-# FUSE mount with cc's actual sidecar flags (apparmor exception is required — docker-default denies mount):
+docker rm -f kibprobe-src
+# FUSE mount with kib's actual sidecar flags (apparmor exception is required — docker-default denies mount):
 docker --context colima run --rm --cap-add SYS_ADMIN --device /dev/fuse --security-opt apparmor=unconfined \
   ubuntu sh -c 'apt-get update -qq && apt-get install -y bindfs >/dev/null 2>&1 && mkdir -p /src /view && echo hi >/src/f && bindfs /src /view && cat /view/f && echo COLIMA-FUSE-MOUNT-OK'
 #   -> nodev fuse in /proc/filesystems ; hi / COLIMA-FUSE-MOUNT-OK
 ```
 
-Outcome: R1 unchanged on Linux; on macOS, run it inside Colima (or Lima/Rancher). `cc`'s sidecar flags
+Outcome: R1 unchanged on Linux; on macOS, run it inside Colima (or Lima/Rancher). `kib`'s sidecar flags
 need no change.
 
 ### Gate B (macOS Docker Desktop) — the full result (2026-07-23), which forces A/H/U
@@ -613,7 +613,7 @@ docker run --rm --cap-drop=ALL --cap-add SYS_ADMIN --device /dev/fuse --security
 ```
 
 *(Note: `apt` fails under `cap-drop=ALL` — no `DAC_OVERRIDE`/`SETUID` to manage its cache/sandbox — so a
-FUSE tool must be **baked into the image**, as `ccignore-fuse` already is. Several early probes here read
+FUSE tool must be **baked into the image**, as `guest/bin/fuse` already is. Several early probes here read
 as FUSE failures but were actually apt failing; the baked-image form above is the valid test.)*
 
 ### Outstanding gates
@@ -625,11 +625,11 @@ python3 -m http.server 8099 &
 ANTHROPIC_BASE_URL=http://127.0.0.1:8099 claude -p 'hi' ; kill %1
 
 # GATE D — Portmaster and container-to-container egress (decides E1's shape) — Linux host only
-docker network create cc-probe
-docker run -d --name probe-up --network cc-probe python:3-alpine python3 -m http.server 8080
-docker run --rm --network cc-probe python:3-alpine \
+docker network create kib-probe
+docker run -d --name probe-up --network kib-probe python:3-alpine python3 -m http.server 8080
+docker run --rm --network kib-probe python:3-alpine \
   python3 -c "import urllib.request as u; print(u.urlopen('http://probe-up:8080').status)"
-docker rm -f probe-up ; docker network rm cc-probe
+docker rm -f probe-up ; docker network rm kib-probe
 
 # GATE (K2-only) — can gVisor service /dev/fuse? Run only if pursuing gVisor after R1.
 docker run --rm --runtime=runsc --cap-add=SYS_ADMIN --device /dev/fuse \
@@ -662,7 +662,6 @@ Settled decisions are recorded at the top (the four gates). Remaining:
 - **On-hardware VERIFY (needs Docker; can't run from inside the sandbox):** the `hosted_mcp` sidecar end-to-end (supergateway + `uvx <server>` fetch, HOME/cache dirs, the `/mcp` streamable-HTTP path) — built + fail-soft, same "verify on first real use" status as the codex/gemini rows.
 - [x] **Gate A** — RESOLVED 2026-07-23: Claude Code **honours** `ANTHROPIC_BASE_URL` for OAuth (`HIT POST /v1/messages?beta=true`). C1 (base-URL, no CA) is the path; C2 shelved.
 - [x] **Gate D** — RESOLVED 2026-07-23: Portmaster **permits** container→container on a user bridge (`C2C 200`). E1/broker use the internal bridge; no host-loopback fallback needed.
-- [x] **`validate_shared_settings` carve-out** — RESOLVED: no code change. `cc` sets `ANTHROPIC_BASE_URL` via a container `-e` flag (host-controlled channel); the validator keeps refusing `env.ANTHROPIC_BASE_URL` in the shared *settings.json* (the agent-writable, cross-project channel). Two different channels.
-- [ ] **Broker VERIFY #1 (refresh contract)** — confirm the Anthropic OAuth token endpoint + public client_id + response shape before flipping the broker to default-on. The refresh loop is built and fail-safe (never refreshes when `client_id` is unset; overridable via `/run/broker/oauth/claude.json`).
+- [x] **`validate_shared_settings` carve-out** — RESOLVED: no code change. `kib` sets `ANTHROPIC_BASE_URL` via a container `-e` flag (host-controlled channel); the validator keeps refusing `env.ANTHROPIC_BASE_URL` in the shared *settings.json* (the agent-writable, cross-project channel). Two different channels.
 - [ ] **Broker VERIFY (env precedence)** — does a container `-e ANTHROPIC_BASE_URL` win over a per-project (agent-writable) `settings.json` `env` entry? If the file wins, re-pin in `guest/entrypoint/docker-entrypoint.sh`.
 - [ ] `WebFetch` — server-side (survives an allowlist) or client-side (breaks under E1)?

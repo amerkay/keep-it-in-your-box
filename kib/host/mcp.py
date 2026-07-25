@@ -1,9 +1,7 @@
 """MCP wiring: inject brokered routes, warn about inline secrets, adopt, add, intercept.
 
-These five jobs used to live in five bash heredocs — ~380 lines of Python inside
-`cc-lib.sh`, unlinted, untyped, untested, and reached through ~25 `CC_ADD_*` / `CC_IC_*` /
-`CC_ADOPT_*` environment variables. One of them handles live credentials. They are one
-module now, with an argv interface and no env plumbing at all.
+One of these five jobs handles live credentials, so all five share one argv interface here
+rather than being split across ad hoc scripts.
 
 All five run HOST-SIDE, before any `docker exec`. That placement is the whole point of the
 interceptor: a process's argv is already inside the box by the time the box could inspect

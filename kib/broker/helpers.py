@@ -1,10 +1,9 @@
 """Host — "what is a secret", provider synthesis, and the two atomic stores.
 
 `kib mcp add`, `kib mcp adopt`, the front-line `mcp add` interceptor and the after-the-fact
-inline-secret warner all used to hand-roll these tests in separate bash heredocs. The
-copies drifted: the interceptor flagged `AUTH`-named env keys the warner missed, and it
-brokered `headers[0]` blindly. Defining them once here is what makes the warner and the
-blocker agree about what a credential looks like.
+inline-secret warner all need to agree on what a credential looks like. Defined once here,
+not per-consumer: split apart, they drift — one flagging `AUTH`-named env keys the other
+misses, or brokering `headers[0]` blindly.
 
 All pure, all stateless, and none of them prints a secret.
 """

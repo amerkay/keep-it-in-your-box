@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# The audit gate — what the auto-installed pre-commit hook used to do, run where kib already
-# legitimately runs instead of from a file written into every project's .git/hooks. Called from
-# three places, deliberately NOT on attach (a second terminal must stay instant):
+# The audit gate — runs where kib already legitimately runs, instead of from a file written
+# into every project's .git/hooks. Called from three places, deliberately NOT on attach (a
+# second terminal must stay instant):
 #   • cold start   (host/lifecycle.sh) — refuses to launch into a poisoned config
 #   • teardown     (host/lifecycle.sh) — reports, and raises a desktop alert
 #   • `kib audit`  (bin/kib)           — reports, on demand

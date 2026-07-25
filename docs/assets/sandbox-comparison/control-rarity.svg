@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 520" width="1200" height="520" role="img" aria-labelledby="t d">
   <title id="t">How rare is each containment control across 30 surveyed agent sandboxes</title>
-  <desc id="d">Bar chart of how many of 30 surveyed projects implement each control, with whether cc has it. Clipboard mediation 0 of 30, cc yes. In-project secret redaction 3, cc yes. Host-executed config guard 4, cc yes. Credential brokering 5, cc no. VM-class boundary 6, cc no. Default-deny egress 10, cc no. Security regression suite 13, cc yes.</desc>
+  <desc id="d">Bar chart of how many of 30 surveyed projects implement each control, with whether kib has it. Clipboard mediation 0 of 30, kib yes. In-project secret redaction 3, kib yes. Host-executed config guard 4, kib yes. Credential brokering 5, kib no. VM-class boundary 6, kib no. Default-deny egress 10, kib no. Security regression suite 13, kib yes.</desc>
   <defs>
     <linearGradient id="bg2" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#0d1424"/>
@@ -32,7 +32,7 @@
     <path d="M430 168 V478"/><path d="M616 168 V478"/><path d="M802 168 V478"/><path d="M988 168 V478"/>
   </g>
 
-  <!-- rows: label | track | bar | count | cc verdict -->
+  <!-- rows: label | track | bar | count | kib verdict -->
   <g class="sans" font-size="20" fill="#adbac7" text-anchor="end">
     <text x="402" y="203">Clipboard mediation</text>
     <text x="402" y="247">In-project secret redaction</text>
@@ -72,35 +72,35 @@
     <text x="1046" y="467">13</text>
   </g>
 
-  <!-- cc verdict chips -->
+  <!-- kib verdict chips -->
   <g class="mono" font-size="16" font-weight="700" text-anchor="middle">
     <g>
       <rect x="1058" y="183" width="78" height="26" rx="13" fill="#0f2417" stroke="#238636" stroke-width="1.4"/>
-      <text x="1097" y="201" fill="#56d364">cc &#10003;</text>
+      <text x="1097" y="201" fill="#56d364">kib &#10003;</text>
     </g>
     <g>
       <rect x="1058" y="227" width="78" height="26" rx="13" fill="#0f2417" stroke="#238636" stroke-width="1.4"/>
-      <text x="1097" y="245" fill="#56d364">cc &#10003;</text>
+      <text x="1097" y="245" fill="#56d364">kib &#10003;</text>
     </g>
     <g>
       <rect x="1058" y="271" width="78" height="26" rx="13" fill="#0f2417" stroke="#238636" stroke-width="1.4"/>
-      <text x="1097" y="289" fill="#56d364">cc &#10003;</text>
+      <text x="1097" y="289" fill="#56d364">kib &#10003;</text>
     </g>
     <g>
       <rect x="1058" y="315" width="78" height="26" rx="13" fill="#2d1214" stroke="#da3633" stroke-width="1.4"/>
-      <text x="1097" y="333" fill="#ff7b72">cc &#10007;</text>
+      <text x="1097" y="333" fill="#ff7b72">kib &#10007;</text>
     </g>
     <g>
       <rect x="1058" y="359" width="78" height="26" rx="13" fill="#2d1214" stroke="#da3633" stroke-width="1.4"/>
-      <text x="1097" y="377" fill="#ff7b72">cc &#10007;</text>
+      <text x="1097" y="377" fill="#ff7b72">kib &#10007;</text>
     </g>
     <g>
       <rect x="1058" y="403" width="78" height="26" rx="13" fill="#2d1214" stroke="#da3633" stroke-width="1.4"/>
-      <text x="1097" y="421" fill="#ff7b72">cc &#10007;</text>
+      <text x="1097" y="421" fill="#ff7b72">kib &#10007;</text>
     </g>
     <g>
       <rect x="1058" y="447" width="78" height="26" rx="13" fill="#0f2417" stroke="#238636" stroke-width="1.4"/>
-      <text x="1097" y="465" fill="#56d364">cc &#10003;</text>
+      <text x="1097" y="465" fill="#56d364">kib &#10003;</text>
     </g>
   </g>
 
