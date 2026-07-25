@@ -322,12 +322,17 @@ class Redact(Operations):  # type: ignore[misc]
             return 0  # virtual fd; reads served from STUB
         return os.open(self._real(path), flags)
 
+    # pread/pwrite, never lseek+read: nothreads=False means several FUSE worker threads
+    # serve one open file concurrently (readahead alone is enough), and they share the fd's
+    # single file offset. Two racing lseeks let one thread read from the other's offset; when
+    # that lands past EOF the short buffer reads to the kernel as EOF, so the caller silently
+    # sees the file truncated at a multiple of the 16 KiB read chunk. pread carries the offset
+    # in the syscall, so there is nothing to race on.
     def read(self, path: str, size: int, offset: int, fh: int) -> bytes:
         kind, _ = self._classify(path)
         if kind != "pass":
             return STUB[offset : offset + size]
-        os.lseek(fh, offset, os.SEEK_SET)
-        return os.read(fh, size)
+        return os.pread(fh, size, offset)
 
     def release(self, path: str, fh: int) -> int:
         if fh and fh != 0:
@@ -441,8 +446,7 @@ class Redact(Operations):  # type: ignore[misc]
         return os.open(self._real(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
 
     def write(self, path: str, data: bytes, offset: int, fh: int) -> int:
-        os.lseek(fh, offset, os.SEEK_SET)
-        return os.write(fh, data)
+        return os.pwrite(fh, data, offset)  # same offset race as read(), same fix
 
     def truncate(self, path: str, length: int, fh: int | None = None) -> None:
         self._deny_if_masked(path)

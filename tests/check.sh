@@ -545,6 +545,18 @@ else
     ok "cc leaves the terminal to Claude's TUI (no 'tput reset')"
 fi
 
+# FUSE reads must be pread, not lseek+read. With nothreads=False several worker threads serve
+# one open file and share the fd's offset, so racing lseeks made a reader see the file
+# truncated at a 16 KiB boundary — silent corruption that showed up as "flaky" lint/test runs.
+if grep -qE '^\s*os\.lseek\(' ccignore-fuse.py; then
+    bad "ccignore-fuse.py uses lseek+read/write" \
+        "use os.pread/os.pwrite — a shared fd offset truncates concurrent reads at 16 KiB"
+elif grep -q 'os.pread(' ccignore-fuse.py && grep -q 'os.pwrite(' ccignore-fuse.py; then
+    ok "FUSE passthrough reads/writes are offset-atomic (pread/pwrite, no shared fd offset)"
+else
+    bad "ccignore-fuse.py lost its pread/pwrite passthrough" "expected os.pread + os.pwrite"
+fi
+
 # DNS (broker): resolv-sync must PRESERVE Docker's embedded resolver (127.0.0.11) as the first
 # nameserver. When the container joins the broker's user-defined network its resolv.conf becomes
 # `nameserver 127.0.0.11`; if the sync overwrites that with the host upstreams, the `cc-broker`
