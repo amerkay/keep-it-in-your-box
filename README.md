@@ -122,10 +122,19 @@ echo "alias cc='$PWD/bin/kib claude'"  >> ~/.bashrc
 
 The image builds automatically on first run. Then `cd` into any project and run `cc`.
 
+### Pasting images
+
+Press **`Ctrl+V`**, not `⌘V`. `⌘V` is handled by the terminal, which pastes the clipboard as
+text over the pty — for an image it sends nothing, so the agent never reads the clipboard at
+all. (The Claude Code docs note `⌘V` also works in iTerm2; that is untested in a box.
+Terminal.app cannot send it to the pty at any setting.) Text paste works either way, which is
+why a broken bridge looks like a working one — see
+[`clipboard-and-dns.md`](docs/design-notes/clipboard-and-dns.md) to check the bridge itself.
+
 ### Requirements
 
 - Docker — Docker Desktop, OrbStack, or Colima on macOS; any engine on Linux.
-- A Wayland session for host clipboard / image paste on Linux (optional — absent Wayland just disables paste).
+- A Wayland session for host clipboard / image paste on Linux (optional — absent Wayland just disables paste). macOS uses a `pbpaste` bridge instead and needs nothing extra.
 - `git`, `bash`, `perl` (system perl is fine on macOS — no Homebrew dependencies).
 
 <h2 id="dev"><img src="docs/assets/readme/section-dev.svg" width="100%" alt="Development"></h2>

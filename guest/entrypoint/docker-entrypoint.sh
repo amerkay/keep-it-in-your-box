@@ -52,17 +52,28 @@ DIR=/kib-clip
 [ -d "$DIR" ] || exit 1
 type=text
 while [ $# -gt 0 ]; do
+	# Both spellings: wl-paste uses -l/--list-types and --type, xclip -t/-target with a
+	# TARGETS value for the same two questions. The xclip shim execs straight into here.
 	case "$1" in
 		-l | --list-types)      type=list ;;
-		-t | --type) shift; case "${1:-}" in image/*) type=png ;; esac ;;
+		-t | -target | --type)
+			# $2, not a shift-then-$1: `shift` is a special builtin, so a TRAILING -t left the
+			# loop's own shift with nothing to take and dash aborted the shim outright (rc=2,
+			# no request written, no output). One shift per iteration can never over-shift.
+			case "${2:-}" in image/*) type=png ;; TARGETS) type=list ;; esac
+			;;
 		--type=image/*)         type=png ;;
+		--type=TARGETS)         type=list ;;
 	esac
 	shift
 done
 id="$$.$(date +%s%N 2>/dev/null || date +%s)"
 printf '%s\n' "$type" > "$DIR/req.$id"
+# 10s, not 2: the host answers text with pbpaste (instant) but a png with osascript, whose
+# cold start plus a large image routinely passed 2s — the read then returned empty and the
+# paste silently produced nothing.
 i=0
-while [ ! -e "$DIR/done.$id" ] && [ "$i" -lt 40 ]; do sleep 0.05; i=$((i + 1)); done
+while [ ! -e "$DIR/done.$id" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
 [ -e "$DIR/resp.$id" ] && cat "$DIR/resp.$id"
 rm -f "$DIR/req.$id" "$DIR/resp.$id" "$DIR/done.$id" 2>/dev/null
 SHIM
@@ -71,7 +82,9 @@ SHIM
 #!/bin/sh
 # kib clipboard bridge — xclip-compatible. `-o`/`-out` reads via the bridge; anything else
 # is a write and is refused.
-for a in "$@"; do case "$a" in -o | -out) exec /usr/local/bin/wl-paste ;; esac; done
+# "$@" is forwarded, not dropped: xclip asks for an image as `-t image/png -o`, and without
+# the args wl-paste defaulted to text and returned the wrong selection entirely.
+for a in "$@"; do case "$a" in -o | -out) exec /usr/local/bin/wl-paste "$@" ;; esac; done
 DIR=/kib-clip
 [ -d "$DIR" ] && : > "$DIR/deny.$$" 2>/dev/null
 echo "kib: clipboard WRITE refused — the sandbox clipboard is read-only." >&2
@@ -197,10 +210,13 @@ if [ -n "$CLAUDE_SESSION_DIR" ] && [ -d "$CLAUDE_SHARED_DIR" ]; then
     # `/plugin install` fail outright. This way shared items still load and in-session creations
     # land in this project's dir. State FILES need no special case — a JSON writer's rename
     # replaces our symlink with a real local file, which this dir permits.
-    farm_dir() { # $1 = shared source dir, $2 = per-project dir
-        [ -d "$1" ] || return 0
+    farm_dir() {                  # $1 = shared source dir, $2 = per-project dir
         [ -L "$2" ] && rm -f "$2" # upgrade a farm built by an older kib
+        # The per-project dir is created even with NO shared source: it is where in-session
+        # authoring lands. Returning early left a user with no canonical commands/ with no
+        # commands/ in the box either, so authoring one had nowhere to go.
         mkdir -p "$2" 2>/dev/null || true
+        [ -d "$1" ] || return 0
 
         # Drop our own links first, so an item deleted from the shared dir does not linger as a
         # dangling one. Only links INTO the shared dir are ours; real files are the project's.

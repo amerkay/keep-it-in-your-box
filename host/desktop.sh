@@ -126,8 +126,25 @@ start_clipboard_bridge() {
     # a sandbox that could write 1 there would turn teardown into a host process-group kill.
     echo $! >"${CLIP_STATE}.pid"
     disown 2>/dev/null || true
-    echo "📋 clipboard: pbpaste bridge active (read-only from the sandbox)" >&2
+
+    # PROVE it serves before claiming it does: the bridge is exec'd, so a lost exec bit dies
+    # instantly, and this line printed unconditionally was the only signal for the life of the
+    # feature. `ping` is answered without touching the pasteboard — no TCC prompt.
+    _CLIP_PROBE="probe.$$"
+    printf 'ping\n' >"$CLIP_STATE/req.$_CLIP_PROBE" 2>/dev/null || true
+    if wait_until 60 0.05 _clip_bridge_answered; then # ≤3s
+        echo "📋 clipboard: pbpaste bridge active (read-only from the sandbox)" >&2
+    else
+        warn "the clipboard bridge did not answer — image paste is unavailable this session." \
+            "$KIB_ROOT/host/clipboard-bridge.sh must be executable."
+        stop_clipboard_bridge # drops the spool, so no mount and no reader env is advertised
+    fi
+    rm -f "$CLIP_STATE/req.$_CLIP_PROBE" "$CLIP_STATE/resp.$_CLIP_PROBE" \
+        "$CLIP_STATE/done.$_CLIP_PROBE" 2>/dev/null || true
+    unset _CLIP_PROBE
 }
+
+_clip_bridge_answered() { [ -e "$CLIP_STATE/done.$_CLIP_PROBE" ]; }
 
 add_clipboard_bridge_args() {
     [ -d "$CLIP_STATE" ] || return 0
@@ -136,9 +153,9 @@ add_clipboard_bridge_args() {
     ARGS+=(
         -v "$CLIP_STATE:/kib-clip"
         -e KIB_CLIP_BRIDGE=1
-        # VERIFY (Mac): WAYLAND_DISPLAY steers Claude's image paste to the wl-paste shim. If
-        # it turns out to use xclip/DISPLAY, flip this line to `-e DISPLAY=:0` — both shims
-        # are installed, so only the trigger changes.
+        # No DISPLAY here on purpose. Claude's image paste is a plain `xclip … || wl-paste …`
+        # chain that consults neither this nor WAYLAND_DISPLAY, and faking an X server would
+        # only mislead GUI-detecting callers (chrome under chrome-devtools-mcp).
         -e WAYLAND_DISPLAY=kib-clip
         -e XDG_RUNTIME_DIR="/run/user/$(id -u)"
     )

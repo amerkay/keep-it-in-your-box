@@ -26,3 +26,55 @@ Docker freezes a container's `/etc/resolv.conf` at creation; a long-lived contai
 - **Why not a relay to the `127.0.0.53` stub** (earlier design): needs a `--network host` root sidecar and a `container→gateway:53` hop that a per-connection host firewall (Portmaster) silently holds — while it *permits* the container to query real upstreams directly. Trade: less split-DNS precision, no host-netns component at all.
 - Best-effort fallback: no systemd-resolved → no mount, no watcher, frozen-at-creation resolv.conf (never worse than before), and `kib` says so. `notify()` is for **problems only** — never add a launch-success notification; it trains the user to dismiss the ones that matter.
 - Skipped on macOS (engine VM tracks the host resolver already).
+
+## macOS reader protocol (the image-paste failure)
+
+Three things in the container-side shims had to be true before an image paste could work, and on
+the first Mac run none of them were:
+
+- **`xclip` must forward its arguments.** It `exec`ed `/usr/local/bin/wl-paste` bare, so
+  `xclip -t image/png -o` asked the host for `text` and got the text selection back. Silent: the
+  caller sees a valid, wrong answer rather than an error.
+- **The read budget must cover `osascript`.** It was 2 s (40 x 0.05). `pbpaste` answers text
+  instantly, but a png goes through `osascript`, whose cold start plus a large image passes 2 s
+  routinely; the shim then returns an empty response and the paste produces nothing. 10 s now.
+- **Both reader spellings must map to the same three questions.** `wl-paste` asks with
+  `-l/--list-types` and `--type`; `xclip` with `-t`/`-target` and a `TARGETS` value. The parser
+  accepts both, so it does not matter which reader Claude reaches for. No `DISPLAY` is set:
+  Claude's chain consults neither it nor `WAYLAND_DISPLAY`, and faking an X server would only
+  mislead GUI-detecting callers.
+
+Fixing all three still left image paste dead. Three more, host-side:
+
+- **`clipboard-bridge.sh` was committed 100644.** It is the one file in `host/` that is `exec`ed
+  rather than sourced, so `detach_pgrp` hit EACCES and the bridge died at every launch, for the
+  life of the feature. The *index* mode is what other checkouts get; `tests/check/wiring.sh`
+  asserts it, discovering exec'd scripts from the source rather than a list.
+- **`start_clipboard_bridge` claimed success unconditionally**, unlike `start_wayland_guard`,
+  which waits for its socket. That is why a dead bridge stayed invisible. It now round-trips a
+  `ping` (answered without touching the pasteboard — no TCC prompt), and on no answer warns and
+  drops the spool, so no reader env is advertised for a bridge that cannot serve.
+- **`list` and `png` asked different questions**, and only `list` was ever right. Both go through
+  `grab_png` now, so "offered" means "readable". It tries `«class PNGf»`, then TIFF via `sips` —
+  the TIFF leg is DEFENSIVE, not the fix for anything observed: a ⌘⌃⇧4 screenshot does publish
+  PNGf (`info` shows it), so PNGf alone would have sufficed. It costs one call, and only on the
+  path that would otherwise return nothing.
+
+`tests/check/clipboard.sh` drives the shims against **the real bridge**, stubbing only
+`pbpaste`/`osascript`/`sips` and modelling a TIFF-only pasteboard. Both halves were individually
+fine; the protocol between them had never been exercised, which is how all of this shipped.
+
+**The trigger is `Ctrl+V`, not `⌘V`.** ⌘V is consumed by the host terminal, which pastes the
+clipboard as text over the pty; for an image it sends nothing, so Claude never runs a clipboard
+command. The docs say ⌘V also works in iTerm2; kib does not forward `TERM_PROGRAM`, so whether
+that path can work in a box is UNTESTED. Terminal.app cannot send ⌘V to the pty at all.
+
+**Text paste proves nothing about the bridge** — a terminal pastes over the pty and calls no
+reader. To check it from inside the box (no answer = the host half is not running):
+
+```
+id=p.$$; printf 'ping\n' >/kib-clip/req.$id; sleep 2; cat /kib-clip/resp.$id   # -> pong
+```
+
+`info` instead of `ping` returns the pasteboard's actual flavours — the first thing to look at
+when a paste comes back empty.

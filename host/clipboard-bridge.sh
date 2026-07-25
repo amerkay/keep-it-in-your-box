@@ -18,6 +18,35 @@ DIR="${1:?usage: clipboard-bridge.sh <spool-dir> <project-name>}"
 NAME="${2:-project}"
 LAST_DENY=0
 
+# Write one pasteboard flavour to a file; non-zero (and no file) if it cannot be coerced.
+# The only place that speaks AppleScript, so `list` and `png` cannot disagree about what
+# counts as an image — they did, and only `list` was ever right.
+grab_flavour() { # $1 = AppleScript class, $2 = destination
+    rm -f "$2" 2>/dev/null
+    osascript >/dev/null 2>&1 <<OSA || return 1
+set theData to (the clipboard as «class $1»)
+set fp to open for access POSIX file "$2" with write permission
+set eof of fp to 0
+write theData to fp
+close access fp
+OSA
+    [ -s "$2" ]
+}
+
+# PNG bytes from the clipboard into $1, or a non-zero return and no file.
+#
+# ⌘⌃⇧4 puts a screenshot on the pasteboard as TIFF — `«class PNGf»` alone fails outright on
+# it, which is why the bridge answered "text/plain only" with a screenshot sitting right
+# there. Try PNGf first (already the target format, no conversion), then TIFF through `sips`
+# (stock macOS). Order matters only for cost, not correctness.
+grab_png() { # $1 = destination
+    grab_flavour PNGf "$1" && return 0
+    grab_flavour TIFF "$1.tiff" || return 1
+    sips -s format png "$1.tiff" --out "$1" >/dev/null 2>&1
+    rm -f "$1.tiff" 2>/dev/null
+    [ -s "$1" ]
+}
+
 serve_read() { # $1 = request id, $2 = type
     id="$1"
     type="$2"
@@ -28,21 +57,21 @@ serve_read() { # $1 = request id, $2 = type
     # itself, so the writes below always land on fresh regular files inside the spool.
     rm -f "$tmp" "$out" "$DIR/done.$id" 2>/dev/null
     case "$type" in
+        # Liveness probe (start_clipboard_bridge). Deliberately never touches the pasteboard:
+        # a launch-time clipboard read would be a TCC prompt and a needless copy of the user's
+        # clipboard into the spool.
+        ping) printf 'pong\n' >"$tmp" ;;
+        # Every flavour the pasteboard actually holds — the diagnostic to reach for when an
+        # image paste comes back empty, because it names what IS there, not what we can read.
+        info) osascript -e 'clipboard info' >"$tmp" 2>&1 || : >"$tmp" ;;
         list)
+            # Answered by the same extraction `png` uses, so "offered" always means "readable".
             : >"$tmp"
-            osascript -e 'the clipboard as «class PNGf»' >/dev/null 2>&1 && printf 'image/png\n' >>"$tmp"
+            if grab_png "$DIR/probe.$id"; then printf 'image/png\n' >"$tmp"; fi
+            rm -f "$DIR/probe.$id" 2>/dev/null
             printf 'text/plain\n' >>"$tmp"
             ;;
-        png)
-            # Raw PNG bytes from the clipboard into $tmp, or an empty file if none is set.
-            osascript >/dev/null 2>&1 <<OSA || : >"$tmp"
-set thePNG to (the clipboard as «class PNGf»)
-set fp to open for access POSIX file "$tmp" with write permission
-set eof of fp to 0
-write thePNG to fp
-close access fp
-OSA
-            ;;
+        png) grab_png "$tmp" || : >"$tmp" ;;
         *) pbpaste >"$tmp" 2>/dev/null || : >"$tmp" ;;
     esac
     mv -f "$tmp" "$out" 2>/dev/null
