@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 520" width="1200" height="520" role="img" aria-labelledby="t d">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 564" width="1200" height="564" role="img" aria-labelledby="t d">
   <title id="t">How rare is each containment control across 30 surveyed agent sandboxes</title>
-  <desc id="d">Bar chart of how many of 30 surveyed projects implement each control, with whether kib has it. Clipboard mediation 0 of 30, kib yes. In-project secret redaction 3, kib yes. Host-executed config guard 4, kib yes. Credential brokering 5, kib yes. VM-class boundary 6, kib no. Default-deny egress 10, kib no. Security regression suite 13, kib yes.</desc>
+  <desc id="d">Bar chart of how many of 30 surveyed projects implement each control, with whether kib has it. Clipboard mediation 0 of 30, kib yes. In-project secret redaction 3, kib yes. Host-executed config guard 4, kib yes. Credential brokering 5, kib yes. VM-class boundary 6, kib no. Default-deny egress 10, kib no. Workspace confinement, meaning the host home directory is out of reach by default, 11 of 30, kib yes. Security regression suite 13, kib yes.</desc>
   <defs>
     <linearGradient id="bg2" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#0d1424"/>
@@ -15,8 +15,8 @@
     </style>
   </defs>
 
-  <rect width="1200" height="520" fill="url(#bg2)"/>
-  <rect width="1200" height="520" fill="url(#grid2)"/>
+  <rect width="1200" height="564" fill="url(#bg2)"/>
+  <rect width="1200" height="564" fill="url(#grid2)"/>
 
   <text x="64" y="72" class="mono" font-size="15" letter-spacing="3.2" fill="#58a6ff">ADOPTION ACROSS THE FIELD</text>
   <text x="62" y="118" class="sans" font-size="34" font-weight="800" fill="#e6edf3" letter-spacing="-0.5">How rare is each control?</text>
@@ -29,7 +29,7 @@
     <text x="988" y="158">30</text>
   </g>
   <g stroke="#8b949e" stroke-opacity="0.10" stroke-width="1">
-    <path d="M430 168 V478"/><path d="M616 168 V478"/><path d="M802 168 V478"/><path d="M988 168 V478"/>
+    <path d="M430 168 V522"/><path d="M616 168 V522"/><path d="M802 168 V522"/><path d="M988 168 V522"/>
   </g>
 
   <!-- rows: label | track | bar | count | kib verdict -->
@@ -40,7 +40,8 @@
     <text x="402" y="335">Credential brokering</text>
     <text x="402" y="379">VM-class boundary</text>
     <text x="402" y="423">Default-deny egress</text>
-    <text x="402" y="467">Security regression suite</text>
+    <text x="402" y="467">Workspace confinement</text>
+    <text x="402" y="511">Security regression suite</text>
   </g>
 
   <g fill="#161b22">
@@ -51,6 +52,7 @@
     <rect x="430" y="361" width="558" height="22" rx="11"/>
     <rect x="430" y="405" width="558" height="22" rx="11"/>
     <rect x="430" y="449" width="558" height="22" rx="11"/>
+    <rect x="430" y="493" width="558" height="22" rx="11"/>
   </g>
 
   <g fill="#1f6feb">
@@ -59,7 +61,8 @@
     <rect x="430" y="317" width="93" height="22" rx="11"/>
     <rect x="430" y="361" width="112" height="22" rx="11"/>
     <rect x="430" y="405" width="186" height="22" rx="11"/>
-    <rect x="430" y="449" width="242" height="22" rx="11"/>
+    <rect x="430" y="449" width="205" height="22" rx="11"/>
+    <rect x="430" y="493" width="242" height="22" rx="11"/>
   </g>
 
   <g class="mono" font-size="19" font-weight="700" fill="#e6edf3" text-anchor="end">
@@ -69,7 +72,8 @@
     <text x="1046" y="335">5</text>
     <text x="1046" y="379">6</text>
     <text x="1046" y="423">10</text>
-    <text x="1046" y="467">13</text>
+    <text x="1046" y="467">11</text>
+    <text x="1046" y="511">13</text>
   </g>
 
   <!-- kib verdict chips -->
@@ -102,7 +106,11 @@
       <rect x="1058" y="447" width="78" height="26" rx="13" fill="#0f2417" stroke="#238636" stroke-width="1.4"/>
       <text x="1097" y="465" fill="#56d364">kib &#10003;</text>
     </g>
+    <g>
+      <rect x="1058" y="491" width="78" height="26" rx="13" fill="#0f2417" stroke="#238636" stroke-width="1.4"/>
+      <text x="1097" y="509" fill="#56d364">kib &#10003;</text>
+    </g>
   </g>
 
-  <text x="64" y="504" class="mono" font-size="16" fill="#6e7681">Counts are what each project documents. Undocumented cases are excluded, not assumed absent.</text>
+  <text x="64" y="548" class="mono" font-size="16" fill="#6e7681">Counts are what each project documents. Undocumented cases are excluded, not assumed absent.</text>
 </svg>

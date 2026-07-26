@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400" width="1200" height="400" role="img" aria-labelledby="t d">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 434" width="1200" height="434" role="img" aria-labelledby="t d">
   <title id="t">Sandbox Comparison — kib measured against 30 open-source agent sandboxes</title>
-  <desc id="d">kib leads on 5 containment controls and is behind on 2. A scorecard shows how many of the 30 surveyed projects share each control: clipboard mediation 0, in-project secret redaction 3, host-config guard 4, credential brokering 5, default-deny egress 10.</desc>
+  <desc id="d">kib leads on 5 containment controls and is behind on 2. A scorecard shows how many of the 30 surveyed projects share each control: clipboard mediation 0, in-project secret redaction 3, host-config guard 4, credential brokering 5, workspace confinement (host home directory out of reach) 11, default-deny egress 10.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#0d1424"/>
@@ -15,11 +15,11 @@
     </style>
   </defs>
 
-  <rect width="1200" height="400" fill="url(#bg)"/>
-  <rect width="1200" height="400" fill="url(#grid)"/>
+  <rect width="1200" height="434" fill="url(#bg)"/>
+  <rect width="1200" height="434" fill="url(#grid)"/>
 
   <!-- ── left: title + verdict ─────────────────────────────────────────── -->
-  <g id="title-block">
+  <g id="title-block" transform="translate(0,17)">
     <text x="64" y="112" class="mono" font-size="17" letter-spacing="3.5" fill="#58a6ff">kib &#183; CLAUDE CODE DOCKER SANDBOX</text>
 
     <text x="61" y="188" class="sans" font-size="58" font-weight="800" fill="#e6edf3" letter-spacing="-1">Sandbox Comparison</text>
@@ -39,7 +39,7 @@
 
   <!-- ── right: adoption scorecard ─────────────────────────────────────── -->
   <g id="scorecard">
-    <rect x="660" y="98" width="476" height="246" rx="12" fill="#0d1117" stroke="#21262d" stroke-width="1.5"/>
+    <rect x="660" y="98" width="476" height="280" rx="12" fill="#0d1117" stroke="#21262d" stroke-width="1.5"/>
 
     <g class="mono" font-size="15" letter-spacing="1.6" fill="#6e7681">
       <text x="684" y="132">CONTROL</text>
@@ -64,9 +64,13 @@
       <text x="710" y="292" class="sans" fill="#adbac7">Credential brokering</text>
       <text x="1112" y="292" class="mono" font-weight="700" fill="#56d364" text-anchor="end">5</text>
 
-      <circle cx="692" cy="320" r="4.5" fill="#f85149"/>
-      <text x="710" y="326" class="sans" fill="#adbac7">Default-deny egress</text>
-      <text x="1112" y="326" class="mono" font-weight="700" fill="#ff7b72" text-anchor="end">10</text>
+      <circle cx="692" cy="320" r="4.5" fill="#3fb950"/>
+      <text x="710" y="326" class="sans" fill="#adbac7">Workspace confinement</text>
+      <text x="1112" y="326" class="mono" font-weight="700" fill="#56d364" text-anchor="end">11</text>
+
+      <circle cx="692" cy="354" r="4.5" fill="#f85149"/>
+      <text x="710" y="360" class="sans" fill="#adbac7">Default-deny egress</text>
+      <text x="1112" y="360" class="mono" font-weight="700" fill="#ff7b72" text-anchor="end">10</text>
     </g>
   </g>
 </svg>

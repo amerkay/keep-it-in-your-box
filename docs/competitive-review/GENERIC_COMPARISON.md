@@ -1,6 +1,6 @@
 <p align="center">
   <img src="../assets/sandbox-comparison/hero.svg" width="100%"
-       alt="Sandbox Comparison — kib measured against 30 open-source agent sandboxes. kib leads on 5 containment controls and is behind on 2. Of the 30 other projects, 0 mediate the clipboard, 3 redact in-project secrets, 4 guard host-executed config, 5 broker credentials, and 10 enforce default-deny egress.">
+       alt="Sandbox Comparison — kib measured against 30 open-source agent sandboxes. kib leads on 5 containment controls and is behind on 2. Of the 30 other projects, 0 mediate the clipboard, 3 redact in-project secrets, 4 guard host-executed config, 5 broker credentials, 11 confine the agent to the working directory with the host home directory out of reach, and 10 enforce default-deny egress.">
 </p>
 
 A survey of open-source projects that sandbox AI coding agents, compared against this
@@ -18,10 +18,72 @@ project's category, and `❓` means *"the docs don't say"* — never *"the proje
 the agent writes that the **host** executes later — and concedes exactly one control the field
 has standardised: **default-deny egress**.
 
+It also holds the control everything else is built on top of, which only **11 of 30** do by
+default: the agent sees the working directory and **not the host `$HOME`**. That is the field's
+sharpest divide, and it tracks the primitive — five of the six sandboxes that leave `$HOME`
+readable are OS sandboxes running as you.
+
 <p align="center">
   <img src="../assets/sandbox-comparison/control-rarity.svg" width="100%"
-       alt="Bar chart of how many of 30 surveyed sandboxes implement each control. Clipboard mediation 0 of 30, kib has it. In-project secret redaction 3, kib has it. Host-executed config guard 4, kib has it. Credential brokering 5, kib has it. VM-class boundary 6, kib lacks it. Default-deny egress 10, kib lacks it. Security regression suite 13, kib has it.">
+       alt="Bar chart of how many of 30 surveyed sandboxes implement each control. Clipboard mediation 0 of 30, kib has it. In-project secret redaction 3, kib has it. Host-executed config guard 4, kib has it. Credential brokering 5, kib has it. VM-class boundary 6, kib lacks it. Default-deny egress 10, kib lacks it. Workspace confinement — host home directory out of reach by default — 11, kib has it. Security regression suite 13, kib has it.">
 </p>
+
+---
+
+## The baseline before any of it: can the agent read your `$HOME`?
+
+Every control below is downstream of one question — **what does the agent see when it walks
+upward out of the project?** A guard on `.git/config` and a stub over `.env` buy nothing if
+`~/.aws/credentials`, `~/.ssh/id_rsa` and every unrelated repo are one `cat` away.
+
+**11 of 30 confine the agent to the working directory by default.** `kib` is one of them:
+the project arrives at `$PWD` through the FUSE view and **nothing else of the host `$HOME` is
+mounted** — no `~/.ssh`, `~/.aws`, `~/.gnupg`, no SSH-agent socket, not even `~/.gitconfig`
+(git identity is read host-side and passed as `GIT_AUTHOR_*` env). The container's own `$HOME`
+is `/home/hostuser`, a container path.
+
+The one carve-out, stated plainly: two slices of canonical `~/.claude` are bound in —
+`plugins`, `skills`, `agents`, `commands`, `hooks` **read-only** (writable only under
+`--unlock-shared`), and `projects/<slug>` read-write so `--resume` lists the same sessions on
+both sides. Everything else Claude needs is assembled into `$KIB_STATE_ROOT` scratch, not
+mounted from `$HOME`.
+
+| Confines to the workspace by default | Primitive | What the docs say |
+|---|---|---|
+| [aicontainer](https://github.com/stefanoginella/aicontainer) | container | "Host home, `~/.ssh`, SSH-agent socket — **No** — not mounted, not forwarded" |
+| [yolobox](https://github.com/finbarr/yolobox) | container | "your home directory is not mounted unless you explicitly opt in" |
+| [agent-sandbox](https://github.com/mattolson/agent-sandbox) | container | "read/write access to only your repository directory" |
+| [sandvault](https://github.com/webcoyote/sandvault) | separate user acct | "Cannot access your home directory"; `/Users/*` no access |
+| [sandbox-shell](https://github.com/agentic-dev3o/sandbox-shell) | Seatbelt | "Reads: denied by default. Only `/usr`, `/bin`, `/Library`, `/System`" |
+| [agent-safehouse](https://github.com/eugene1g/agent-safehouse) | Seatbelt | "`stat "$HOME"` can succeed while `ls "$HOME"` and `cat ~/secret.txt` still fail" |
+| [cplt](https://github.com/navikt/cplt) | Landlock | "deny-by-default filesystem with kernel enforcement" + a named `~` allowlist |
+| [SandboxedClaudeCode](https://github.com/CaptainMcCrank/SandboxedClaudeCode) | bubblewrap | "Claude can only access your current project, not your entire home directory" |
+| [claude-code-devcontainer](https://github.com/trailofbits/claude-code-devcontainer) | devcontainer | "Sandboxed: Filesystem (host files inaccessible)"; warns *against* mounting `$HOME` |
+| [yoloai](https://github.com/kstenerud/yoloai) | multi-backend | isolated copy honouring `.gitignore`; "Refuses to mount `$HOME`" |
+| [claude-code-sandbox](https://github.com/FoamoftheSea/claude-code-sandbox) | container | `../src:/workspace`; "no SSH keys, no host credentials mounted" |
+
+**6 leave `$HOME` readable by default** — and this is the column's real finding: **five of the six
+are OS sandboxes**, where the agent runs as *you* and every path not named in the profile stays
+readable. [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime): "By
+default, read access is allowed everywhere" — workspace-only is a documented *recipe*
+(`denyRead: ["/Users"]` + `allowRead: ["."]`), not the default.
+[cco](https://github.com/nikvdp/cco) exposes "the entire host filesystem as read-only" in native
+mode, with `--safe` as the opt-out. [scode](https://github.com/bindsch/scode) is "allow-default"
+with `~/.ssh` explicitly "Not blocked by default."
+[enclave](https://github.com/kohkimakimoto/enclave) ships `(allow default)` and limits only writes.
+[agent-seatbelt-sandbox](https://github.com/michaelneale/agent-seatbelt-sandbox) denies exactly one
+path, `~/.secrets`. The sixth is a container:
+[packnplay](https://github.com/obra/packnplay) mounts `~/.ssh`, `~/.gnupg` and `~/.aws` in on
+purpose.
+
+That split is a **choice, not a property of the primitive** — `cplt`, `agent-safehouse` and
+`sandbox-shell` prove Landlock and Seatbelt can hold a deny-by-default read posture. Conversely a
+container does not confine by itself: `packnplay`, `vibebox` and `textcortex/claude-code-sandbox`
+each hand back part of `$HOME` after isolating the filesystem.
+
+`kib`'s advantage here is structural rather than clever: a bind mount only shows what you name,
+so the confinement costs nothing to maintain and cannot drift as new secret-bearing paths appear
+in `$HOME`. A deny-list has to be kept current; an allowlist of one directory does not.
 
 ---
 
@@ -116,39 +178,44 @@ untrusted repos that fetch from arbitrary registries, and an allowlist cannot cl
 **Legend** — ✅ documented and specific · ⚠️ partial, opt-in, or conditional ·
 ❌ documented as absent, or absent from an explicit enumeration · ❓ not stated in the docs
 
-| Project | Kernel boundary | Egress control | Credential exposure | Host-config guard | In-project redaction | Clipboard | Shared-config guard | Hardening | Docker socket | Multi-session | Security tests | Platforms |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| **`kib` (baseline)** | ❌ shared kernel | ❌ **open (accepted risk)** | ✅ **brokered by default — token never in the box** | ✅ **FUSE + structural git detection + content-validated `.git/config`** | ✅ **FUSE stub-on-read, covers mid-session files** | ✅ **proxy, writes refused** | ✅ RO mounts + host-side validator | ✅ cap-drop ALL, no-new-privs, seccomp, AppArmor | ❌ none | ✅ 1 container/project, N terminals | ✅ `security-test.sh`, 11 sections, both redaction modes | Linux, macOS |
-| [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) | ❌ OS sandbox | ✅ deny-all + allowlist proxy | ⚠️ opt-in `denyRead` | ✅ mandatory deny-write: `.git/config`, `.git/hooks`, `.vscode`, `.idea`, shell rc, `.mcp.json` | ⚠️ opt-in | ❓ | n/a | ✅ seccomp BPF, nested PID ns, WFP fence | n/a | ❓ | ✅ mandatory-deny-paths suite | macOS, Linux, Win (alpha) |
-| [microsandbox](https://github.com/superradcompany/microsandbox) | ✅ microVM | ✅ deny-default, DNS+TCP, airgap | ✅ **keys never enter VM** | ❓ | ❓ | ❓ | n/a | ✅ hardware-level VM | ❓ | ⚠️ named sandboxes | ✅ domain/port/secret tests | Linux, macOS, Windows |
-| [matchlock](https://github.com/jingkaihe/matchlock) | ✅ microVM | ✅ deny-all, nftables + MITM | ✅ **in-flight injection; VM sees placeholder** | ❓ | ⚠️ VFS hook rules, no default | ❓ | n/a | ✅ VM + gVisor netstack | ❓ | ⚠️ `exec <vm-id>` | ❓ tests exist, not claimed | Linux (KVM), macOS AS |
-| [cleanroom](https://github.com/buildkite/cleanroom) | ✅ microVM | ✅ **deny-by-default required** | ✅ host-side mediation gateway | ❓ | ❓ | ❓ | n/a | ✅ fail-closed, policy hash | ❓ | ✅ `fork --count 100` | ❓ | macOS, Linux |
-| [cplt](https://github.com/navikt/cplt) | ❌ OS sandbox | ✅ 443-only + CONNECT allowlist | ✅ ssh/aws/gnupg/kube kernel-blocked | ✅ **`.git/hooks`, `.git/config`, `.gitmodules` blocked** (`.vscode` allowed — stated risk) | ✅ **`.env*`, `.pem`, `.key` blocked** | ❓ | n/a | ✅ seccomp denies `unshare`/`setns` | ❓ | ❓ | ✅ `e2e_guards.rs` | macOS, Linux 5.13+ |
-| [fence](https://github.com/fencesandbox/fence) | ❌ OS sandbox | ✅ deny-all + allowlist proxy | ✅ denyRead ssh/aws/netrc; strips `LD_*` | ✅ "always-protected targets (shell configs, git hooks)" | ⚠️ **denyWrite only — readable** | ❓ | n/a | ✅ Landlock v4, seccomp, eBPF | ❓ | ❓ | ✅ seccomp + network-policy suite | macOS, Linux, WSL |
-| [agent-seatbelt](https://github.com/CJHwong/agent-seatbelt) | ❌ OS sandbox | ❌ **"fully open"** | ✅ broad read-denies | ✅ **write-denies `.git/hooks`, `.git/config`, `.mcp.json`, `.vscode`, shell rc** | ⚠️ `~/.env` only | ❓ | n/a | ✅ Seatbelt + ONNX PII filter (fails open) | n/a | ❓ | ⚠️ PII filter only | macOS |
-| [aicontainer](https://github.com/stefanoginella/aicontainer) | ❌ shared kernel | ⚠️ opt-in ipset; always-on metadata drop | ✅ nothing auto-forwarded | ✅ **`.devcontainer/`, `.git/config`, `.git/hooks` RO + sanitizer** | ✅ **hook blocks `.env*` reads** | ❓ | ⚠️ shared auth volume | ✅ cap-drop, no `NET_RAW`, RO rootfs sidecar | ✅ **proxied, digest-pinned** | ✅ one container/project | ✅ `test-aic-host-security.sh` | Docker Desktop/OrbStack/Colima |
-| [agent-sandbox](https://github.com/mattolson/agent-sandbox) | ❌ shared kernel | ✅ mitmproxy deny + iptables | ✅ **injected in proxy; agent never sees token** | ❓ | ❌ | ❓ | n/a | ✅ cap_drop ALL, restricted sudoers | ❌ none | ❓ | ✅ proxy-enforcement pytest | Colima/Docker (Apple Silicon) |
-| [yoloai](https://github.com/kstenerud/yoloai) | ⚠️ runc→gVisor→Kata | ⚠️ `--network-isolated` / `--none` / open | ✅ **broker: key stays host-side** | ❌ isolated copy; `apply` is the gate | ✅ `:copy` honours `.gitignore` | ❓ | n/a | ✅ non-root, mount refusal | ❓ | ✅ named concurrent sandboxes | ✅ broker/credential tests | Linux, macOS, WSL2 |
-| [cco](https://github.com/nikvdp/cco) | ❌ OS sandbox | ❌ **"intentionally unrestricted"** | ✅ keychain extraction, RO mount | ⚠️ `~/.gitconfig`/`~/.ssh` RO; project `.git` ❌ | ❌ **explicitly not covered** | ❓ | n/a | ✅ seccomp blocks TIOCSTI/TIOCLINUX | ⚠️ opt-in ("defeats isolation") | ✅ `--persist` | ✅ sandbox/seccomp/seatbelt | macOS, Linux |
-| [agent-safehouse](https://github.com/eugene1g/agent-safehouse) | ❌ OS sandbox | ❌ **"open by default"** | ✅ deny-first; ssh not granted | ❌ workdir rw, no carve-out | ❓ | ⚠️ blocked in tests | n/a | ✅ deny-all start | n/a | ❓ | ✅ `tests/policy/**/*.bats` + CI | macOS |
-| [sandbox-shell](https://github.com/agentic-dev3o/sandbox-shell) | ❌ OS sandbox | ✅ blocked by default | ✅ always denies ssh/aws/docker/Documents | ❓ | ❓ | ❓ | n/a | ✅ deny-by-default reads+writes+net | n/a | ❓ | ✅ `test-security.sh` | macOS |
-| [agent-seatbelt-sandbox](https://github.com/michaelneale/agent-seatbelt-sandbox) | ❌ OS sandbox | ✅ **kernel blocks all but localhost** | ⚠️ `~/.secrets` only | ❓ | ❓ | ❓ | n/a | ✅ cannot be removed from inside | n/a | ❓ | ✅ `./test.sh`, 9 tests | macOS |
-| [claude-code-devcontainer](https://github.com/trailofbits/claude-code-devcontainer) | ❌ shared kernel | ⚠️ manual iptables example | ⚠️ volume; **SSH agent forwarded** | ⚠️ `.devcontainer/` RO only | ❌ | ❓ | ❓ | ❓ | ❌ not mounted | ❓ | ❌ | ❓ |
-| [claudebox](https://github.com/RchGrav/claudebox) | ❌ shared kernel | ⚠️ allowlist, mechanism unstated | ⚠️ API key env; `~/.claude` RO | ❌ | ❌ | ❓ | ⚠️ `~/.claude` RO | ❓ | ❓ | ✅ multi-instance | ❌ | Linux, macOS, WSL2 |
-| [container-use](https://github.com/dagger/container-use) | ❌ shared kernel | ❓ | ✅ **refs resolved in-container, stripped from logs** | ❓ | ⚠️ log stripping only | ❓ | n/a | ❓ | ❓ | ✅ container+branch per agent | ❓ | macOS, others |
-| [yolobox](https://github.com/finbarr/yolobox) | ❌ shared kernel | ⚠️ `--no-network` opt-out | ✅ home not mounted unless opted in | ❌ opt-in `--git-config` | ⚠️ opt-in `--exclude` | ❓ | n/a | ⚠️ agent has root inside | ❓ | ⚠️ `fork` per agent | ❓ | ❓ |
-| [packnplay](https://github.com/obra/packnplay) | ❌ shared kernel | ❌ | ❌ **`~/.claude` rw, keychain copied in** | ❌ **executes the project's `devcontainer.json`** | ❌ | ❓ | ❌ | ❌ env whitelist only | ❓ | ✅ worktree-per-agent | ❌ | macOS, Linux |
-| [sculptor](https://github.com/imbue-ai/sculptor) | ⚠️ worktree | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ✅ parallel workspaces | ❓ | macOS AS, Linux |
-| [vibebox](https://github.com/robcholz/vibebox) | ✅ VM | ❓ | ❌ **`~/.claude`+`~/.codex` rw into VM** | ⚠️ `.git` tmpfs-masked "to discourage accidental edits" | ❓ | ❓ | ❌ | ✅ guest-kernel boundary | n/a | ✅ multi-instance | ❓ | macOS AS |
-| [chamber](https://github.com/cirruslabs/chamber) | ✅ ephemeral VM | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ✅ destroyed after run | n/a | ❓ | ❓ | macOS |
-| [sandvault](https://github.com/webcoyote/sandvault) | ❌ separate user acct | ❓ | ✅ **host `$HOME` unreachable** | ❓ | ❓ | ❓ | n/a | ✅ user acct + Seatbelt | n/a | ❓ | ❓ | macOS |
-| [scode](https://github.com/bindsch/scode) | ❌ OS sandbox | ⚠️ `--no-net` kills all | ⚠️ **`~/.ssh` NOT blocked by default** | ❌ | ❌ | ❓ | n/a | ⚠️ "Seatbelt, not armored vehicle" | ❓ | ⚠️ multi-harness | ✅ bats suite | macOS, Linux |
-| [SandboxedClaudeCode](https://github.com/CaptainMcCrank/SandboxedClaudeCode) | ❌ OS sandbox | ❌ open | ⚠️ **`$SSH_AUTH_SOCK` rw**, `~/.claude` rw | ❌ | ❌ | ❓ | ❌ | ✅ namespaces, Firejail seccomp | ❓ | ❓ | ❌ "wanted contribution" | Linux, macOS |
-| [enclave](https://github.com/kohkimakimoto/enclave) | ❌ OS sandbox | ❌ `(allow default)` | ❓ reads unrestricted | ❓ | ❓ | ❓ | n/a | ⚠️ writes limited to CWD | n/a | ❓ | ❓ | macOS |
-| [sbox](https://github.com/streamingfast/sbox) | ✅ microVM | ❓ | ⚠️ `~/.claude` mounted | ❌ | ❌ | ❓ | ❌ | ❓ | ⚠️ opt-in flag | ⚠️ per-project hash | ❌ | ❓ |
-| [sandclaude](https://github.com/binwiederhier/sandclaude) | ❌ shared kernel | ❓ | ❌ **host `.credentials.json` mounted** | ❌ | ❌ | ❓ | ❓ | ❓ | ❓ | ⚠️ `-r` resume | ❌ | ❓ |
-| [claude-code-sandbox](https://github.com/FoamoftheSea/claude-code-sandbox) | ❌ shared kernel | ✅ internal net + Squid SNI allowlist | ✅ volume-only | ❌ **README advises manual care** | ❌ "agent can read hardcoded secrets" | ❓ | ❓ | ⚠️ pids/mem/cpu limits only | ❌ none | ❓ | ✅ `test-sandbox.sh` | ❓ |
-| [claude-code-sandbox](https://github.com/textcortex/claude-code-sandbox) *(archived)* | ❌ shared kernel | ❓ | ❌ **auto-discovers keychain, `gh auth`, `GITHUB_TOKEN`** | ❌ | ❌ | ❓ | ❌ | ❓ | ❓ | ✅ branch per session | ❌ | ❓ |
+In **Workspace confinement**, ✅ means the docs put the host `$HOME` out of reach by default —
+the agent gets the project directory (plus, at most, a named allowlist) and nothing else. Every
+cell describes the **default** posture; an opt-in flag that would tighten it is noted in the cell,
+not scored.
+
+| Project | Workspace confinement | Kernel boundary | Egress control | Credential exposure | Host-config guard | In-project redaction | Clipboard | Shared-config guard | Hardening | Docker socket | Multi-session | Security tests | Platforms |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **`kib` (baseline)** | ✅ **only `$PWD` + one `~/.claude` slice** — no host `$HOME`, no SSH agent, git identity by env | ❌ shared kernel | ❌ **open (accepted risk)** | ✅ **brokered by default — token never in the box** | ✅ **FUSE + structural git detection + content-validated `.git/config`** | ✅ **FUSE stub-on-read, covers mid-session files** | ✅ **proxy, writes refused** | ✅ RO mounts + host-side validator | ✅ cap-drop ALL, no-new-privs, seccomp, AppArmor | ❌ none | ✅ 1 container/project, N terminals | ✅ `security-test.sh`, 11 sections, both redaction modes | Linux, macOS |
+| [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) | ❌ "read access is allowed everywhere" (⚠️ opt-in workspace-only recipe) | ❌ OS sandbox | ✅ deny-all + allowlist proxy | ⚠️ opt-in `denyRead` | ✅ mandatory deny-write: `.git/config`, `.git/hooks`, `.vscode`, `.idea`, shell rc, `.mcp.json` | ⚠️ opt-in | ❓ | n/a | ✅ seccomp BPF, nested PID ns, WFP fence | n/a | ❓ | ✅ mandatory-deny-paths suite | macOS, Linux, Win (alpha) |
+| [microsandbox](https://github.com/superradcompany/microsandbox) | ❓ volumes explicit, host scope unstated | ✅ microVM | ✅ deny-default, DNS+TCP, airgap | ✅ **keys never enter VM** | ❓ | ❓ | ❓ | n/a | ✅ hardware-level VM | ❓ | ⚠️ named sandboxes | ✅ domain/port/secret tests | Linux, macOS, Windows |
+| [matchlock](https://github.com/jingkaihe/matchlock) | ❓ `/workspace` over FUSE, host root unstated | ✅ microVM | ✅ deny-all, nftables + MITM | ✅ **in-flight injection; VM sees placeholder** | ❓ | ⚠️ VFS hook rules, no default | ❓ | n/a | ✅ VM + gVisor netstack | ❓ | ⚠️ `exec <vm-id>` | ❓ tests exist, not claimed | Linux (KVM), macOS AS |
+| [cleanroom](https://github.com/buildkite/cleanroom) | ❓ "copy-in", scope unstated | ✅ microVM | ✅ **deny-by-default required** | ✅ host-side mediation gateway | ❓ | ❓ | ❓ | n/a | ✅ fail-closed, policy hash | ❓ | ✅ `fork --count 100` | ❓ | macOS, Linux |
+| [cplt](https://github.com/navikt/cplt) | ✅ deny-by-default; project dir + a named `~` allowlist | ❌ OS sandbox | ✅ 443-only + CONNECT allowlist | ✅ ssh/aws/gnupg/kube kernel-blocked | ✅ **`.git/hooks`, `.git/config`, `.gitmodules` blocked** (`.vscode` allowed — stated risk) | ✅ **`.env*`, `.pem`, `.key` blocked** | ❓ | n/a | ✅ seccomp denies `unshare`/`setns` | ❓ | ❓ | ✅ `e2e_guards.rs` | macOS, Linux 5.13+ |
+| [fence](https://github.com/fencesandbox/fence) | ⚠️ writes deny-by-default; read confinement is opt-in `denyRead` | ❌ OS sandbox | ✅ deny-all + allowlist proxy | ✅ denyRead ssh/aws/netrc; strips `LD_*` | ✅ "always-protected targets (shell configs, git hooks)" | ⚠️ **denyWrite only — readable** | ❓ | n/a | ✅ Landlock v4, seccomp, eBPF | ❓ | ❓ | ✅ seccomp + network-policy suite | macOS, Linux, WSL |
+| [agent-seatbelt](https://github.com/CJHwong/agent-seatbelt) | ⚠️ writes project-scoped; reads only an enumerated deny-list | ❌ OS sandbox | ❌ **"fully open"** | ✅ broad read-denies | ✅ **write-denies `.git/hooks`, `.git/config`, `.mcp.json`, `.vscode`, shell rc** | ⚠️ `~/.env` only | ❓ | n/a | ✅ Seatbelt + ONNX PII filter (fails open) | n/a | ❓ | ⚠️ PII filter only | macOS |
+| [aicontainer](https://github.com/stefanoginella/aicontainer) | ✅ **"Host home … not mounted, not forwarded"** — `/workspace` is the one writable host path | ❌ shared kernel | ⚠️ opt-in ipset; always-on metadata drop | ✅ nothing auto-forwarded | ✅ **`.devcontainer/`, `.git/config`, `.git/hooks` RO + sanitizer** | ✅ **hook blocks `.env*` reads** | ❓ | ⚠️ shared auth volume | ✅ cap-drop, no `NET_RAW`, RO rootfs sidecar | ✅ **proxied, digest-pinned** | ✅ one container/project | ✅ `test-aic-host-security.sh` | Docker Desktop/OrbStack/Colima |
+| [agent-sandbox](https://github.com/mattolson/agent-sandbox) | ✅ "read/write access to only your repository directory" | ❌ shared kernel | ✅ mitmproxy deny + iptables | ✅ **injected in proxy; agent never sees token** | ❓ | ❌ | ❓ | n/a | ✅ cap_drop ALL, restricted sudoers | ❌ none | ❓ | ✅ proxy-enforcement pytest | Colima/Docker (Apple Silicon) |
+| [yoloai](https://github.com/kstenerud/yoloai) | ✅ isolated copy honouring `.gitignore`; **refuses to mount `$HOME`** | ⚠️ runc→gVisor→Kata | ⚠️ `--network-isolated` / `--none` / open | ✅ **broker: key stays host-side** | ❌ isolated copy; `apply` is the gate | ✅ `:copy` honours `.gitignore` | ❓ | n/a | ✅ non-root, mount refusal | ❓ | ✅ named concurrent sandboxes | ✅ broker/credential tests | Linux, macOS, WSL2 |
+| [cco](https://github.com/nikvdp/cco) | ❌ native mode "entire host filesystem as read-only" (⚠️ `--safe` hides `$HOME`) | ❌ OS sandbox | ❌ **"intentionally unrestricted"** | ✅ keychain extraction, RO mount | ⚠️ `~/.gitconfig`/`~/.ssh` RO; project `.git` ❌ | ❌ **explicitly not covered** | ❓ | n/a | ✅ seccomp blocks TIOCSTI/TIOCLINUX | ⚠️ opt-in ("defeats isolation") | ✅ `--persist` | ✅ sandbox/seccomp/seatbelt | macOS, Linux |
+| [agent-safehouse](https://github.com/eugene1g/agent-safehouse) | ✅ deny-all start; `stat $HOME` succeeds, `ls $HOME` fails | ❌ OS sandbox | ❌ **"open by default"** | ✅ deny-first; ssh not granted | ❌ workdir rw, no carve-out | ❓ | ⚠️ blocked in tests | n/a | ✅ deny-all start | n/a | ❓ | ✅ `tests/policy/**/*.bats` + CI | macOS |
+| [sandbox-shell](https://github.com/agentic-dev3o/sandbox-shell) | ✅ "Reads: denied by default. Only `/usr`, `/bin`, `/Library`, `/System`" | ❌ OS sandbox | ✅ blocked by default | ✅ always denies ssh/aws/docker/Documents | ❓ | ❓ | ❓ | n/a | ✅ deny-by-default reads+writes+net | n/a | ❓ | ✅ `test-security.sh` | macOS |
+| [agent-seatbelt-sandbox](https://github.com/michaelneale/agent-seatbelt-sandbox) | ❌ only `~/.secrets` denied | ❌ OS sandbox | ✅ **kernel blocks all but localhost** | ⚠️ `~/.secrets` only | ❓ | ❓ | ❓ | n/a | ✅ cannot be removed from inside | n/a | ❓ | ✅ `./test.sh`, 9 tests | macOS |
+| [claude-code-devcontainer](https://github.com/trailofbits/claude-code-devcontainer) | ✅ "host files inaccessible", blast radius `/workspace`; only `~/.gitconfig` ro | ❌ shared kernel | ⚠️ manual iptables example | ⚠️ volume; **SSH agent forwarded** | ⚠️ `.devcontainer/` RO only | ❌ | ❓ | ❓ | ❓ | ❌ not mounted | ❓ | ❌ | ❓ |
+| [claudebox](https://github.com/RchGrav/claudebox) | ⚠️ CWD + `~/.claude` ro; full mount set unstated | ❌ shared kernel | ⚠️ allowlist, mechanism unstated | ⚠️ API key env; `~/.claude` RO | ❌ | ❌ | ❓ | ⚠️ `~/.claude` RO | ❓ | ❓ | ✅ multi-instance | ❌ | Linux, macOS, WSL2 |
+| [container-use](https://github.com/dagger/container-use) | ❓ | ❌ shared kernel | ❓ | ✅ **refs resolved in-container, stripped from logs** | ❓ | ⚠️ log stripping only | ❓ | n/a | ❓ | ❓ | ✅ container+branch per agent | ❓ | macOS, others |
+| [yolobox](https://github.com/finbarr/yolobox) | ✅ **"your home directory is not mounted unless you explicitly opt in"** | ❌ shared kernel | ⚠️ `--no-network` opt-out | ✅ home not mounted unless opted in | ❌ opt-in `--git-config` | ⚠️ opt-in `--exclude` | ❓ | n/a | ⚠️ agent has root inside | ❓ | ⚠️ `fork` per agent | ❓ | ❓ |
+| [packnplay](https://github.com/obra/packnplay) | ❌ **`~/.ssh`, `~/.gnupg`, `~/.aws` mounted; `~/.claude` rw** | ❌ shared kernel | ❌ | ❌ **`~/.claude` rw, keychain copied in** | ❌ **executes the project's `devcontainer.json`** | ❌ | ❓ | ❌ | ❌ env whitelist only | ❓ | ✅ worktree-per-agent | ❌ | macOS, Linux |
+| [sculptor](https://github.com/imbue-ai/sculptor) | ❓ | ⚠️ worktree | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ✅ parallel workspaces | ❓ | macOS AS, Linux |
+| [vibebox](https://github.com/robcholz/vibebox) | ⚠️ repo-first allowlist, but `~/.claude`+`~/.codex` rw by default | ✅ VM | ❓ | ❌ **`~/.claude`+`~/.codex` rw into VM** | ⚠️ `.git` tmpfs-masked "to discourage accidental edits" | ❓ | ❓ | ❌ | ✅ guest-kernel boundary | n/a | ✅ multi-instance | ❓ | macOS AS |
+| [chamber](https://github.com/cirruslabs/chamber) | ❓ only "current directory mounted" | ✅ ephemeral VM | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ✅ destroyed after run | n/a | ❓ | ❓ | macOS |
+| [sandvault](https://github.com/webcoyote/sandvault) | ✅ **"Cannot access your home directory"** — `/Users/*` no access | ❌ separate user acct | ❓ | ✅ **host `$HOME` unreachable** | ❓ | ❓ | ❓ | n/a | ✅ user acct + Seatbelt | n/a | ❓ | ❓ | macOS |
+| [scode](https://github.com/bindsch/scode) | ❌ "everything is allowed" by default; `~/.ssh` not blocked (⚠️ `--strict`) | ❌ OS sandbox | ⚠️ `--no-net` kills all | ⚠️ **`~/.ssh` NOT blocked by default** | ❌ | ❌ | ❓ | n/a | ⚠️ "Seatbelt, not armored vehicle" | ❓ | ⚠️ multi-harness | ✅ bats suite | macOS, Linux |
+| [SandboxedClaudeCode](https://github.com/CaptainMcCrank/SandboxedClaudeCode) | ✅ "can only access your current project, not your entire home directory" | ❌ OS sandbox | ❌ open | ⚠️ **`$SSH_AUTH_SOCK` rw**, `~/.claude` rw | ❌ | ❌ | ❓ | ❌ | ✅ namespaces, Firejail seccomp | ❓ | ❓ | ❌ "wanted contribution" | Linux, macOS |
+| [enclave](https://github.com/kohkimakimoto/enclave) | ❌ `(allow default)` — only *writes* limited to CWD | ❌ OS sandbox | ❌ `(allow default)` | ❓ reads unrestricted | ❓ | ❓ | ❓ | n/a | ⚠️ writes limited to CWD | n/a | ❓ | ❓ | macOS |
+| [sbox](https://github.com/streamingfast/sbox) | ❓ workspace exposure unstated | ✅ microVM | ❓ | ⚠️ `~/.claude` mounted | ❌ | ❌ | ❓ | ❌ | ❓ | ⚠️ opt-in flag | ⚠️ per-project hash | ❌ | ❓ |
+| [sandclaude](https://github.com/binwiederhier/sandclaude) | ⚠️ workspace + claude/gh/jira configs; `$HOME` scope unstated | ❌ shared kernel | ❓ | ❌ **host `.credentials.json` mounted** | ❌ | ❌ | ❓ | ❓ | ❓ | ❓ | ⚠️ `-r` resume | ❌ | ❓ |
+| [claude-code-sandbox](https://github.com/FoamoftheSea/claude-code-sandbox) | ✅ `../src:/workspace` default; "no SSH keys, no host credentials mounted" | ❌ shared kernel | ✅ internal net + Squid SNI allowlist | ✅ volume-only | ❌ **README advises manual care** | ❌ "agent can read hardcoded secrets" | ❓ | ❓ | ⚠️ pids/mem/cpu limits only | ❌ none | ❓ | ✅ `test-sandbox.sh` | ❓ |
+| [claude-code-sandbox](https://github.com/textcortex/claude-code-sandbox) *(archived)* | ⚠️ files copied in, but auto-forwards `~/.claude`, `.gitconfig`, `gh auth` | ❌ shared kernel | ❓ | ❌ **auto-discovers keychain, `gh auth`, `GITHUB_TOKEN`** | ❌ | ❌ | ❓ | ❌ | ❓ | ❓ | ✅ branch per session | ❌ | ❓ |
 
 ---
 
