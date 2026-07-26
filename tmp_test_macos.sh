@@ -22,6 +22,8 @@ set -uo pipefail
 # /Volumes, /private, /tmp), so the daemon creates it INSIDE the VM. /var would be a trap:
 # it is a symlink to /private/var, which IS shared, so it would land on the Mac instead.
 PROBE_ROOT="/run/kib-probe"
+# Resolved from the script, not $PWD, so it works from anywhere.
+KIB_ROOT="$(cd "$(dirname "$0")" && pwd)"
 BASE_IMAGE="alpine:3.20"
 KIB_IMAGE="${KIB_IMAGE:-keep-it-in-your-box}"
 A="kibprobe-sidecar"
@@ -88,6 +90,24 @@ _want() {
 _vm() {
     docker run --rm --privileged --pid=host "$BASE_IMAGE" \
         nsenter -t 1 -m -u -i -n -- "$@" 2>&1
+}
+
+# Propagation of mountpoint $2 as seen inside container $1. Read from /proc/self/mountinfo,
+# not findmnt: alpine ships no util-linux, and mountinfo is the source of truth anyway —
+# 'shared:N' and/or 'master:N' appear in the optional fields, between field 7 and the '-'.
+_prop_in() {
+    docker exec "$1" awk -v p="$2" '
+        $5 == p {
+            for (i = 7; i <= NF && $i != "-"; i++) {
+                if ($i ~ /^shared:/) s = 1
+                if ($i ~ /^master:/) m = 1
+            }
+            if (s && m) print "shared,slave"
+            else if (s) print "shared"
+            else if (m) print "slave"
+            else print "private"
+            exit
+        }' /proc/self/mountinfo 2>/dev/null | tr -d '\r'
 }
 
 # Is there a mount at $1 in the VM? ($2, if given, must match the fs type prefix.)
@@ -219,7 +239,7 @@ docker run -d --name "$A" \
 
 if docker ps --format '{{.Names}}' | grep -q "^${A}$"; then
     _ok "sidecar starts unprivileged (uid $(id -u), cap SYS_ADMIN only, --network none)"
-    SPROP="$(docker exec "$A" findmnt -no PROPAGATION --target /views 2>/dev/null | tr -d '\r')"
+    SPROP="$(_prop_in "$A" /views)"
     case "$SPROP" in
         *shared*) _ok "inside the sidecar /views is '$SPROP'" ;;
         *) _no "inside the sidecar /views is '${SPROP:-unknown}', not shared" \
@@ -242,6 +262,11 @@ else
     SRC="$(mktemp -d /tmp/kibprobe.XXXXXX)"
     echo "visible" >"$SRC/normal.txt"
     echo "SECRET=nope" >"$SRC/.env"
+    # An empty project rule file. The .env redaction under test comes from the GUARD file
+    # (guest/policy/global.kibignore), which is what every project gets whether it has a
+    # .kibignore or not — so pass the real one, or the .env assertion passes for free.
+    PAT="$SRC.patterns"
+    : >"$PAT"
 
     _vm sh -c "mkdir -p $PROBE_ROOT/mnt" >/dev/null 2>&1
     docker run -d --name "$A" \
@@ -249,11 +274,14 @@ else
         --device /dev/fuse --security-opt apparmor=unconfined \
         --user "$(id -u):$(id -g)" --userns=host --network none \
         -v "$SRC:/src" \
+        -v "$PAT:/patterns:ro" \
+        -v "$KIB_ROOT/guest/policy/global.kibignore:/guard:ro" \
         -v "$PROBE_ROOT:$PROBE_ROOT:rshared" \
-        -v "$PWD/kib:/usr/local/lib/kib:ro" \
+        -v "$KIB_ROOT/kib:/usr/local/lib/kib:ro" \
         --entrypoint /usr/local/bin/fuse \
         "$KIB_IMAGE" \
         --src /src --mnt "$PROBE_ROOT/mnt" \
+        --patterns-file /patterns --guard-file /guard \
         --uid "$(id -u)" --gid "$(id -g)" >/dev/null 2>&1
 
     i=0
@@ -316,7 +344,7 @@ else
             _ok "the agent's view is gone too, as expected"
         fi
     fi
-    rm -rf "$SRC"
+    rm -rf "$SRC" "$PAT"
 fi
 
 # ── verdict ──────────────────────────────────────────────────────
