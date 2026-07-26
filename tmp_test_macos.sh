@@ -268,38 +268,75 @@ else
     PAT="$SRC.patterns"
     : >"$PAT"
 
-    _vm sh -c "mkdir -p $PROBE_ROOT/mnt" >/dev/null 2>&1
-    docker run -d --name "$A" \
-        --cap-drop=ALL --cap-add=SYS_ADMIN \
-        --device /dev/fuse --security-opt apparmor=unconfined \
-        --user "$(id -u):$(id -g)" --userns=host --network none \
-        -v "$SRC:/src" \
-        -v "$PAT:/patterns:ro" \
-        -v "$KIB_ROOT/guest/policy/global.kibignore:/guard:ro" \
-        -v "$PROBE_ROOT:$PROBE_ROOT:rshared" \
-        -v "$KIB_ROOT/kib:/usr/local/lib/kib:ro" \
-        --entrypoint /usr/local/bin/fuse \
-        "$KIB_IMAGE" \
-        --src /src --mnt "$PROBE_ROOT/mnt" \
-        --patterns-file /patterns --guard-file /guard \
-        --uid "$(id -u)" --gid "$(id -g)" >/dev/null 2>&1
+    # The mountpoint must be owned by whoever mounts. The old sidecar got this free — the
+    # HOST user did the mkdir. Here a root VM helper does it, so hand it over explicitly or
+    # fusermount3 refuses a mountpoint the caller does not own.
+    _vm sh -c "mkdir -p $PROBE_ROOT/mnt && chown $(id -u):$(id -g) $PROBE_ROOT/mnt" \
+        >/dev/null 2>&1
 
-    i=0
+    # $1 = --user arg ("" for root). Starts the server and waits up to 15s for the mount.
+    _start_fuse() {
+        _rm_containers
+        _u=${1:+--user $1}
+        # shellcheck disable=SC2086  # $_u must word-split into a flag pair, or nothing
+        docker run -d --name "$A" \
+            --cap-drop=ALL --cap-add=SYS_ADMIN \
+            --device /dev/fuse --security-opt apparmor=unconfined \
+            $_u --userns=host --network none \
+            -v "$SRC:/src" \
+            -v "$PAT:/patterns:ro" \
+            -v "$KIB_ROOT/guest/policy/global.kibignore:/guard:ro" \
+            -v "$PROBE_ROOT:$PROBE_ROOT:rshared" \
+            -v "$KIB_ROOT/kib:/usr/local/lib/kib:ro" \
+            --entrypoint /usr/local/bin/fuse \
+            "$KIB_IMAGE" \
+            --src /src --mnt "$PROBE_ROOT/mnt" \
+            --patterns-file /patterns --guard-file /guard \
+            --uid "$(id -u)" --gid "$(id -g)" >/dev/null 2>&1
+        _i=0
+        while [ "$_i" -lt 60 ]; do
+            _vm_mounted "$PROBE_ROOT/mnt" fuse && return 0
+            _i=$((_i + 1))
+            sleep 0.25
+        done
+        return 1
+    }
+
     mounted=0
-    while [ "$i" -lt 60 ]; do
-        if _vm_mounted "$PROBE_ROOT/mnt" fuse; then
+    if _start_fuse "$(id -u):$(id -g)"; then
+        mounted=1
+        _ok "the FUSE view mounted UNPRIVILEGED (uid $(id -u)) — the goal state"
+    else
+        # A/B: does it work as root? That separates "FUSE cannot propagate on Docker
+        # Desktop" (fatal) from "this uid cannot mount" (a fixable plumbing detail).
+        printf '      unprivileged mount failed; retrying as root to localise it...\n'
+        UNPRIV_LOG="$(docker logs "$A" 2>&1 | tail -20)"
+        if _start_fuse ""; then
             mounted=1
-            break
+            _no "the view mounts as ROOT but not as uid $(id -u)" \
+                "not fatal: the topology works, the sidecar's user does not. Unprivileged log:"
+            printf '%s\n' "$UNPRIV_LOG" | sed 's/^/        /'
+            _section "T5 diagnostics (why uid $(id -u) could not mount)"
+            printf '  mountpoint in VM : %s\n' \
+                "$(_vm sh -c "ls -ldn $PROBE_ROOT/mnt" | tr -d '\r')"
+            printf '  /dev/fuse in ctr : %s\n' \
+                "$(docker exec "$A" ls -ln /dev/fuse 2>&1 | tr -d '\r')"
+            printf '  CapEff as uid    : %s\n' \
+                "$(docker run --rm --cap-drop=ALL --cap-add=SYS_ADMIN \
+                    --user "$(id -u):$(id -g)" --userns=host "$KIB_IMAGE" \
+                    sh -c 'grep ^CapEff /proc/self/status' 2>&1 | tr -d '\r')"
+            printf '  CapEff as root   : %s\n' \
+                "$(docker run --rm --cap-drop=ALL --cap-add=SYS_ADMIN \
+                    --userns=host "$KIB_IMAGE" \
+                    sh -c 'grep ^CapEff /proc/self/status' 2>&1 | tr -d '\r')"
         fi
-        i=$((i + 1))
-        sleep 0.25
-    done
+    fi
 
     if [ "$mounted" -eq 0 ]; then
-        _no "the FUSE view never mounted in the VM" "$(docker logs "$A" 2>&1 | tail -5)"
+        _no "the FUSE view never mounted in the VM, as any user" ""
+        printf '      --- full sidecar log ---\n'
+        docker logs "$A" 2>&1 | sed 's/^/      /'
     else
-        _ok "the FUSE view is mounted in the VM at $PROBE_ROOT/mnt"
-
         # The agent exactly as it will be rebuilt: no SYS_ADMIN, no /dev/fuse, no apparmor
         # override, no-new-privileges on.
         docker run -d --name "$B" \
