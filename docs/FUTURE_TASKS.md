@@ -20,21 +20,21 @@ Every mechanism is measured against these four first. A proposal that violates o
 | **POST** | Redaction covers files created **after** launch, not only those present at start. |
 | **LIVE** | The project stays a live mount at the same absolute path — Claude's configs are path-keyed. |
 
-**CAP is capless-at-runtime, not capless-at-creation.** The container is *created* with
-`SYS_ADMIN`+`SETPCAP` so the entrypoint can mount the redacted view; both are gone from the
-bounding set before any agent process exists, and `kib` re-drops them on every `docker exec`
-(exec inherits the container's cap set, not PID 1's reduced one). Three independent things
-enforce it: `setpriv` at the exec, `setpriv` again in the entrypoint, and a fail-closed check in
-`docker-entrypoint.sh` that refuses to start the agent if `CAP_SYS_ADMIN` survived.
-`security-test.sh` asserts `CapEff` is zero and `CapBnd` lacks both.
+**CAP is capless-at-creation.** `docker run` never grants the agent's container `SYS_ADMIN`,
+`SETPCAP` or `/dev/fuse` — the FUSE server holds the mount from its own sidecar container — so
+the bounding set is a kernel fact about the container rather than a claim about what some shell
+remembered to drop. `docker-entrypoint.sh` still refuses to start the agent if `CAP_SYS_ADMIN`
+appears, as a launch-path regression detector. `security-test.sh` asserts `CapEff` is zero and
+`CapBnd` lacks both caps.
 
-kib once kept the cap in a quarantined FUSE sidecar instead, reached by shared-mount
-propagation — capless at *creation*. That bought a stronger paper property at the cost of
-failing **OS** outright (propagation is a shared-kernel feature, so macOS could never run it) and
-foreclosing every hypervisor-isolated substrate. See `docs/design-notes/microvm.md`.
+kib briefly mounted the view in-container instead, on the belief that propagation could never
+work on macOS. It can: both containers share the engine VM's kernel, and the real constraint is
+that the propagation *root* must not be a host file share. That window cost four properties on
+Linux — `apparmor=unconfined`, `SYS_ADMIN`+`SETPCAP`+`/dev/fuse` for the container's whole life,
+capless-at-creation becoming capless-at-runtime, and a FUSE server sitting beside the agent —
+all since recovered. See `docs/design-notes/macos.md`.
 
-**No proposal may widen the bounding set** — the caps above are the ceiling, and they exist only
-in the pre-agent window.
+**No proposal may widen the bounding set** — the caps above are the ceiling.
 
 ---
 
@@ -51,8 +51,8 @@ the existing boundary rather than moving it — modest ceiling, near-zero risk, 
 One flag on `docker run`; collapses the host syscall surface with no KVM and no guest kernel.
 Three load-bearing caveats:
 
-- **VERIFY first:** `runsc`'s FUSE support is incomplete and gated. If it cannot service
-  `/dev/fuse` the way the in-container mount needs, gVisor is dead here.
+- **VERIFY first:** `runsc`'s FUSE support is incomplete and gated, and it must also let the
+  sidecar's mount *propagate* to a second container. If either fails, gVisor is dead here.
 - yoloAI documents Claude Code hanging in `epoll_pwait` under gVisor on macOS.
 - runsc ignores iptables — one more reason any egress work must be a proxy, not packet filtering.
 

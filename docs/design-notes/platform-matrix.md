@@ -18,16 +18,19 @@ everything else calls its shims or tests `is_macos`.
 
 ## Redaction and container topology
 
-**The topology itself no longer differs.** Both platforms run one container with the redacted
-view mounted in-container over `$PWD` by the baked entrypoint, the real project at `/kib/real`
-under a root-700 parent, and caps dropped per session. Only these remain platform-conditional:
+**The topology itself does not differ.** Both platforms serve the redacted view from a FUSE
+**sidecar** and propagate it into the agent's container over `$PWD` (`:rslave`). Only the sidecar
+holds `SYS_ADMIN`, `/dev/fuse` and `apparmor=unconfined`; the agent's container is capless at
+creation. What differs is only *where the propagation root lives*, and how it is reached:
 
 | Behaviour | Ubuntu / Linux | macOS | Owner | Proven |
 |---|---|---|---|---|
-| Mode bits inside the project view | **Enforced** — the server is root, so the mount carries `default_permissions` and the kernel checks owner/mode against the caller | **Enforced the same way**, and this is the *only* place mode bits bite on macOS: outside the view `fakeowner` records a mode but ignores it in `access(2)` | `macos.md` | ✅ |
+| Propagation root | `$KIB_STATE_ROOT/fuse.<hash>` — systemd makes `/` rshared, so it propagates already | `/run/kib/fuse.<hash>` — must be VM-internal; a virtiofs share of the Mac has no mount namespace for the event. Never `/var` (a symlink to the shared `/private/var`) | `macos.md` | ✅ |
+| Preparing / destroying that root, and unmounting | Plain `mkdir`/`rm` as you; a `/proc/self/mounts` read and `fusermount3` | A throwaway `--privileged --pid=host` container `nsenter`ing the engine VM — the Mac cannot see the path at all. Deliberately **not** used on Linux, where it would target the real machine | `macos.md` | ✅ |
+| Mode bits inside the project view | **Enforced** — the mount carries `default_permissions`, so the kernel checks owner/mode against the caller rather than the server | **Enforced the same way**, and this is the *only* place mode bits bite on macOS: outside the view `fakeowner` records a mode but ignores it in `access(2)` | `macos.md` | ✅ |
 | Ownership in the backing store | Already the agent's, so the remap is identity | `fakeowner` reports every bind as `root:root`; without the remap git refuses the whole tree as "dubious ownership" | `macos.md` | ✅ |
-| AppArmor | `unconfined` — the in-container mount requires it; the empty bounding set is what confines the agent instead | Absent — Docker Desktop's LinuxKit kernel ships no AppArmor, so the suite skips the label assertion rather than failing it | `macos.md` | ✅ |
-| Sidecars per project | Up to 2 (Wayland guard, broker) + main | Up to 1 (broker) + main | `container-lifecycle.md` | — |
+| AppArmor | `docker-default` on the agent's container — its `deny mount,` costs nothing now the sidecar holds the mount | Absent — Docker Desktop's LinuxKit kernel ships no AppArmor, so the suite skips the label assertion rather than failing it | `macos.md` | ✅ |
+| Sidecars per project | Up to 3 (FUSE, Wayland guard, broker) + main | Up to 2 (FUSE, broker) + main | `container-lifecycle.md` | — |
 
 ## Clipboard
 
@@ -106,7 +109,7 @@ platform facts, not topology facts. All are fixed and regression-guarded.
 |---|---|---|
 | Every git command refuses the repo; `dev.sh` finds no files | `fakeowner` reports the project `root:root` | `regressions.sh` (`--uid`/`--gid`), `test_fuse.py` |
 | The synthetic `.credentials.json` is writable | `chmod 0400` is a no-op on a bind | `regressions.sh` (`:ro` by mount) |
-| Two sets of `projects/`, `.claude.json`, `↑` history | box path ≠ host path (now true on Linux too) | `wiring.sh`, `test_config_scope.py` |
+| Two sets of `projects/`, `.claude.json`, `↑` history | box path ≠ host path while the view was mounted in-container; the sidecar's `$PWD` bind makes them one key again | `wiring.sh`, `test_config_scope.py` |
 | No `commands/` in the box | the merge farm returned early with no shared source | — (entrypoint) |
 | 3 `lock_fd` failures + 2 false passes | the shim suite used GNU `flock(1)` as its own oracle | `portability.sh` now holds `shims.sh` to the contract |
 | AppArmor assertion cannot pass | LinuxKit ships no AppArmor | `security-test.sh` skips when the label is empty |

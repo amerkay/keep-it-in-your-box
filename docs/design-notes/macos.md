@@ -3,13 +3,31 @@
 Part of the Keep It in Your Box design notes (`docs/design-notes/`). See `CLAUDE.md` for the rules
 that reference this.
 
-`kib` runs on any macOS Docker engine. Supporting macOS is what settled kib's redaction topology for **both** platforms.
+`kib` runs on any macOS Docker engine. Supporting macOS is what settled kib's redaction topology for **both** platforms — twice, and the first answer was wrong.
 
-macOS cannot host a FUSE server in a *separate* container reaching the agent by shared-mount propagation (measured on Docker Desktop 4.78.0: it refuses the `rshared`/`rslave` mount config because bind sources resolve through the `/host_mnt` sharing layer, and the LinuxKit kernel refuses the unprivileged-userns `uid_map` write — so a capless-at-creation in-place FUSE exists only inside a real Linux VM, i.e. Colima). kib carried both topologies behind one interface for a while and now carries only the one that works everywhere: the container is created with `SYS_ADMIN`+`SETPCAP`+`/dev/fuse`+`apparmor=unconfined`, and the baked `guest/entrypoint/entrypoint-fuse.sh` mounts the redacted view over the project path; the real project sits at `/kib/real` under a root-700 parent.
+## The propagation root must never be a host file share
 
-Accepted trade: capless-at-**runtime**, not capless-at-creation. **The cap drop happens per session in `kib`'s `docker exec`, not at PID 1** — exec gets the *container's* cap set, not PID 1's reduced bounding set, so `kib` enters as root and runs `setpriv --bounding-set -sys_admin,-setpcap gosu <uid> …` itself (`setpriv` needs `CAP_SETPCAP` effective, which a `--user` session lacks). `security-test.sh` asserts `CapEff` is zero and `CapBnd` lacks both.
+kib serves the redacted view from a **sidecar** container and the agent's container consumes it by shared-mount propagation, on Linux and macOS alike. Only the sidecar gets `SYS_ADMIN`, `/dev/fuse` and `apparmor=unconfined`; the agent's container is `--cap-drop=ALL` under `docker-default`, capless at **creation**, with no FUSE server beside it.
 
-Dropping the propagation topology is also what makes a hypervisor-isolated substrate discussable at all; `microvm.md` records why kib is not pursuing one.
+That topology was once retired on the grounds that propagation is a shared-kernel feature and *"could never run on macOS"*. **That reasoning was wrong.** Both containers run in the same LinuxKit VM, so they share a kernel and propagation between them is ordinary. What actually failed is narrower and entirely fixable: kib rooted propagation at `/tmp`, which on a Mac is a *macOS* directory exposed over virtiofs — a file-sharing protocol, not a mount namespace, so a mount event has nowhere to land. Kubernetes hits the same wall and resolves it the same way: CSI FUSE sidecars propagate through an `emptyDir`, never a host share.
+
+Only the **mountpoint** is constrained. The project may still arrive over virtiofs as the sidecar's *source*. `fuse_root_path()` (host/portable.sh) therefore puts the root at `/run/kib/fuse.<hash>` on macOS: `/run` is neither a macOS directory nor in Docker Desktop's share list (`/Users`, `/Volumes`, `/private`, `/tmp`), so the daemon creates it inside the VM. **Never use `/var`** — it is a symlink to `/private/var`, which *is* shared, and the root would silently land back on the Mac. On Linux it is `$KIB_STATE_ROOT/fuse.<hash>`, which systemd's rshared `/` already propagates.
+
+Measured on Docker Desktop, in a throwaway probe run before any of this was written: the VM root is **already** `rshared` (no privileged setup step), a tmpfs mounted in one container appears in another, propagation survives the sidecar's real flags (`--user`, `--cap-drop=ALL --cap-add=SYS_ADMIN`, `--userns=host`, `--network none`) reporting `shared` rather than `shared,slave`, the FUSE server mounts **unprivileged**, and an agent container with `cap-drop=ALL`, no `/dev/fuse` and no AppArmor override reads, writes, sees `.env` still redacted and gets correct uids through the view.
+
+Three things the probe found that shaped the implementation:
+
+- **`fusermount3` aborts with "could not determine username"** unless `getpwuid(getuid())` resolves. kib once bound the *host's* `/etc/passwd`; that works on Linux and **cannot** work on macOS, where Open Directory keeps real users out of that file, so uid 501 is missing there too. `_stage_passwd` synthesises two lines instead — more shared code than the original, not less, and no host user table crosses the boundary.
+- **The mountpoint must be owned by the mounting uid.** Free on Linux (the user runs `mkdir`); explicit on macOS, where a root VM helper creates it.
+- **A stale `ENOTCONN` mount survives the sidecar's death.** Teardown unmounts explicitly, before `docker rm` — the other order orphans it every exit, and the next launch's `rm -rf` would then delete *through* it into the real project.
+
+## What the Mac cannot see, only Docker can reach
+
+The FUSE root lives inside the engine VM, so the Mac cannot create, inspect or unmount it. `_vm_exec` (host/portable.sh) runs a throwaway `--privileged --pid=host` container that `nsenter`s into the VM's mount namespace. That is a macOS-only mechanism **by design**: on Linux the same command would target your real machine, and buying code symmetry with a privileged container there would be a security regression. The Linux branches need no privilege at all.
+
+Five shims carry the entire divergence — `fuse_root_path`, `fuse_root_create`, `fuse_root_destroy`, `fuse_mounted`, `unmount_fuse` — and `tests/check/portability.sh` fails if a sixth appears anywhere else.
+
+`microvm.md` records why kib is not pursuing a hypervisor-isolated substrate.
 
 ## Portability contract
 
@@ -19,7 +37,7 @@ Header of `host/portable.sh`, enforced by `check.sh`: host-side scripts are bash
 
 **No nested bind mounts.** A `-v` whose destination is inside another `-v`'s destination aborts the whole `docker run` on Docker Desktop — `mountpoint "/run/host_virtiofs/…" is outside of rootfs`. runc resolves the mountpoint *through* the parent bind, so the real path lands in the engine VM's virtiofs view of the host, outside the container rootfs; the check runs after resolution whether or not runc had to create the mountpoint, so pre-creating it is not a workaround. This killed the second Mac launch attempt (the broker's synthetic `.credentials.json` over the shared-assembly dir), and the other three nests — the ro shared assets, the lock witness, the transcripts dir — would each have killed it in turn. `bind_via_link` (host/lifecycle.sh) mounts flat under `/run/kib/` and leaves a symlink to it in the parent's host-side dir; `tests/check/portability.sh` fails on a reintroduced nest. Linux tolerates nesting, so the Linux-only one (the resolv-sync `/dev/null` masks) stays as it is.
 
-**`$HOST_HOME`'s parent is not in the image.** The entrypoint symlinks `$HOST_HOME` → the container home so Claude's absolute-path-keyed project config resolves. On macOS that is `/Users/<user>`, and a debian image has no `/Users`; there is no `$PWD` bind to create one either, so `ln` failed ENOENT and the entrypoint's `set -e` killed PID 1. It `mkdir -p "$(dirname …)"` first now. Linux was masked from this while it still bound `$PWD` (which created `$HOST_HOME` outright, so the block was skipped) — with that bind gone it takes the same path, and `/home` being in the image is the only reason it survives.
+**`$HOST_HOME`'s parent is not in the image.** The entrypoint symlinks `$HOST_HOME` → the container home so Claude's absolute-path-keyed project config resolves. On macOS that is `/Users/<user>`, and a debian image has no `/Users`, so `ln` failed ENOENT and the entrypoint's `set -e` killed PID 1. It `mkdir -p "$(dirname …)"` first now. A project *under* `$HOME` no longer reaches that branch at all — the `$PWD` bind's mountpoint creates the whole chain, so `$HOST_HOME` exists and the block is skipped — but a project outside `$HOME` still does, on both platforms.
 
 A **second** entrypoint block links `$HOST_HOME/.claude` → the session config dir, so a host-installed plugin's absolute `installPath` resolves in the box (without it the plugin dangles and its MCP servers silently never start — `enabledPlugins` true, nothing in `/mcp`). It is aimed at `$USER_HOME/.claude`, not `$HOST_HOME/.claude`: the symlink above makes them the same directory, and the original spelling only fired when `$HOST_HOME` happened to be a real directory — which it no longer ever is. **Needs an on-hardware VERIFY** (see "Still open").
 
@@ -30,12 +48,12 @@ A **second** entrypoint block links `$HOST_HOME/.claude` → the session config 
 Docker Desktop backs every bind with a `fakeowner` layer over virtiofs. Two consequences, both
 found on the first real Mac run and neither reproducible on Linux:
 
-**Ownership is invented, so git refuses the project.** The project arrives at `/kib/real` owned
+**Ownership is invented, so git refuses the project.** The project reaches the sidecar owned
 by `root:root` whatever it is on the host. The FUSE server passed `st_uid`/`st_gid` straight
 through, the agent runs as `HOST_UID`, and git therefore reported *"detected dubious ownership
 in repository"* for the entire tree — taking `git status`, `./dev.sh` (its file discovery is
 `git ls-files`) and four of `security-test.sh`'s "the guard must not break ordinary git"
-assertions down with it. `entrypoint-fuse.sh` now passes `--uid`/`--gid` and the server reports
+assertions down with it. `prepare_redaction` now passes `--uid`/`--gid` and the server reports
 those **in place of whoever owns the project root, and only them**. Redaction is unaffected:
 every rule check is uid-independent, which is what makes the remap safe rather than a hole. It
 is passed on both platforms — on Linux the base ids already are the agent's, so the map is
@@ -47,20 +65,20 @@ matters: a file inside the project owned by *someone else* (a `sudo`-built artif
 `chown` back to the invented owner is translated to `-1` (no change) so `cp -p`, `tar -x` and
 `git checkout` do not try to rewrite the backing file to a uid it never had.
 
-**POSIX permissions are enforced by the kernel, not by the server's identity.** The server runs
-as **root** — it holds the mount, and on macOS the backing store reports root:root, so it cannot
-serve the tree as anyone else. That means every backing syscall bypasses DAC, and the mount
-carries `default_permissions` so the kernel re-applies a standard owner/mode check against the
-**caller's** ids on every operation. Without it nothing inside `$PWD` was permission-checked at
-all: a `chmod 000` file read and wrote fine through the view. The check is *additive* — a
-handler's own `EACCES` still stands, so the stubs (`0444`/`0555`) and every write denial are
-unaffected. Two consequences worth knowing:
+**POSIX permissions are enforced by the kernel, not by the server's identity.** Every backing
+syscall runs as the *server*, not the caller, so a passthrough enforces no permission at all by
+default: a `chmod 000` file read and wrote fine through the view. The mount carries
+`default_permissions`, which makes the kernel re-apply a standard owner/mode check against the
+**caller's** ids on every operation. The check is *additive* — a handler's own `EACCES` still
+stands, so the stubs (`0444`/`0555`) and every write denial are unaffected. Two consequences
+worth knowing:
 
 - Mode bits inside the project now behave as they do on the host. Anything that must stay
   read-only can be a mode bit again, though a `:ro` mount or a guard rule is still stronger.
-- Because root creates root-owned inodes and those land **on the host**, the server hands every
-  inode it creates (`create`, `mkdir`, `symlink`) to the caller with `fchown`/`lchown`. Best
-  effort: `fakeowner` ignores `chown`, and there the reported ids are invented anyway.
+- Inodes the server creates land **on the host**, so it hands each one (`create`, `mkdir`,
+  `symlink`) to the caller with `fchown`/`lchown`. kib runs the sidecar as the host user, which
+  makes that a no-op — the invariant is what matters, not the coincidence. Best effort:
+  `fakeowner` ignores `chown`, and there the reported ids are invented anyway.
 
 **Mode bits do not gate access.** `chmod 0400` on a bind is *recorded* faithfully — `stat` reads
 back `400` — but `access(2)` still answers writable. Every chmod-based read-only control there is
@@ -68,37 +86,32 @@ a silent no-op on macOS. That is how the broker's synthetic `.credentials.json` 
 it was a `cp` + `chmod 0400`. It is a `:ro` bind now (via `bind_via_link`, since the destination
 nests inside the shared-dir mount). Nothing refreshes it under the broker, so a single-file bind
 carries none of the rename risk the real rotating credential does. Host-side `chmod 700` on kib's
-own scratch dirs is unaffected — that is APFS, not a bind — as is `chmod 700 /kib`, which is the
-container's own overlayfs and does still fence `/kib/real`.
+own scratch dirs is unaffected — that is APFS, not a bind.
 
-## Host key vs box key
+## Host key vs box key — one key again
 
-Claude keys `projects/`, `.claude.json` and `history.jsonl` by its **resolved** cwd. There is no
-`$PWD` bind and the entrypoint symlinks `$HOST_HOME` → the container home, so `/Users/<u>/proj`
-resolves to `/home/hostuser/proj` and Claude keys everything by that. The symlink makes the host
-path *reachable*; it does not make Claude *use* it.
+Claude keys `projects/`, `.claude.json` and `history.jsonl` by its **resolved** cwd. Under the
+sidecar the redacted view is bound at the project's **host** path, so that mountpoint makes the
+`$HOME`-shaped parent a real directory, the entrypoint's `$HOST_HOME` symlink is never created,
+and the resolved cwd *is* the host path. Canonical and the session share one key, and
+`config_scope`'s `box` argument is left at its default.
 
-Discovered on macOS, but **not macOS-specific** — the same translation now runs on Linux, where
-`/home/<u>/proj` becomes `/home/hostuser/proj`. `tests/check/wiring.sh` asserts both host-path
-shapes and `tests/host/test_config_scope.py` round-trips both, including the two cases where the
-two keys coincide (a project outside `$HOME`; a host user already called `hostuser`).
+The two diverged during the one window kib mounted the view in-container. With no `$PWD` bind,
+`$HOST_HOME` became a symlink to the container home, `/Users/<u>/proj` resolved to
+`/home/hostuser/proj`, and the box silently kept a second set of entries there — invisible to the
+host's `--resume` and ↑ history, and vice versa, which is exactly the seamless switch
+`container-lifecycle.md` exists to protect. (It also made three `security-test.sh` cross-project
+assertions fail, which is how it surfaced; they were reporting a key mismatch, not a leak.)
 
-Left alone this silently split every project in two: the box wrote a second set of entries under
-the container path, so the host's `--resume` and ↑ history could not see the box's sessions nor the
-box the host's — exactly the seamless switch `container-lifecycle.md` exists to protect. (It also
-made three `security-test.sh` cross-project assertions fail, which is how it surfaced; they were
-reporting a key mismatch, not a leak.)
+`kib_legacy_box_pwd` (host/config.sh) survives for one job: computing that old key so
+`start_container` can find transcripts left under it and fold them back into canonical before
+relinking. Delete it once no session dir predates the sidecar restore.
 
-`kib_box_pwd` (host/config.sh) computes the box path, and every `config_scope` verb takes both:
-canonical is only ever keyed by the host path, the session only ever by the box path, translated
-in on assembly and back out on merge. A project *outside* `$HOME` needs no translation — the
-entrypoint mkdirs that path for real, so it resolves to itself. The transcripts bind takes its
-source from the host slug and its link name from the box slug.
-
-One trap this exposed: `merge_history`'s dedupe compared raw text. Claude writes those lines with
-JS `JSON.stringify` (no space after separators) and re-keying round-trips them through Python's
-`json.dumps`, which does not produce the same bytes — so nothing matched and every launch would
-have re-appended the whole seeded history. It compares parsed-and-normalised lines now.
+One trap that window exposed, and worth keeping: `merge_history`'s dedupe compared raw text.
+Claude writes those lines with JS `JSON.stringify` (no space after separators) and re-keying
+round-tripped them through Python's `json.dumps`, which does not produce the same bytes — so
+nothing matched and every launch re-appended the whole seeded history. It compares
+parsed-and-normalised lines now.
 
 ## Clipboard and DNS on macOS
 

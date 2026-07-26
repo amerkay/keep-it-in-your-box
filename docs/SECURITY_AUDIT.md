@@ -111,10 +111,10 @@ Tested, not assumed.
 
 | Control | Result |
 |:--|:--|
-| **All classic container-escape CVEs** | Blocked — `CapEff=0`, `CapBnd` lacks `SYS_ADMIN` (`0xcb`), `NoNewPrivs=1`, seccomp mode 2, `/sys` + `/sys/fs/cgroup` (cgroup2) + `/proc/sys` read-only, `/proc/self/exe` non-writable, no docker binary or socket (removing the CVE-2024-21626 trigger). `mount(2)`/`unshare(2)` → EPERM live. AppArmor is `unconfined`: the in-container FUSE mount requires it, and the emptied `SYS_ADMIN`/`SETPCAP` bounding set plus seccomp carry that weight instead. |
-| **FUSE-server pivot** | Blocked — the server is root and keeps `SYS_ADMIN` for the container's whole life (it holds the mount), now in the **agent's own** container rather than a separate one. Separation is by uid, verified live: `kill -0` → EPERM, `/proc/<pid>/environ` → EACCES, `/kib` root-700 unreadable, so the only reachable surface is the FUSE ops themselves — where the `_real` join is confined, `os.link` doesn't dereference the source, and fusepy converts handler faults to `-EINVAL`. The agent's own bounding set loses `SYS_ADMIN`/`SETPCAP` before it starts. The server's root-ness does **not** hand the agent root's file access: the mount carries `default_permissions`, so the kernel checks owner/mode against the caller, and every inode the server creates is `chown`'d to the caller so nothing lands root-owned on the host (`macos.md`). |
+| **All classic container-escape CVEs** | Blocked — `CapEff=0`, `CapBnd` lacks `SYS_ADMIN` (`0xcb`), `NoNewPrivs=1`, seccomp mode 2, `/sys` + `/sys/fs/cgroup` (cgroup2) + `/proc/sys` read-only, `/proc/self/exe` non-writable, no docker binary or socket (removing the CVE-2024-21626 trigger). `mount(2)`/`unshare(2)` → EPERM live. AppArmor is `docker-default`: the container is created with no `SYS_ADMIN`, `SETPCAP` or `/dev/fuse` at all, so the profile's `deny mount,` costs nothing — the FUSE server holds the mount from its own container. |
+| **FUSE-server pivot** | Blocked — the server is not in the agent's container. It runs in a **sidecar** with `--network none` and no shared PID namespace, so there is no process to signal, no `/proc/<pid>/environ` to read, and no unredacted copy of the project on the agent's side. The only reachable surface is the FUSE ops themselves — where the `_real` join is confined, `os.link` doesn't dereference the source, and fusepy converts handler faults to `-EINVAL`. The server runs as the host user, not root, and the mount carries `default_permissions` so the kernel re-checks owner/mode against the **caller** on every op; every inode it creates is `chown`'d to the caller (`macos.md`). |
 | **Symlink escape** | Blocked — `readlink` returns the target string only; the main-container kernel re-resolves it (in-mount targets re-enter the guard, out-of-mount ones reach only already-mounted paths). |
-| **Mount abuse** | Blocked — `CAP_SYS_ADMIN` is out of the agent's bounding set (three independent enforcement points), seccomp blocks namespace unshare, and `mount(2)`/`unshare(2)` are asserted to return EPERM in `security-test.sh`. |
+| **Mount abuse** | Blocked — `CAP_SYS_ADMIN` was never granted to the agent's container, which is a kernel fact about its creation rather than a claim about what some shell dropped. Seccomp blocks namespace unshare, `docker-default` denies `mount`, and `mount(2)`/`unshare(2)` are asserted to return EPERM in `security-test.sh`. |
 | **Host resolver reach** | Blocked — both systemd-resolved Varlink sockets are `/dev/null`-shadowed (`connect()` refused, verified live); the source dir is read-only; the root `resolv-sync` watcher is unreachable to uid 1000. |
 | **`host/sleep-guard.sh` injection** | Blocked — the one container-originated value reaching a bash-arithmetic sink (`:157`) is sanitized by `awk '$NF + 0'` (`:133`); container and session names reach host command lines only as safely-quoted args. *(Keep that `awk` coercion — it is security-load-bearing.)* |
 
@@ -226,10 +226,10 @@ are now fixed**; three residuals are called out below the table.
 | 38 | Broker SSRF — redirect the token to an attacker host | ✅ fixed upstream origin per route |
 | 39 | Broker — authenticated requests to arbitrary *paths* on the real upstream | ⚠️ no path allowlist (residual R3) |
 | 40 | Broker credential rotation / refresh abuse | ✅ static token by design; refresh loop removed |
-| 41 | Container escape via `CAP_SYS_ADMIN` / `mount(2)` / `unshare(2)` | ✅ cap-drop, seccomp, NNP → EPERM |
+| 41 | Container escape via `CAP_SYS_ADMIN` / `mount(2)` / `unshare(2)` | ✅ never granted at creation, seccomp, NNP, `docker-default` → EPERM |
 | 42 | Write `/proc/sys` or `/sys` | ✅ `:ro` |
 | 43 | Reach a docker socket / binary | ✅ absent |
-| 44 | Pivot through the SYS_ADMIN FUSE server | ✅ root-700 backing store, cap dropped pre-agent, no source deref |
+| 44 | Pivot through the SYS_ADMIN FUSE server | ✅ separate container, no shared PID ns, unprivileged server, no source deref |
 | 45 | Clipboard WRITE (pastejacking / bracketed-paste bypass) | ✅ Wayland guard refuses `set_selection` |
 | 46 | Wayland object-id reuse to smuggle a write | ✅ over-denial is safe; factory opcodes frozen |
 | 47 | Host resolver Varlink `connect()` | ✅ `/dev/null`-shadowed |

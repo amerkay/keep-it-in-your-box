@@ -23,7 +23,9 @@ empty capability bounding set, `no-new-privileges`, seccomp in filter mode, and 
 
 Gates are `FUTURE_TASKS.md` § The gates: **CAP** (can it still mount the FUSE view), **OS** (one
 design for Ubuntu *and* macOS), **POST** (redaction survives), **LIVE** (workspace at the same
-absolute path).
+absolute path). **CAP** now also asks whether a *sidecar* container can mount and propagate the
+view to a second container — kib serves it that way on both platforms (`macos.md`), so a substrate
+that isolates containers from each other fails here even if it grants `/dev/fuse`.
 
 | Option | Added dep | CAP | OS | Verdict |
 |---|---|---|---|---|
@@ -51,7 +53,13 @@ Before any of the four options above, one cheap measurement decides it — kib w
 layer is not kib:
 
 ```
-# Does the substrate give a guest container /dev/fuse + SYS_ADMIN long enough to mount?
+# 1. Does the substrate give a guest container /dev/fuse + SYS_ADMIN long enough to mount?
 docker run --rm --cap-add=SYS_ADMIN --device /dev/fuse --security-opt apparmor=unconfined \
   keep-it-in-your-box sh -c 'ls -l /dev/fuse && python3 -c "import fuse; print(\"ok\")"'
+
+# 2. …and does that mount reach a SECOND container? Root must be substrate-internal, never a
+#    host file share. A hypervisor-per-container answers no here, whatever step 1 said.
+docker run --rm --privileged -v /run/kib-probe:/p:rshared alpine \
+  sh -c 'mkdir -p /p/m && mount -t tmpfs none /p/m && echo ok > /p/m/f'
+docker run --rm -v /run/kib-probe:/p:rslave alpine cat /p/m/f
 ```

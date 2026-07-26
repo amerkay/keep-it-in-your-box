@@ -88,10 +88,11 @@ Bash reaches Python one way only: `kib_py <module> <args…>` (host/core.sh). Pa
 
 One line each; the full story is in the `docs/design-notes/` file in parentheses.
 
-- **Don't re-split the redaction layer into a second container reached by mount propagation** —
-  `rshared`/`rslave` is a shared-kernel feature, so it can never run on macOS and it forecloses
-  every hypervisor-isolated substrate. One topology: the entrypoint mounts the view in-container.
-  The trade is capless-at-*runtime*, enforced three ways. (`microvm.md`, `macos.md`)
+- **Never root mount propagation at a path the engine serves as a host file share** — on macOS
+  `/tmp`, `/Users`, `/Volumes` and `/private` are virtiofs views of the Mac, and virtiofs has no
+  mount namespace for the event to land in. That, not the kernel count, is why kib's old `/tmp`
+  root failed there; both containers share the LinuxKit kernel. The root goes inside the engine
+  VM (`/run/kib/…`), never `/var` — a symlink to the shared `/private/var`. (`macos.md`)
 - **Don't re-split `~/.claude` into a shared + per-project pair** — the destructive migration it
   needs breaks the seamless host⇄box switch (same login, `--resume`, history). Keep canonical
   stock; isolate by per-launch assembly + subtree merge-out. Unknown `~/.claude` entries stay
