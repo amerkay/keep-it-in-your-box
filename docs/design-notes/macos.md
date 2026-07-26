@@ -36,21 +36,31 @@ through, the agent runs as `HOST_UID`, and git therefore reported *"detected dub
 in repository"* for the entire tree — taking `git status`, `./dev.sh` (its file discovery is
 `git ls-files`) and four of `security-test.sh`'s "the guard must not break ordinary git"
 assertions down with it. `entrypoint-fuse.sh` now passes `--uid`/`--gid` and the server reports
-those for every path, stub included. Redaction is unaffected: every rule check is
-uid-independent, which is what makes the squash safe rather than a hole. It is passed
-**unconditionally**, including on Linux where the ids are already the agent's: one code path
-beats a second topology, and a genuine cross-owner file then reports as the agent's.
+those **in place of whoever owns the project root, and only them**. Redaction is unaffected:
+every rule check is uid-independent, which is what makes the remap safe rather than a hole. It
+is passed on both platforms — on Linux the base ids already are the agent's, so the map is
+identity and one code path beats a second topology.
 
-**POSIX permissions inside `$PWD` are no longer enforced at all** — on either platform, and
-independently of the squash. The server runs as **root** and mounts with
-`default_permissions=False`, so nothing checks owner or mode: a `chmod 000` file in the project
-reads and writes fine through the view, and a root-owned file the agent could not touch under
-the old `--user $(id -u)` sidecar is now writable, with the write landing on the host. Accepted:
-the project is the agent's to edit by construction, and secrecy inside it is `.kibignore`'s job
-(rule-based, uid-independent), not the file mode's. Anything that must stay read-only needs a
-`:ro` mount or a guard rule — never a mode bit. `chown` to the invented
-owner is translated to `-1` (no change) so `cp -p`, `tar -x` and `git checkout` do not try to
-rewrite the backing file to a uid it never had.
+It is a remap and not a blanket squash because the two are the same everywhere except where it
+matters: a file inside the project owned by *someone else* (a `sudo`-built artifact,
+`node_modules` from a root container) keeps its real ids, so the check below still refuses it.
+`chown` back to the invented owner is translated to `-1` (no change) so `cp -p`, `tar -x` and
+`git checkout` do not try to rewrite the backing file to a uid it never had.
+
+**POSIX permissions are enforced by the kernel, not by the server's identity.** The server runs
+as **root** — it holds the mount, and on macOS the backing store reports root:root, so it cannot
+serve the tree as anyone else. That means every backing syscall bypasses DAC, and the mount
+carries `default_permissions` so the kernel re-applies a standard owner/mode check against the
+**caller's** ids on every operation. Without it nothing inside `$PWD` was permission-checked at
+all: a `chmod 000` file read and wrote fine through the view. The check is *additive* — a
+handler's own `EACCES` still stands, so the stubs (`0444`/`0555`) and every write denial are
+unaffected. Two consequences worth knowing:
+
+- Mode bits inside the project now behave as they do on the host. Anything that must stay
+  read-only can be a mode bit again, though a `:ro` mount or a guard rule is still stronger.
+- Because root creates root-owned inodes and those land **on the host**, the server hands every
+  inode it creates (`create`, `mkdir`, `symlink`) to the caller with `fchown`/`lchown`. Best
+  effort: `fakeowner` ignores `chown`, and there the reported ids are invented anyway.
 
 **Mode bits do not gate access.** `chmod 0400` on a bind is *recorded* faithfully — `stat` reads
 back `400` — but `access(2)` still answers writable. Every chmod-based read-only control there is

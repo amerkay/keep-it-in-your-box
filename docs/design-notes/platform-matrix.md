@@ -24,8 +24,8 @@ under a root-700 parent, and caps dropped per session. Only these remain platfor
 
 | Behaviour | Ubuntu / Linux | macOS | Owner | Proven |
 |---|---|---|---|---|
-| Mode bits inside the project view | **Advisory** — the FUSE server runs as root and mounts with `default_permissions=False`, so no chmod- or owner-based control inside `$PWD` is enforced; use `.kibignore`/the guard, or a `:ro` mount | **Advisory**, for that reason *and* because `fakeowner` records a mode but ignores it in `access(2)` | `macos.md` | ✅ |
-| Ownership in the backing store | Already the agent's, so the squash is a no-op | `fakeowner` reports every bind as `root:root`; without the squash git refuses the whole tree as "dubious ownership" | `macos.md` | ✅ |
+| Mode bits inside the project view | **Enforced** — the server is root, so the mount carries `default_permissions` and the kernel checks owner/mode against the caller | **Enforced the same way**, and this is the *only* place mode bits bite on macOS: outside the view `fakeowner` records a mode but ignores it in `access(2)` | `macos.md` | ✅ |
+| Ownership in the backing store | Already the agent's, so the remap is identity | `fakeowner` reports every bind as `root:root`; without the remap git refuses the whole tree as "dubious ownership" | `macos.md` | ✅ |
 | AppArmor | `unconfined` — the in-container mount requires it; the empty bounding set is what confines the agent instead | Absent — Docker Desktop's LinuxKit kernel ships no AppArmor, so the suite skips the label assertion rather than failing it | `macos.md` | ✅ |
 | Sidecars per project | Up to 2 (Wayland guard, broker) + main | Up to 1 (broker) + main | `container-lifecycle.md` | — |
 

@@ -137,14 +137,37 @@ else
         "chmod alone is a no-op on Docker Desktop's fakeowner binds"
 fi
 
-# The mount must squash ownership: on macOS the project arrives over virtiofs as root:root, and
+# The mount must remap ownership: on macOS the project arrives over virtiofs as root:root, and
 # without --uid/--gid git reads the whole tree as another user's and refuses it.
 if grep -q -- '--uid' "$KIB_ROOT/guest/entrypoint/entrypoint-fuse.sh" \
     && grep -q -- '--gid' "$KIB_ROOT/guest/entrypoint/entrypoint-fuse.sh"; then
-    pass "the FUSE view squashes ownership to the agent (git 'dubious ownership')"
+    pass "the FUSE view remaps ownership to the agent (git 'dubious ownership')"
 else
-    fail "entrypoint-fuse.sh lost its --uid/--gid squash" \
+    fail "entrypoint-fuse.sh lost its --uid/--gid remap" \
         "virtiofs reports root:root; git then refuses the whole tree"
+fi
+
+# The server runs as root, so the backing syscalls bypass DAC: without default_permissions
+# NOTHING inside the project is permission-checked and a `chmod 000` file reads and writes fine.
+if grep -q 'default_permissions=True' "$KIB_ROOT/kib/guest/fuse.py"; then
+    pass "the FUSE mount asks the kernel to enforce owner/mode (default_permissions)"
+else
+    fail "kib/guest/fuse.py no longer mounts with default_permissions=True" \
+        "a root-served passthrough enforces no POSIX permission at all without it"
+fi
+
+# Root creates root-owned inodes, and those land on the HOST. Every path that makes a new inode
+# has to hand it to the caller.
+_unadopted=""
+for _op in create mkdir symlink; do
+    awk -v op="$_op" '$0 ~ "^    def " op "\\(" {f=1} f && /_adopt\(/ {ok=1} f && /^$/ {f=0}
+        END {exit ok?0:1}' "$KIB_ROOT/kib/guest/fuse.py" || _unadopted="$_unadopted $_op"
+done
+if [ -z "$_unadopted" ]; then
+    pass "every inode the root server creates is chown'd to the caller"
+else
+    fail "kib/guest/fuse.py:$_unadopted no longer adopts the inode it creates" \
+        "the file lands on the host owned by root"
 fi
 
 # The pre-commit hook kib used to install into every project is gone, and the marker it left

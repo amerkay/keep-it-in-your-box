@@ -41,11 +41,12 @@ chmod 700 /kib 2>/dev/null || true
 # is bind-mounted — a host file's execute bit may not survive a :ro bind (EACCES), which is why
 # invoking the mounted .py directly needed an explicit `python3`.
 #
-# --uid/--gid: unconditional. On macOS the project reaches this container over the engine VM's
-# virtiofs, which reports every file as root:root — without the squash git refuses the whole
-# tree ("dubious ownership") and nothing that shells out to it works. On Linux the ids are
-# already the agent's, so it is a no-op in the normal case. Redaction is uid-independent, so
-# this is presentation only.
+# --uid/--gid: the ids reported in place of whoever owns the project ROOT, and only them. On
+# macOS the project reaches this container over the engine VM's virtiofs, which reports every
+# file as root:root — without that git refuses the whole tree ("dubious ownership") and nothing
+# that shells out to it works. On Linux the base ids are already the agent's, so the map is
+# identity. A file owned by someone else keeps its real ids, so the mount's default_permissions
+# still refuses it.
 /usr/local/bin/fuse --src /kib/real --mnt "$KIB_FUSE_MNT" \
     --uid "${HOST_UID:-1000}" --gid "${HOST_GID:-1000}" \
     --patterns-file /kib/patterns --guard-file /usr/local/share/global.kibignore &

@@ -24,6 +24,7 @@ _fuse.__dict__.update(
     FUSE=lambda *a, **k: None,
     Operations=object,
     FuseOSError=type("FuseOSError", (OSError,), {}),
+    fuse_get_context=lambda: (os.getuid(), os.getgid(), os.getpid()),
 )
 sys.modules.setdefault("fuse", _fuse)
 
@@ -179,7 +180,7 @@ def test_a_missing_current_file_is_treated_as_empty(
     assert redact("")._git_config_write_ok(str(src), "/nonexistent") is False
 
 
-# ── ownership squash (macOS virtiofs reports root:root) ───
+# ── ownership remap (macOS virtiofs reports root:root) ───
 def test_ownership_passes_through_by_default(redact: Callable[..., Any], tmp_path: Path) -> None:
     """A standalone mount with no --uid/--gid must keep reporting the real ownership."""
     (tmp_path / "src").mkdir(exist_ok=True)
@@ -188,7 +189,7 @@ def test_ownership_passes_through_by_default(redact: Callable[..., Any], tmp_pat
     assert (attr["st_uid"], attr["st_gid"]) == (os.getuid(), os.getgid())
 
 
-def test_ownership_squash_rewrites_passthrough_stat(
+def test_the_project_owner_is_reported_as_the_agent(
     redact: Callable[..., Any], tmp_path: Path
 ) -> None:
     """Without this git reads the whole tree as another user's and refuses it."""
@@ -198,15 +199,15 @@ def test_ownership_squash_rewrites_passthrough_stat(
     assert (attr["st_uid"], attr["st_gid"]) == (501, 20)
 
 
-def test_ownership_squash_covers_the_redaction_stub(redact: Callable[..., Any]) -> None:
+def test_the_remap_covers_the_redaction_stub(redact: Callable[..., Any]) -> None:
     """A stubbed path is synthesised, not stat'd — it needs the same owner or `ls` of a
     redacted file disagrees with its directory."""
     attr = redact("", uid=501, gid=20).getattr("/.env")
     assert (attr["st_uid"], attr["st_gid"]) == (501, 20)
 
 
-def test_squash_does_not_change_the_verdict(redact: Callable[..., Any]) -> None:
-    """Redaction is presentation-independent: the squash must not open a masked path."""
+def test_the_remap_does_not_change_the_verdict(redact: Callable[..., Any]) -> None:
+    """Redaction is presentation-independent: the remap must not open a masked path."""
     assert redact("", uid=501, gid=20)._classify("/.env")[0] == "file"
 
 
@@ -237,3 +238,64 @@ def test_chown_to_a_different_owner_still_passes_through(
 def test_chown_of_a_masked_path_is_still_refused(redact: Callable[..., Any]) -> None:
     with pytest.raises(OSError):
         redact("", uid=501, gid=20).chown("/.env", 501, 20)
+
+
+def test_a_foreign_owner_is_reported_as_itself(redact: Callable[..., Any], tmp_path: Path) -> None:
+    """The remap covers the project's own owner and nobody else — otherwise a root-owned
+    file inside the tree would report as the agent's and `default_permissions` would let the
+    agent write it."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "f").write_text("x")
+    r = redact("", uid=501, gid=20)
+    r.base_uid, r.base_gid = os.getuid() + 4242, os.getgid() + 4242  # nobody owns the file
+    attr = r.getattr("/f")
+    assert (attr["st_uid"], attr["st_gid"]) == (os.getuid(), os.getgid())
+
+
+# ── adoption: the root server must not leave root-owned files ─────
+def test_a_created_file_is_given_to_the_caller(
+    redact: Callable[..., Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server is root, so an un-adopted create lands on the HOST owned by root."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    seen: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "fchown", lambda fd, u, g: seen.append((u, g)))
+    os.close(redact("", uid=501, gid=20).create("/new", 0o644))
+    assert seen == [(os.getuid(), os.getgid())]
+
+
+def test_a_created_directory_is_given_to_the_caller(
+    redact: Callable[..., Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "src").mkdir(exist_ok=True)
+    seen: list[tuple[int, int]] = []
+    monkeypatch.setattr(os, "chown", lambda p, u, g, follow_symlinks=True: seen.append((u, g)))
+    redact("", uid=501, gid=20).mkdir("/d", 0o755)
+    assert seen == [(os.getuid(), os.getgid())]
+
+
+def test_an_adopted_symlink_is_not_dereferenced(
+    redact: Callable[..., Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Following it would re-own the target — which may be anywhere, including outside src."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    seen: list[bool] = []
+    monkeypatch.setattr(
+        os, "chown", lambda p, u, g, follow_symlinks=True: seen.append(follow_symlinks)
+    )
+    redact("", uid=501, gid=20).symlink("/l", "/etc/passwd")
+    assert seen == [False]
+
+
+def test_adoption_failure_does_not_fail_the_create(
+    redact: Callable[..., Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """virtiofs ignores chown outright; a create must not start failing because of it."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+
+    def _boom(fd: int, u: int, g: int) -> None:
+        raise OSError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "fchown", _boom)
+    os.close(redact("", uid=501, gid=20).create("/new", 0o644))
+    assert (tmp_path / "src" / "new").exists()

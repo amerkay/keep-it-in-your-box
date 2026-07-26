@@ -24,9 +24,9 @@ from kib.shared.log import get_logger
 # fusepy is the module 'fuse' on PyPI but 'fusepy' in Debian. Same API — accept either. A
 # failed import aborts the mount, and kib refuses to launch without redaction, so it is loud.
 try:
-    from fuse import FUSE, FuseOSError, Operations
+    from fuse import FUSE, FuseOSError, Operations, fuse_get_context
 except ImportError:  # Debian/Ubuntu packaging
-    from fusepy import FUSE, FuseOSError, Operations
+    from fusepy import FUSE, FuseOSError, Operations, fuse_get_context
 
 log = get_logger("kib.fuse")
 
@@ -58,20 +58,41 @@ class Redact(Operations):  # type: ignore[misc]
     ) -> None:
         self.src = os.path.realpath(src)
         self.rules = rule_list
-        # Ownership squash. On macOS the project arrives over the engine VM's virtiofs, which
-        # reports every file as root:root; the agent is HOST_UID, so git refuses the whole tree
-        # as "dubious ownership" and takes dev.sh/CI down with it. kib passes the agent's ids
-        # on every platform: the view is single-user by construction and every rule check is
-        # uid-independent, so the only thing lost is a real cross-owner mismatch showing up as
-        # one — which the agent could do nothing about anyway. None = report the real ids.
+        # Ownership remap, NOT a blanket squash. On macOS the project arrives over the engine
+        # VM's virtiofs, which reports every file as root:root; the agent is HOST_UID, so git
+        # refuses the whole tree as "dubious ownership" and takes dev.sh/CI down with it. So
+        # whoever owns the project ROOT is reported as the agent — and only them. A file
+        # genuinely owned by someone else keeps its real ids, so `default_permissions` still
+        # refuses it. On Linux the base ids already are the agent's and the map is identity.
+        # None = report the real ids (standalone use).
         self.uid = uid
         self.gid = gid
+        st = os.lstat(self.src)
+        self.base_uid = st.st_uid
+        self.base_gid = st.st_gid
 
     def _own(self, st_uid: int, st_gid: int) -> tuple[int, int]:
         return (
-            st_uid if self.uid is None else self.uid,
-            st_gid if self.gid is None else self.gid,
+            self.uid if self.uid is not None and st_uid == self.base_uid else st_uid,
+            self.gid if self.gid is not None and st_gid == self.base_gid else st_gid,
         )
+
+    def _adopt(self, real: str | None = None, fd: int | None = None, *, deref: bool = True) -> None:
+        """Hand a just-created inode to the caller.
+
+        The server is root — it holds the mount, and on macOS the backing store reports
+        root:root, so it cannot serve the tree as anyone else. Without this every file the
+        agent creates would be root-owned ON THE HOST. Best effort: virtiofs ignores chown,
+        and there the reported ids are invented anyway.
+        """
+        uid, gid, _ = fuse_get_context()
+        try:
+            if fd is not None:
+                os.fchown(fd, uid, gid)
+            elif real is not None:
+                os.chown(real, uid, gid, follow_symlinks=deref)
+        except OSError:
+            pass
 
     def _real(self, path: str) -> str:
         return os.path.join(self.src, path.lstrip("/"))
@@ -296,7 +317,9 @@ class Redact(Operations):  # type: ignore[misc]
 
     def create(self, path: str, mode: int, fi: object = None) -> int:
         self._deny_if_masked(path)
-        return os.open(self._real(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        fd = os.open(self._real(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        self._adopt(fd=fd)
+        return fd
 
     def write(self, path: str, data: bytes, offset: int, fh: int) -> int:
         return os.pwrite(fh, data, offset)  # same offset race as read(), same fix
@@ -316,7 +339,9 @@ class Redact(Operations):  # type: ignore[misc]
 
     def mkdir(self, path: str, mode: int) -> None:
         self._deny_if_masked(path)
-        os.mkdir(self._real(path), mode)
+        real = self._real(path)
+        os.mkdir(real, mode)
+        self._adopt(real)
 
     def rename(self, old: str, new: str) -> None:
         self._deny_if_masked(old)
@@ -333,7 +358,7 @@ class Redact(Operations):  # type: ignore[misc]
 
     def chown(self, path: str, uid: int, gid: int) -> None:
         self._deny_if_masked(path)
-        # Under a squash the caller is echoing back the ids we invented (`cp -p`, `tar -x`,
+        # Under the remap the caller is echoing back the ids we invented (`cp -p`, `tar -x`,
         # `git checkout` all do), so forwarding them would rewrite the real file's owner to a
         # uid the backing store never had. -1 keeps that component unchanged.
         if self.uid is not None and uid == self.uid:
@@ -348,7 +373,9 @@ class Redact(Operations):  # type: ignore[misc]
 
     def symlink(self, target: str, source: str) -> None:
         self._deny_if_masked(target)
-        os.symlink(source, self._real(target))
+        real = self._real(target)
+        os.symlink(source, real)
+        self._adopt(real, deref=False)  # the link itself, never what it points at
 
     def link(self, target: str, source: str) -> None:
         self._deny_if_masked(target)
@@ -378,8 +405,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     ap.add_argument("--guard-file")
     # kib always passes the agent's ids (see Redact.__init__). Optional so the module stays
     # usable standalone, where reporting the backing store's real ownership is the right default.
-    ap.add_argument("--uid", type=int, default=None, help="report this owner for every path")
-    ap.add_argument("--gid", type=int, default=None, help="report this group for every path")
+    ap.add_argument("--uid", type=int, default=None, help="report this owner in the root's place")
+    ap.add_argument("--gid", type=int, default=None, help="report this group in the root's place")
     args = ap.parse_args(argv)
 
     # Guard rules first for readability only: verdict() tallies immune rules separately, so
@@ -388,20 +415,27 @@ def main(argv: Sequence[str] | None = None) -> None:
     rule_list = rules.load(args.guard_file, guard=True) if args.guard_file else []
     guard_count = len(rule_list)
     rule_list += rules.load(args.patterns_file)
+    ops = Redact(args.src, rule_list, uid=args.uid, gid=args.gid)
     print(
         f"kib-fuse: src={args.src} mnt={args.mnt} guard={guard_count} "
-        f"squash={args.uid}:{args.gid} rules={[str(r) for r in rule_list]}",
+        f"remap={ops.base_uid}:{ops.base_gid}->{args.uid}:{args.gid} "
+        f"rules={[str(r) for r in rule_list]}",
         file=sys.stderr,
         flush=True,
     )
 
     FUSE(
-        Redact(args.src, rule_list, uid=args.uid, gid=args.gid),
+        ops,
         args.mnt,
         foreground=True,
         allow_other=True,
         nothreads=False,
-        default_permissions=False,
+        # The server is root, so the backing syscalls bypass DAC entirely — without this
+        # NOTHING inside the project is permission-checked and a `chmod 000` file reads and
+        # writes fine. This makes the KERNEL re-apply a standard owner/mode check against the
+        # CALLER's ids on every op. Additive: a handler's own EACCES still stands, so the
+        # stubs (0444/0555) and the write denials are unaffected.
+        default_permissions=True,
     )
 
 

@@ -141,6 +141,30 @@ is "CAP_SYS_ADMIN dropped from the bounding set (setpriv)" "0" \
 is "CAP_SETPCAP dropped from the bounding set too" "0" \
     "$((0x$(awk '/^CapBnd:/{print $2}' /proc/self/status) & 0x100 ? 1 : 0))"
 
+# The server is root, so every backing syscall bypasses DAC. default_permissions is the only
+# thing making the kernel re-check owner and mode against the CALLER — without it nothing
+# inside the project is permission-checked at all.
+is "the view is mounted default_permissions (POSIX perms are enforced)" "yes" \
+    "$(awk -v p="$(readlink -f "$PWD")" '$2==p && $4 ~ /(^|,)default_permissions(,|$)/ {
+        print "yes"; exit }' /proc/self/mounts)"
+
+# Proven live, not just by the mount flag: a mode on a file the agent owns must gate it. A
+# chmod that silently failed leaves the file MORE permissive, so each deny still fails loudly.
+_perm="$PWD/.kib-perm-probe.$$"
+if printf 'probe\n' >"$_perm" 2>/dev/null; then
+    chmod 000 "$_perm" 2>/dev/null
+    deny "a chmod 000 file in the project is unreadable" cat "$_perm"
+    chmod 400 "$_perm" 2>/dev/null
+    # tee, not a `>>` redirect: it opens the file for append itself, so the refusal is the
+    # command's exit status rather than a shell error `deny` cannot see. Content is unchanged.
+    deny "a chmod 400 file refuses writes" tee -a "$_perm" </dev/null
+    chmod 600 "$_perm" 2>/dev/null
+    rm -f "$_perm"
+else
+    skip "POSIX modes are enforced inside the project" "could not create the probe file"
+fi
+unset _perm
+
 # ═════════════════════════════════════════════════════════════════
 section "Host-executed config guard — git (C1–C4, H1, H2)"
 
