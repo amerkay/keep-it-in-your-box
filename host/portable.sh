@@ -9,7 +9,7 @@
 # Shims are DETERMINISTIC per OS — no native-first fallback, exactly two paths, and the check
 # suite forces the perl paths on Linux so both stay exercised.
 #
-# Reads:  KIB_CONFIG
+# Reads:  KIB_CONFIG, and (FUSE shims only) KIB_STATE_ROOT IMAGE_NAME from core.sh / bin/kib
 # Writes: KIB_OS, KIB_CFG_* (from ~/.keep-it-in-your-box/config) — all read across the source
 #         boundary by the other host units
 # shellcheck disable=SC2034
@@ -139,9 +139,137 @@ notify_desktop() {
     fi
 }
 
+# ── The FUSE redaction root ───────────────────────────────────────
+# The sidecar mounts the redacted view under this root and the agent's container consumes it by
+# mount propagation, so both containers must see the same directory AND the mount *event* must
+# be able to travel between them.
+#
+# That rules out any path the engine serves as a file share. On macOS /tmp, /Users, /Volumes and
+# /private are virtiofs views of the Mac — a file-sharing protocol with no mount namespace for an
+# event to land in, which is what made kib's old /tmp root look like "propagation cannot work on
+# macOS". /run is neither shared nor a macOS directory, so the daemon creates it INSIDE the
+# engine VM, where both containers share a kernel and propagation is ordinary. Never swap it for
+# /var: that is a symlink to /private/var, which IS shared, so the root would silently land back
+# on the Mac. Only the mountPOINT is constrained — the project still arrives over virtiofs as the
+# sidecar's source. (docs/design-notes/macos.md)
+fuse_root_path() { # <per-project key>
+    if [ "$KIB_OS" = darwin ]; then
+        printf '/run/kib/fuse.%s\n' "$1"
+    else
+        printf '%s/fuse.%s\n' "$KIB_STATE_ROOT" "$1"
+    fi
+}
+
+# ── Engine-VM helper (darwin only) ────────────────────────────────
+# Runs a command in the engine VM's own mount namespace. On macOS the FUSE root exists only
+# inside that VM, so a throwaway privileged container is the only handle the Mac has on it.
+#
+# Deliberately NOT used on Linux: there `--privileged --pid=host` targets your REAL machine, and
+# buying code symmetry with it would be a security regression. The linux branches below need no
+# privilege at all.
+_vm_exec() {
+    docker run --rm --privileged --pid=host --entrypoint nsenter "$IMAGE_NAME" \
+        -t 1 -m -- "$@" >/dev/null 2>&1
+}
+
+# ── Mount state ───────────────────────────────────────────────────
+# Ask the kernel directly. `mountpoint -q` is NOT usable: after the server dies the mount stays
+# in the table but stat() returns ENOTCONN, so mountpoint calls a directory that still IS one
+# "not a mountpoint" — and the unmount gets skipped.
+# shellcheck disable=SC2016  # $1 is the inner sh's argument, not ours
+_KIB_MOUNTED_SH='while read -r _d _m _r; do [ "$_m" = "$1" ] && exit 0; done </proc/self/mounts
+exit 1'
+
+fuse_mounted() {
+    if [ "$KIB_OS" = darwin ]; then
+        _vm_exec sh -c "$_KIB_MOUNTED_SH" _ "$1"
+    else
+        awk -v p="$1" '$2 == p { found = 1 } END { exit !found }' /proc/self/mounts 2>/dev/null
+    fi
+}
+
+unmount_fuse() {
+    fuse_mounted "$1" || return 0
+    if [ "$KIB_OS" = darwin ]; then
+        # `umount -l` only: the VM has no fusermount3, and by the time teardown runs the server
+        # is in a container we are about to remove — there is nobody to answer a clean unmount.
+        _vm_exec umount -l "$1" || true
+    else
+        fusermount3 -u "$1" 2>/dev/null \
+            || fusermount -u "$1" 2>/dev/null \
+            || umount -l "$1" 2>/dev/null || true # lazy: last resort for a dead server
+    fi
+    ! fuse_mounted "$1"
+}
+
+# ── Root lifecycle ────────────────────────────────────────────────
+# Propagation of the mount CONTAINING $1 (the longest matching mountpoint), read from
+# /proc/self/mountinfo — 'shared:N' sits in the optional fields, between field 7 and the '-'.
+# Not findmnt: this must not fail merely because util-linux is thin.
+_mount_is_shared() {
+    awk -v p="$1" '
+        {
+            n = 0
+            for (i = 7; i <= NF && $i != "-"; i++) if ($i ~ /^shared:/) n = 1
+            mp = $5
+            if (mp == p || index(p, (mp == "/" ? mp : mp "/")) == 1) {
+                if (length(mp) >= best) { best = length(mp); sh = n }
+            }
+        }
+        END { exit !sh }' /proc/self/mountinfo 2>/dev/null
+}
+
+# Create <root>/mnt owned by <uid>:<gid>, and guarantee the root propagates shared. Called once
+# per cold start, before the sidecar.
+fuse_root_create() { # <root> <uid> <gid>
+    if [ "$KIB_OS" = darwin ]; then
+        # A plain directory cannot be a propagation peer until it is a mount in its own right,
+        # and the engine VM's root propagation is not ours to change. Bind it to itself, then
+        # mark it rshared — idempotent, since the second call finds it already mounted.
+        # `chown`: fusermount3 refuses a mountpoint its caller does not own, and here a root VM
+        # helper does the mkdir rather than the user (on Linux that comes free).
+        # shellcheck disable=SC2016  # $1..$3 are the inner sh's arguments, not ours
+        _vm_exec sh -c '
+            mkdir -p "$1/mnt" || exit 1
+            chmod 755 "$1" "$1/mnt"
+            chown "$2:$3" "$1/mnt" || exit 1
+            grep -q " $1 " /proc/self/mounts || mount --bind "$1" "$1" || exit 1
+            mount --make-rshared "$1"' _ "$1" "$2" "$3" \
+            || die "could not prepare the redaction root inside the Docker engine VM ($1)." \
+                "kib cannot serve the .kibignore redaction without it, and will not run" \
+                "unprotected. Restart the engine and try again."
+        return 0
+    fi
+
+    # 755 on both: the sidecar runs as our uid, but the agent's container traverses this path as
+    # root before dropping privileges. (`-m` with `-p` would only apply to the deepest dir.)
+    mkdir -p "$1/mnt" || die "could not create the redaction root at $1."
+    chmod 755 "$1" "$1/mnt"
+
+    # No fallback and no escalation: kib refuses rather than mount the view somewhere the agent's
+    # container can never see it, because a launch-time bind mask cannot cover files created
+    # mid-session and the downgrade would be silent.
+    _mount_is_shared "$1" && return 0
+    die "kib needs $1 to sit on a shared mount so the redaction view can reach the" \
+        "container, but its filesystem does not propagate. Systemd makes / shared at" \
+        "boot, so this usually means a separate mount for that path. Fix it with:" \
+        "  sudo mount --make-rshared \$(df --output=target '$1' | tail -1)" \
+        "or point kib elsewhere with KIB_STATE_ROOT=/run/user/$(id -u)/kib."
+}
+
+fuse_root_destroy() { # <root>
+    if [ "$KIB_OS" = darwin ]; then
+        # The bind-to-self must go before the rm, or the next launch inherits a stacked mount.
+        # shellcheck disable=SC2016  # $1 is the inner sh's argument, not ours
+        _vm_exec sh -c 'umount -l "$1" 2>/dev/null; rm -rf "$1"' _ "$1" || true
+    else
+        rm -rf "$1" 2>/dev/null || true
+    fi
+}
+
 # ── macOS launch preflight ────────────────────────────────────────
 # Darwin only: fail fast on what would otherwise surface as a confusing mid-launch error. The
-# redaction mount validates itself in entrypoint-fuse.sh, so this stays cheap.
+# redaction mount validates itself in host/redaction.sh, so this stays cheap.
 _preflight_die_no_engine() {
     die "no reachable Docker engine on this Mac." \
         "kib is engine-agnostic — install any one of:" \
