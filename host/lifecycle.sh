@@ -135,11 +135,19 @@ bind_via_link() { # <host src> <flat container dest> <link path in the parent's 
 # entrypoint is still working its own argv is `/bin/sh …/docker-entrypoint.sh sleep infinity`,
 # and PID 1 (docker-init) carries `… -- …docker-entrypoint.sh sleep infinity` forever — a
 # substring match would call a half-set-up container ready.
+#
+# Docker Desktop refuses the ps args, so the `-o args` form fails on every poll and the whole
+# wait pays two engine round-trips per iteration instead of one. Latch the refusal.
+_TOP_ARGS_OK=1
 container_ready() {
     local args
-    args="$(docker top "$CNAME" -o args 2>/dev/null)" \
-        || args="$(docker top "$CNAME" 2>/dev/null \
+    if [ "$_TOP_ARGS_OK" = 1 ] && args="$(docker top "$CNAME" -o args 2>/dev/null)"; then
+        :
+    else
+        _TOP_ARGS_OK=0
+        args="$(docker top "$CNAME" 2>/dev/null \
             | awk 'NR>1 { $1=$2=$3=$4=$5=$6=$7=""; sub(/^ +/,""); print }')"
+    fi
     printf '%s\n' "$args" | grep -qx 'sleep infinity'
 }
 

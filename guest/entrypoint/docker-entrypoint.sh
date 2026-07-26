@@ -265,9 +265,13 @@ if [ -n "$CLAUDE_SESSION_DIR" ] && [ -d "$CLAUDE_SHARED_DIR" ]; then
     farm_dir "$CLAUDE_SHARED_DIR/plugins/data" "$CLAUDE_SESSION_DIR/plugins/data" 1
 
     # The session dir belongs to one project, so no other container is walking it and this
-    # recursive chown cannot race. `-h` retags the symlinks above instead of dereferencing
-    # them into the shared dir.
-    chown -Rh "$HOST_UID:$HOST_GID" "$CLAUDE_SESSION_DIR" 2>/dev/null || true
+    # chown cannot race. `-h` retags the symlinks above instead of dereferencing them into the
+    # shared dir. Bounded at depth 5 because only the farm above is root-created and it plants
+    # no deeper than plugins/cache/<marketplace>/<plugin>/<version>; unbounded it also walked
+    # the plugin cache — 100k+ entries, ~0.1s on a Linux bind but ~30s over macOS virtiofs,
+    # every second of it before the container reports ready. (macos.md)
+    find "$CLAUDE_SESSION_DIR" -maxdepth 5 \
+        -exec chown -h "$HOST_UID:$HOST_GID" {} + 2>/dev/null || true
 
     # The shared dir IS touched by every container, so only fix it when the owner actually
     # differs — normally it doesn't, the container user being the host user. (Chowning it

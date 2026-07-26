@@ -476,6 +476,26 @@ else
         "a failed install's clone is re-walked and re-chowned at every container start"
 fi
 
+# Same cost, unbounded: the session-dir chown must not walk the whole plugin cache. It has to
+# stay deep enough to cover the farm, though — that is the only root-created thing in there —
+# so derive what farm_dir actually plants (target's depth + its depth argument + the leaf link)
+# and hold the -maxdepth to it. Deepen one without the other and root-owned symlinks come back.
+_ep="$KIB_ROOT/guest/entrypoint/docker-entrypoint.sh"
+if grep -q 'chown -Rh .*CLAUDE_SESSION_DIR' "$_ep"; then
+    fail "the session-dir chown is recursive again" \
+        "it walks 100k+ plugin-cache entries — ~30s of macOS cold start (macos.md)"
+else
+    # shellcheck disable=SC2016  # awk program: $ is awk's, not the shell's
+    _need="$(awk '/^ *farm_dir "\$CLAUDE_SHARED_DIR/ {
+        d = split($3, seg, "/") - 1 + ($4 == "" ? 0 : $4) + 1
+        if (d > max) max = d
+    } END { print max + 0 }' "$_ep")"
+    _bound="$(sed -n 's/.*-maxdepth \([0-9][0-9]*\).*/\1/p' "$_ep" | head -1)"
+    is "the session-dir chown is bounded, and still covers the farm" "yes" \
+        "$([ -n "$_bound" ] && [ "$_bound" -ge "$_need" ] && echo yes || echo "no ($_bound < $_need)")"
+fi
+unset _ep _need _bound
+
 # The project container must NOT be created with --rm. It is the only place a startup failure
 # explains itself: with --rm the engine reaped the container before wait_for_container_ready
 # could read its logs, and the whole diagnostic was "No such container". teardown_container

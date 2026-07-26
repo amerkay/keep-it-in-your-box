@@ -80,6 +80,17 @@ worth knowing:
   makes that a no-op — the invariant is what matters, not the coincidence. Best effort:
   `fakeowner` ignores `chown`, and there the reported ids are invented anyway.
 
+**A recursive `chown` over a bind costs ~30s and buys nothing.** The entrypoint used to
+`chown -Rh` the whole session dir to retag the symlink farm it had just planted as root. That
+dir also holds `plugins/cache` — 100k+ entries of per-project marketplace clones — and every
+one of those metadata ops is a virtiofs round-trip to the Mac, *and* a no-op once it lands,
+since `fakeowner` ignores `chown`. It ran before the entrypoint `exec`s `sleep infinity`, so
+`wait_for_container_ready` spun on it and the whole cold start stalled ~30s with no output. On
+a Linux bind the same walk is ~0.1s, which is why it was invisible for so long. The chown is
+now `find -maxdepth 5`: the farm is the only root-created thing in there and plants no deeper
+than `plugins/cache/<marketplace>/<plugin>/<version>`, so the walk drops 114k → 900 entries
+with the same result. Keep the bound in step if `farm_dir`'s depth arguments ever grow.
+
 **Mode bits do not gate access.** `chmod 0400` on a bind is *recorded* faithfully — `stat` reads
 back `400` — but `access(2)` still answers writable. Every chmod-based read-only control there is
 a silent no-op on macOS. That is how the broker's synthetic `.credentials.json` shipped writable:
