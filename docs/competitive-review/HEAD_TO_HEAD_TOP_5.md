@@ -113,7 +113,7 @@ The remaining three are exposed. cplt: "the OAuth token lives in `~/.claude/.cre
 |---|---|---|---|---|---|---|
 | **Boundary** | Docker container | None (bwrap) | None (bwrap) | None (Landlock) | Container → microVM | Docker container |
 | **Linux primitive** | seccomp + AppArmor + `cap-drop=ALL` | bwrap + Landlock + seccomp (27 calls) | bwrap + seccomp (AF_UNIX, io_uring) | Landlock + seccomp + opt. bwrap | runc / gVisor / Kata / Firecracker | `cap-drop=ALL` + 6 back |
-| **macOS** | ✅ single-container FUSE | Seatbelt | Seatbelt | Seatbelt | Seatbelt / Apple Container / Tart | Docker only |
+| **macOS** | ✅ in-container FUSE | Seatbelt | Seatbelt | Seatbelt | Seatbelt / Apple Container / Tart | Docker only |
 | **Windows** | ❌ | WSL | Alpha (native) | ❌ | WSL2 | ❌ |
 | **`no-new-privileges`** | ✅ | n/a | n/a | n/a | ❓ | Sidecars only |
 | **VM-class option** | ❌ | ❌ (explicit non-goal) | ❌ | ❌ | ✅ Kata + Firecracker | ❌ |

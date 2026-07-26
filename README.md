@@ -53,8 +53,8 @@ Neither is strictly safer — they defend different halves. The [full 7-sandbox 
 - **Projects can't read each other, and `~/.claude` stays stock.** kib keeps your canonical `~/.claude`/`~/.claude.json` untouched and assembles each container from only *this* project's slice per launch (its transcripts, prompt history and `.claude.json` entry), merging changes back out on exit. So a plain host `claude` and `cc` share one login, one `--resume` list and one history — while no project's box can see another's data.
 - **One container per project, shared by every terminal.** Every terminal `docker exec`s into the same long-lived container, so `/resume`, prompt history and background jobs are shared across tabs. It's torn down only when the last session exits.
 - **Follows your network.** On Linux a lightweight watcher keeps the container's DNS in step with the host across wifi/VPN changes — no host-netns sidecar, works behind a per-connection host firewall. (Not needed on macOS: the engine VM tracks the host resolver.)
-- **Hardened by default.** `--cap-drop=ALL`, `no-new-privileges`, seccomp, AppArmor, no Docker socket, no host block devices. The default command is `claude --dangerously-skip-permissions` — safe *because* of the box.
-- **Linux and macOS.** Two redaction modes behind one interface: a `cap-drop=ALL` FUSE sidecar on Linux, a single-container FUSE mount on macOS (Docker Desktop, OrbStack, or Colima).
+- **Hardened by default.** `--cap-drop=ALL`, `no-new-privileges`, seccomp, an empty `CapEff` with `CAP_SYS_ADMIN` out of the bounding set, no Docker socket, no host block devices. The default command is `claude --dangerously-skip-permissions` — safe *because* of the box.
+- **Linux and macOS.** One redaction topology on both: the redacted view is mounted in-container over your project path. Any engine — Docker, Docker Desktop, OrbStack, or Colima.
 
 ### Run it two ways
 
@@ -96,7 +96,7 @@ No project here does everything. `kib` is the only one that **validates `.git/co
 <h2 id="hood"><img src="docs/assets/readme/section-hood.svg" width="100%" alt="Under the hood"></h2>
 
 - **One long-lived container per project**, `sleep infinity` as PID 1; every terminal attaches with `docker exec`, so Claude sees one PID namespace, one `/tmp`, one daemon — shared `/resume`, history and jobs, for free.
-- **A FUSE sidecar** (`cap-drop=ALL`, holding the only cap) mounts the redacted project view; the main container mounts *that*. On macOS the same view is served by a single trusted container. Redaction covers files created after launch because it's a live view, not a bind mount.
+- **A FUSE server** mounts the redacted project view over your project path, started by the entrypoint as root before the agent exists; the real project sits behind a root-700 parent the agent can't traverse, and `CAP_SYS_ADMIN` is gone from the bounding set by the time it runs. Redaction covers files created after launch because it's a live view, not a bind mount.
 - **A Wayland proxy sidecar** holds the only real compositor socket, forwarding reads and refusing every write request.
 - **Host-side, at every launch:** a `.kibignore` → `.gitignore` sync, a `settings.json` validator that rejects inline `hooks[].command`, an audit gate over the repo's git config, and a DNS watcher that follows host network changes.
 
@@ -238,8 +238,7 @@ thin runner over them, and both bash suites share the harness in `tests/lib.sh` 
 identically.
 
 [`tests/security-test.sh`](tests/security-test.sh) is the **in-sandbox** regression suite — one
-check per control the [audit](docs/SECURITY_AUDIT.md) established. Run it **inside** the box, once
-normally and once under `KIB_SINGLE_CONTAINER=1` (the macOS topology):
+check per control the [audit](docs/SECURITY_AUDIT.md) established. Run it **inside** the box:
 
 ```bash
 kib exec ./tests/security-test.sh                 # everything

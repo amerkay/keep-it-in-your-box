@@ -5,9 +5,9 @@ transcripts and history a plain host `claude` sees. Isolation comes from assembl
 container's config from that store at launch and merging this project's changes back on exit,
 never from restructuring the originals. This module is the JSON/JSONL surgery for that seam:
 
-Every verb takes the project's HOST path and its BOX path — the same string except in
-single-container mode, where Claude's resolved cwd differs from the host's (see "Host key vs
-box key" below). Canonical is always keyed by the host path; the session by the box path.
+Every verb takes the project's HOST path and its BOX path. They differ for any project under
+$HOME, where Claude's resolved cwd inside the box is not the host's (see "Host key vs box key"
+below). Canonical is always keyed by the host path; the session by the box path.
 
     scope-in-json  <src .claude.json> <project-path> <dst> <box-path>
         Globals + ONLY this project's `projects[path]` entry (+ its githubRepoPaths),
@@ -109,15 +109,16 @@ def _globals_only(cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 # ── Host key vs box key ─────────────────────────────────────────────────────
-# Claude keys projects/, .claude.json and history.jsonl by its RESOLVED cwd. In sidecar mode
-# the project is bound at its host path, so host and box agree and `box` == `path` throughout.
-# Single mode adds no $PWD bind: the view is mounted at $PWD, but $HOST_HOME is a symlink to
-# the container home, so the kernel resolves the cwd to /home/hostuser/<project> and Claude
-# keys everything by THAT. Left alone, a Mac box wrote a second set of entries under the
-# container path — the host's `--resume` and ↑ history could not see the box's sessions, and
-# the box could not see the host's, which is the seamless switch these functions exist to
-# preserve. So: translate on the way in, translate back on the way out. Canonical only ever
-# holds the host key.
+# Claude keys projects/, .claude.json and history.jsonl by its RESOLVED cwd. There is no $PWD
+# bind: the redacted view is mounted at $PWD, and $HOST_HOME is a symlink to the container
+# home, so the kernel resolves the cwd to /home/hostuser/<project> and Claude keys everything
+# by THAT. Left alone, the box wrote a second set of entries under the container path — the
+# host's `--resume` and ↑ history could not see the box's sessions, and the box could not see
+# the host's, which is the seamless switch these functions exist to preserve. So: translate on
+# the way in, translate back on the way out. Canonical only ever holds the host key.
+#
+# `box` still defaults to `path`: a project OUTSIDE $HOME resolves to itself in the box, and
+# the unit tests exercise both spellings.
 
 
 def _canon_line(line: str) -> str:
@@ -147,9 +148,9 @@ def scope_in_json(src: str, path: str, dst: str, box: str = "") -> int:
     """Globals + this project's entry only → dst (a fresh session .claude.json).
 
     `path` is canonical's key (the host path); `box` is the key Claude will use inside the
-    container. Equal outside single mode.
+    container. Equal for a project outside $HOME.
     """
-    box = box or path  # sidecar mode and the unit tests: one key, no translation
+    box = box or path  # no translation needed
     cfg, status = jsonio.load(src)
     if status == "bad":
         # A corrupt canonical file must not abort the launch; start the box from an empty
@@ -182,7 +183,7 @@ def scope_in_json(src: str, path: str, dst: str, box: str = "") -> int:
 
 def merge_out_json(scratch: str, path: str, canonical: str, box: str = "") -> int:
     """Write ONLY projects[box] from scratch back into canonical's projects[path]."""
-    box = box or path  # sidecar mode and the unit tests: one key, no translation
+    box = box or path  # no translation needed
     sc, sc_status = jsonio.load(scratch)
     if sc_status != "ok" or not isinstance(sc, dict):
         # Fail-closed: never touch canonical from an unreadable scratch.
@@ -228,7 +229,7 @@ def _project_of(line: str) -> Any:
 
 def seed_history(src: str, path: str, dst: str, box: str = "") -> int:
     """Filter canonical history.jsonl to this project's lines → dst, re-keyed to the box."""
-    box = box or path  # sidecar mode and the unit tests: one key, no translation
+    box = box or path  # no translation needed
     lines: list[str] = []
     if os.path.isfile(src):
         with open(src, errors="replace") as fh:
@@ -248,7 +249,7 @@ def merge_history(scratch: str, path: str, canonical: str, box: str = "") -> int
 
     The session wrote them under the box key; canonical only ever holds the host key.
     """
-    box = box or path  # sidecar mode and the unit tests: one key, no translation
+    box = box or path  # no translation needed
     if not os.path.isfile(scratch):
         return cli.OK
     with open(scratch, errors="replace") as fh:

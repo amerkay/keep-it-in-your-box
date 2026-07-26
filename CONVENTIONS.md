@@ -85,8 +85,7 @@ silently skipped suite reads as a pass.
 - `tests/check.sh` — a thin runner over `tests/check/*.sh`, one file per section (syntax,
   portability, wiring, mcp, regressions, shims, pytest). Add a case as a `pass`/`fail` pair with a
   message that says what broke and why it matters. Settled bugs get a **regression guard** there.
-- `tests/security-test.sh` — runs *inside* a sandbox; must pass in both redaction modes
-  (normally, and under `KIB_SINGLE_CONTAINER=1`). Kept as one file, but it sources
+- `tests/security-test.sh` — runs *inside* a sandbox. Kept as one file, but it sources
   `tests/lib.sh` so both suites report identically.
 - Name a check for the behaviour it protects, not the function it calls. A test whose name
   survives a refactor of the code under it is the one worth writing.

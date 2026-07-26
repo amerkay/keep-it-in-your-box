@@ -8,11 +8,11 @@
 # container makes it see exactly what it sees on the host and arbitrate for itself.
 # (docs/design-notes/container-lifecycle.md)
 #
-# Reads:  KIB_ROOT IMAGE_NAME KIB_FUSE_MODE UNLOCK_SHARED and the globals host/config.sh sets
-# Writes: PROJ_HASH CNAME FUSE_CNAME FUSE_ROOT WL_CNAME WL_ROOT PATTERNS_STATE CLIP_STATE
+# Reads:  KIB_ROOT IMAGE_NAME UNLOCK_SHARED and the globals host/config.sh sets
+# Writes: PROJ_HASH CNAME WL_CNAME WL_ROOT PATTERNS_STATE CLIP_STATE
 #         CRED_WITNESS LOCK_WITNESS SESSION_CDIR SHARED_CDIR SHARED_ASSET_CDIR
 #         LOCK_WITNESS_CPATH TRANSCRIPTS_CPATH BROKER_CNAME BROKER_NET BROKER_DIR BROKER_OUT
-#         BROKER_HASH BROKER_ENABLED PROJECT_MOUNT_SRC PROJECT_MOUNT_OPTS REDACTION_ARGS ARGS
+#         BROKER_HASH BROKER_ENABLED REDACTION_ARGS ARGS
 #         SLEEP_GUARD_PID SESSION_TAG EPH_ROOT
 # shellcheck disable=SC2034  # most of the above are consumed in the other host units
 
@@ -36,8 +36,6 @@ kib_identity() {
         SCRATCH_SUFFIX=".eph.$$"
     fi
 
-    FUSE_CNAME="${CNAME}-fuse"
-    FUSE_ROOT="/tmp/kib-fuse.${PROJ_HASH}${SCRATCH_SUFFIX}"
     WL_CNAME="${CNAME}-wl"
     WL_ROOT="/tmp/kib-wl.${PROJ_HASH}${SCRATCH_SUFFIX}"
     PATTERNS_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.patterns"
@@ -61,11 +59,9 @@ kib_identity() {
     BROKER_HASH="$BROKER_DIR/hash"
     BROKER_ENABLED=0
 
-    # The redaction interface fills these: sidecar mode sets a mount SRC/OPTS for $PWD;
-    # single mode leaves SRC empty (the entrypoint mounts the view in-container) and appends
-    # its own `docker run` flags to REDACTION_ARGS.
-    PROJECT_MOUNT_SRC="$PWD"
-    PROJECT_MOUNT_OPTS=""
+    # prepare_redaction fills this with the `docker run` flags the entrypoint needs to mount
+    # the redacted view in-container. The seam is deliberate: redaction.sh stays the only file
+    # that knows about /dev/fuse and the caps that go with it.
     REDACTION_ARGS=()
 }
 
@@ -79,7 +75,6 @@ TRANSCRIPTS_CPATH=/run/kib/transcripts
 PLACEHOLDER_CRED_CPATH=/run/kib/placeholder-cred
 
 container_running() { [ -n "$(docker ps -q -f "name=^${CNAME}$" 2>/dev/null)" ]; }
-sidecar_running() { [ -n "$(docker ps -q -f "name=^${FUSE_CNAME}$" 2>/dev/null)" ]; }
 broker_running() { [ -n "$(docker ps -q -f "name=^${BROKER_CNAME}$" 2>/dev/null)" ]; }
 
 # Was the running container created with --unlock-shared? Read it off the mounts, which are
@@ -97,7 +92,7 @@ running_unlocked() {
 # check runs after resolution either way, so pre-creating the mountpoint does not help.
 # Mount at a flat path instead and leave a symlink to it in the parent bind's HOST-side dir:
 # dangling on the host (kib scratch — nothing reads it there), resolved in the container.
-# Not under /kib — single mode chmods that 700 root to hide the real project.
+# Not under /kib — the entrypoint chmods that 700 root to hide the real project.
 bind_via_link() { # <host src> <flat container dest> <link path in the parent's host dir> [:ro]
     local src="$1" dest="$2" link="$3" opts="${4:-}"
     # An older kib left docker's own mountpoint here, ROOT-owned; unlinking it needs only the
@@ -155,11 +150,10 @@ teardown_container() {
     # this before `docker run`, so a stopped leftover never blocks the name.
     docker rm -f "$CNAME" >/dev/null 2>&1 || true
 
-    # Mode-specific: sidecar unmounts, removes the FUSE container, then its scratch root, in
-    # that order; single mode's mount died with the container, so only state remains.
+    # The redaction mount died with the container; this only clears the host-side state.
     teardown_redaction
 
-    # Plain dirs — none of the unmount ordering above applies. Each no-ops in the other mode.
+    # Each no-ops on the platform that does not use it.
     stop_wayland_guard
     stop_clipboard_bridge
 
@@ -169,8 +163,7 @@ teardown_container() {
 }
 
 start_container() {
-    # Sidecar mode points PROJECT_MOUNT_SRC at the redacting mount; single mode leaves it empty
-    # and pushes flags onto REDACTION_ARGS for the entrypoint to mount in-container.
+    # Stages the rule file and pushes the mount flags onto REDACTION_ARGS below.
     prepare_redaction
     # Must precede the mounts below, which bind the proxy socket / spool dir.
     if is_macos; then
@@ -232,13 +225,8 @@ start_container() {
         -e DISABLE_ERROR_REPORTING=1
     )
 
-    # Project at the same absolute path as on the host, so Claude's path-keyed project
-    # configs resolve. Sidecar mode points $PWD at the redacting mount (rslave propagates its
-    # sub-mounts in); single mode adds NO bind for $PWD.
-    # `if`, not `[ … ] && ARGS+=`: the codebase's convention for array appends under set -e.
-    if [ -n "$PROJECT_MOUNT_SRC" ]; then
-        ARGS+=(-v "$PROJECT_MOUNT_SRC:$PWD$PROJECT_MOUNT_OPTS")
-    fi
+    # No bind for $PWD: the real project comes in at /kib/real and the entrypoint mounts the
+    # redacted view over $PWD itself, so a bind here would shadow it.
     ARGS+=(${REDACTION_ARGS[@]+"${REDACTION_ARGS[@]}"})
 
     # Clipboard mounts: the mediated Wayland socket on Linux (reads pass, writes refused), or
@@ -265,18 +253,15 @@ start_container() {
         )
     fi
 
-    # Read-only: the HOST runs these at the next commit, so a writable bind would be host code
-    # execution. Belt-and-braces only — this covers one repo's top-level .git if it exists at
-    # launch; the FUSE guard is what covers nested repos, submodules and mid-session ones.
-    # Sidecar only: in single mode $PWD is the FUSE view and this bind would shadow it.
-    if [ "$KIB_FUSE_MODE" = sidecar ] && [ -d "$PWD/.git/hooks" ]; then
-        ARGS+=(-v "$PWD/.git/hooks:$PWD/.git/hooks:ro")
-    fi
+    # .git/hooks is NOT bound read-only here: $PWD is the FUSE view, and a bind over a subpath
+    # of it would shadow the very layer doing the enforcing. The guard covers it — and covers
+    # what the bind never could: nested repos, submodules, and repos created mid-session.
 
     # This project's transcripts, shared host<->box so --resume lists the same sessions on
     # both sides. Would nest inside the session mount, hence the link.
     # SOURCE is canonical's host-keyed dir; the LINK carries the box slug, because that is the
-    # name Claude will look for from inside (see kib_box_pwd). Equal outside single mode.
+    # name Claude will look for from inside (see kib_box_pwd). The two differ for any project
+    # under $HOME.
     #
     # Drop OUR links first, exactly as the shared-asset farm does. $SESSION_BASE outlives the
     # container, so a link keyed by a name we no longer use is never reaped: renaming this from
@@ -390,7 +375,7 @@ kib_prepare_session() {
     mkdir -p "$SESSION_BASE" && chmod 700 "$SESSION_BASE"
     mkdir -p "$SHARED_BASE" && chmod 700 "$SHARED_BASE" # holds the real credential when the broker is off
     if [ "$EPHEMERAL" = 1 ]; then
-        # Reap it even if we bail out below (e.g. the sidecar fails): the real cleanup() trap
+        # Reap it even if we bail out below (e.g. the broker fails): the real cleanup() trap
         # is not installed until just before the container starts.
         trap 'rm -rf "$EPH_ROOT"' EXIT
         echo "⚠️  KIB_FORCE_NEW_SESSION=1 — ephemeral session; no history, discarded on exit." >&2
@@ -512,24 +497,23 @@ kib_run_session() {
     trap 'exit 129' HUP
     trap 'exit 143' TERM
 
-    # Single mode's container needs SYS_ADMIN to mount, and `docker exec` hands EVERY session
-    # the container's full cap set — it does NOT inherit PID 1's reduced bounding set. So drop
-    # per session: enter as root, `setpriv` off SYS_ADMIN/SETPCAP (needs CAP_SETPCAP, which
-    # root has), then `gosu` to the agent uid. Sidecar's container never had SYS_ADMIN.
-    local -a incmd=(/usr/local/bin/docker-entrypoint.sh "$@")
-    local -a userflag=()
-    if [ "$KIB_FUSE_MODE" = single ]; then
-        # shellcheck disable=SC2054  # the comma is setpriv's own bounding-set syntax
-        incmd=(setpriv --bounding-set -sys_admin,-setpcap gosu "$(id -u):$(id -g)" "${incmd[@]}")
-    else
-        userflag=(--user "$(id -u):$(id -g)")
-    fi
+    # The container is created with SYS_ADMIN so the entrypoint can mount, and `docker exec`
+    # hands EVERY session the container's full cap set — it does NOT inherit PID 1's reduced
+    # bounding set. So drop per session: enter as root, `setpriv` off SYS_ADMIN/SETPCAP (which
+    # needs CAP_SETPCAP, so `--user` here would be too late), then `gosu` to the agent uid.
+    # What is left in the agent's bounding set is the entrypoint's own add-backs (0xcb:
+    # CHOWN/DAC_OVERRIDE/FOWNER/SETGID/SETUID), inert under no-new-privileges at a non-root
+    # uid. security-test.sh asserts CapEff=0 and that SYS_ADMIN and SETPCAP are both gone.
+    # shellcheck disable=SC2054  # the comma is setpriv's own bounding-set syntax
+    local -a incmd=(
+        setpriv --bounding-set -sys_admin,-setpcap gosu "$(id -u):$(id -g)"
+        /usr/local/bin/docker-entrypoint.sh "$@"
+    )
 
     # Set on the *exec*, not the container, so the tag is per-terminal and works against a
     # container created before this existed. Claude's tools and subagents inherit it.
     echo >&2 # blank line separating kib's startup diagnostics from the app's own output
     docker exec -it \
-        ${userflag[@]+"${userflag[@]}"} \
         --workdir "$PWD" \
         -e COLUMNS="$(tput cols 2>/dev/null || echo 120)" \
         -e LINES="$(tput lines 2>/dev/null || echo 40)" \

@@ -58,11 +58,12 @@ class Redact(Operations):  # type: ignore[misc]
     ) -> None:
         self.src = os.path.realpath(src)
         self.rules = rule_list
-        # Ownership squash. In single mode the project arrives over the engine VM's virtiofs,
-        # which reports every file as root:root; the agent is HOST_UID, so git refuses the whole
-        # tree as "dubious ownership" and takes dev.sh/CI down with it. Reporting the agent's
-        # own ids is safe because the view is single-user by construction and every rule check
-        # is uid-independent. None = passthrough (the Linux sidecar, where the ids are real).
+        # Ownership squash. On macOS the project arrives over the engine VM's virtiofs, which
+        # reports every file as root:root; the agent is HOST_UID, so git refuses the whole tree
+        # as "dubious ownership" and takes dev.sh/CI down with it. kib passes the agent's ids
+        # on every platform: the view is single-user by construction and every rule check is
+        # uid-independent, so the only thing lost is a real cross-owner mismatch showing up as
+        # one — which the agent could do nothing about anyway. None = report the real ids.
         self.uid = uid
         self.gid = gid
 
@@ -375,8 +376,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     ap.add_argument("--mnt", required=True)
     ap.add_argument("--patterns-file", required=True)
     ap.add_argument("--guard-file")
-    # Single mode passes the agent's ids; the sidecar omits them (its files already carry the
-    # host user's real ownership, and inventing one there would hide a genuine mismatch).
+    # kib always passes the agent's ids (see Redact.__init__). Optional so the module stays
+    # usable standalone, where reporting the backing store's real ownership is the right default.
     ap.add_argument("--uid", type=int, default=None, help="report this owner for every path")
     ap.add_argument("--gid", type=int, default=None, help="report this group for every path")
     args = ap.parse_args(argv)

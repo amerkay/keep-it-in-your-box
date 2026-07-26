@@ -137,11 +137,11 @@ else
         "chmod alone is a no-op on Docker Desktop's fakeowner binds"
 fi
 
-# Single mode must squash ownership: the project arrives over virtiofs as root:root, and
+# The mount must squash ownership: on macOS the project arrives over virtiofs as root:root, and
 # without --uid/--gid git reads the whole tree as another user's and refuses it.
 if grep -q -- '--uid' "$KIB_ROOT/guest/entrypoint/entrypoint-fuse.sh" \
     && grep -q -- '--gid' "$KIB_ROOT/guest/entrypoint/entrypoint-fuse.sh"; then
-    pass "single mode squashes FUSE ownership to the agent (git 'dubious ownership')"
+    pass "the FUSE view squashes ownership to the agent (git 'dubious ownership')"
 else
     fail "entrypoint-fuse.sh lost its --uid/--gid squash" \
         "virtiofs reports root:root; git then refuses the whole tree"
@@ -270,7 +270,7 @@ t_resolv_embedded
 
 # The HOST_HOME symlink is what makes Claude's absolute-path-keyed config resolve in the box.
 # Its parent may not exist: macOS homes are under /Users, which a debian image has no reason to
-# carry, and single mode adds no $PWD bind to create it. `ln` then failed ENOENT and the
+# carry, and there is no $PWD bind to create it. `ln` then failed ENOENT and the
 # entrypoint's `set -e` killed PID 1 — the container died during startup with no message.
 # shellcheck disable=SC2016  # literal grep pattern: it must match the source text verbatim
 hh_block="$(sed -n '/^if .*! -e "\$HOST_HOME"/,/^fi$/p' \
@@ -281,6 +281,20 @@ if printf '%s\n' "$hh_block" | grep -q 'mkdir -p "\$(dirname "\$HOST_HOME")"'; t
 else
     fail "the entrypoint symlinks HOST_HOME without creating its parent" \
         "on macOS /Users is not in the image, so the container exits during startup"
+fi
+
+# …and the `.claude` alias one level down must target $USER_HOME, not $HOST_HOME. The block
+# above always makes $HOST_HOME a symlink to $USER_HOME, so a link aimed at $HOST_HOME/.claude
+# only ever fired when $HOST_HOME happened to be a real directory — which, with no $PWD bind,
+# it never is. Aimed there it was dead code, and a host-installed plugin's absolute installPath
+# dangled: enabledPlugins true, nothing in /mcp, no error anywhere.
+# shellcheck disable=SC2016  # literal grep pattern: it must match the source text verbatim
+if grep -q 'ln -s "\$CLAUDE_SESSION_DIR" "\$USER_HOME/\.claude"' \
+    "$KIB_ROOT/guest/entrypoint/docker-entrypoint.sh"; then
+    pass "the .claude alias targets \$USER_HOME (reachable), not \$HOST_HOME (a symlink to it)"
+else
+    fail "the entrypoint's .claude alias is not aimed at \$USER_HOME" \
+        "host-installed plugins dangle and their MCP servers silently never start"
 fi
 
 # The project container must NOT be created with --rm. It is the only place a startup failure

@@ -84,12 +84,6 @@ fixture() { # fixture <name> [git-init-args…] — echoes its path, creating it
     printf '%s' "$path"
 }
 
-# Single-container mode is detectable in-session — KIB_FUSE_INTERNAL=1 is inherited by every
-# `docker exec`. It changes two expectations vs the sidecar default: the AppArmor profile (the
-# in-container mount needs `apparmor=unconfined`) and the /kib/real bind.
-SINGLE_FUSE=0
-[ "${KIB_FUSE_INTERNAL:-0}" = 1 ] && SINGLE_FUSE=1
-
 # ═════════════════════════════════════════════════════════════════
 section "Container boundary — escape classes (info-tier controls)"
 
@@ -99,16 +93,14 @@ is "no-new-privileges set" "1" "$(awk '/^NoNewPrivs:/{print $2}' /proc/self/stat
 is "seccomp in filter mode" "2" "$(awk '/^Seccomp:/{print $2}' /proc/self/status)"
 _lsm_label="$(tr -d '\0' </proc/self/attr/current 2>/dev/null)"
 if [ -z "$_lsm_label" ]; then
-    # Docker Desktop's LinuxKit kernel ships no AppArmor, so NEITHER label is achievable and
+    # Docker Desktop's LinuxKit kernel ships no AppArmor, so the label is not achievable and
     # asserting one is a guaranteed failure that says nothing. Skipped rather than relaxed:
     # the caps, seccomp and no-new-privs assertions above carry the same weight and still run.
     skip "AppArmor label" "no AppArmor in this kernel (LinuxKit / Docker Desktop)"
-elif [ "$SINGLE_FUSE" = 1 ]; then
-    # Single mode drops apparmor confinement so the in-container FUSE mount is permitted;
-    # SYS_ADMIN is dropped from the bounding set instead (asserted just above + below).
-    is "AppArmor unconfined (single-container FUSE mount needs it)" "unconfined" "$_lsm_label"
 else
-    is "AppArmor confined" "docker-default (enforce)" "$_lsm_label"
+    # Confinement is dropped so the in-container FUSE mount is permitted; SYS_ADMIN is dropped
+    # from the bounding set instead (asserted just above, and again below).
+    is "AppArmor unconfined (the in-container FUSE mount needs it)" "unconfined" "$_lsm_label"
 fi
 unset _lsm_label
 is "/proc/sys mounted read-only" "ro" "$(awk '$5=="/proc/sys"{split($6,o,",");print o[1]}' /proc/self/mountinfo | head -1)"
@@ -128,31 +120,26 @@ is "mount(2) refused" "Operation not permitted" "$(syscall_errno mount)"
 is "unshare(2) refused" "Operation not permitted" "$(syscall_errno unshare)"
 
 # ═════════════════════════════════════════════════════════════════
-section "Single-container FUSE mode (macOS / KIB_SINGLE_CONTAINER=1)"
+section "In-container FUSE redaction"
 
-if [ "$SINGLE_FUSE" = 1 ]; then
-    # The redacted view is served in-container and mounted over the project path itself (in
-    # sidecar mode the same fuse mount arrives by propagation; here it is local). readlink -f:
-    # the entrypoint's HOST_HOME symlink means the mount is recorded under the resolved path.
-    fuse_at_pwd() {
-        local p
-        p="$(readlink -f "$PWD")"
-        awk -v p="$p" '$2==p && $3 ~ /^fuse/ {print "fuse"; exit}' /proc/self/mounts
-    }
-    is "redaction is a FUSE mount at the project root" "fuse" "$(fuse_at_pwd)"
-    # The real project is exposed to root at /kib/real under a 700 parent; the capless agent
-    # must not be able to reach it — every access has to go through the redacting view.
-    deny "agent cannot reach the real project at /kib/real" ls /kib/real
-    deny "agent cannot traverse the /kib parent" ls /kib
-    # The headline property: SYS_ADMIN existed only to mount, and setpriv dropped it from the
-    # bounding set before the agent ran.
-    is "CAP_SYS_ADMIN dropped from the bounding set (setpriv)" "0" \
-        "$((0x$(awk '/^CapBnd:/{print $2}' /proc/self/status) & 0x200000 ? 1 : 0))"
-    is "CAP_SETPCAP dropped from the bounding set too" "0" \
-        "$((0x$(awk '/^CapBnd:/{print $2}' /proc/self/status) & 0x100 ? 1 : 0))"
-else
-    skip "single-container FUSE checks" "sidecar mode — relaunch with KIB_SINGLE_CONTAINER=1"
-fi
+# The redacted view is served in-container and mounted over the project path itself. readlink
+# -f: the entrypoint's HOST_HOME symlink means the mount is recorded under the resolved path.
+fuse_at_pwd() {
+    local p
+    p="$(readlink -f "$PWD")"
+    awk -v p="$p" '$2==p && $3 ~ /^fuse/ {print "fuse"; exit}' /proc/self/mounts
+}
+is "redaction is a FUSE mount at the project root" "fuse" "$(fuse_at_pwd)"
+# The real project is exposed to root at /kib/real under a 700 parent; the capless agent
+# must not be able to reach it — every access has to go through the redacting view.
+deny "agent cannot reach the real project at /kib/real" ls /kib/real
+deny "agent cannot traverse the /kib parent" ls /kib
+# The headline property: SYS_ADMIN existed only to mount, and setpriv dropped it from the
+# bounding set before the agent ran.
+is "CAP_SYS_ADMIN dropped from the bounding set (setpriv)" "0" \
+    "$((0x$(awk '/^CapBnd:/{print $2}' /proc/self/status) & 0x200000 ? 1 : 0))"
+is "CAP_SETPCAP dropped from the bounding set too" "0" \
+    "$((0x$(awk '/^CapBnd:/{print $2}' /proc/self/status) & 0x100 ? 1 : 0))"
 
 # ═════════════════════════════════════════════════════════════════
 section "Host-executed config guard — git (C1–C4, H1, H2)"
@@ -303,10 +290,9 @@ rm -rf "$CFG/skills/.sectest" "$CFG/agents/.sectest.md" 2>/dev/null
 # kib assembles each box from only this project's slice; a leak would surface another
 # project's data here. Compared, NEVER printed (other project paths are PII).
 #
-# The key is the path Claude RESOLVES to in here — the container path — which in single mode is
-# not the host path config_scope translates to and from. `pwd -P` is that resolved path by
-# definition, so it is right in both modes; $HOST_PWD is the host's and would fail on macOS
-# alone, where the two differ.
+# The key is the path Claude RESOLVES to in here — the container path — which for any project
+# under $HOME is NOT the host path config_scope translates to and from. `pwd -P` is that
+# resolved path by definition; $HOST_PWD is the host's and would compare the wrong string.
 MINE="$(pwd -P)"
 
 if command -v python3 >/dev/null 2>&1 && [ -f "$CFG/.claude.json" ]; then
@@ -361,9 +347,30 @@ fi
 
 # The top-level canonical store (which holds every project's data) is not mounted at all —
 # only this project's nested binds are — so a cross-project pivot has nothing to read.
-is "canonical ~/.claude is not mounted into the sandbox" "absent" \
-    "$([ -e "$HOME/.claude/projects" ] || [ -e "$SHARED/projects" ] || [ -e "$SHARED/history.jsonl" ] \
-        && echo present || echo absent)"
+#
+# `$HOME/.claude` is NOT required to be absent, and testing that it is was the wrong proxy: the
+# entrypoint links it to THIS project's session dir so a host-installed plugin's absolute
+# `installPath` still resolves inside the box. What matters is where it lands. Resolving the
+# link is also stricter than the old `$HOME/.claude/projects` probe — it catches a canonical
+# mount immediately, rather than only once Claude has created a `projects/` under it.
+# Fail CLOSED on an unresolvable path: an empty `readlink -f` on both sides would otherwise
+# compare equal and pass the check vacuously.
+_canon=absent
+if [ -e "$HOME/.claude" ]; then
+    _c_got="$(readlink -f "$HOME/.claude" 2>/dev/null || true)"
+    _c_want="$(readlink -f "$CFG" 2>/dev/null || true)"
+    if [ -z "$_c_got" ] || [ -z "$_c_want" ]; then
+        _canon="present (unresolvable: '$_c_got' vs '$_c_want')"
+    elif [ "$_c_got" != "$_c_want" ]; then
+        _canon="present ($_c_got)"
+    fi
+    unset _c_got _c_want
+fi
+if [ -e "$SHARED/projects" ] || [ -e "$SHARED/history.jsonl" ]; then
+    _canon="present (canonical's per-project stores are in the shared dir)"
+fi
+is "canonical ~/.claude is not mounted into the sandbox" "absent" "$_canon"
+unset _canon
 
 # ═════════════════════════════════════════════════════════════════
 section "Shared settings validator (H5) — host-side, exercised here"
@@ -552,8 +559,8 @@ fi
 
 printf '\n%sFixtures kept in tests/.state/sectest (reused next run — the guard rightly refuses\n' "$T_D"
 printf 'to unlink a .git/config, so they cannot be removed from inside). To clear them,\n'
-# Repo-relative on purpose: $ARTIFACTS is an IN-CONTAINER path and the two topologies disagree
-# about it — single-container mode printed a /home/hostuser/… path labelled "run on the HOST".
+# Repo-relative on purpose: $ARTIFACTS is an IN-CONTAINER path, so printing it absolute labels
+# a /home/hostuser/… path "run on the HOST", where it does not exist.
 printf 'run on the HOST, from the repo root:  rm -rf tests/.state/sectest%s\n' "$T_N"
 
 exit $rc

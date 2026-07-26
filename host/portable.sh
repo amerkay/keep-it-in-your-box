@@ -4,14 +4,14 @@
 #
 # ── Portability contract (enforced by tests/check/portability.sh) ─
 # Host-side scripts must run unmodified on stock macOS (bash 3.2 + BSD userland + system perl)
-# AND on Linux. GNU-only tools (flock, setsid, sha256sum, grep -P, findmnt, notify-send) and
+# AND on Linux. GNU-only tools (flock, setsid, sha256sum, grep -P, notify-send) and
 # bash-4isms (declare -A, ${var,,}, readarray) are allowed ONLY in this file's `linux` branches.
 # Shims are DETERMINISTIC per OS — no native-first fallback, exactly two paths, and the check
 # suite forces the perl paths on Linux so both stay exercised.
 #
-# Reads:  KIB_SINGLE_CONTAINER, KIB_CONFIG
-# Writes: KIB_OS, KIB_FUSE_MODE, KIB_CFG_* (from ~/.keep-it-in-your-box/config) — all read
-#         across the source boundary by the other host units
+# Reads:  KIB_CONFIG
+# Writes: KIB_OS, KIB_CFG_* (from ~/.keep-it-in-your-box/config) — all read across the source
+#         boundary by the other host units
 # shellcheck disable=SC2034
 
 # Idempotent — bin/kib sources this through _load.sh; tests may re-source.
@@ -24,16 +24,6 @@ case "$(uname -s)" in
 esac
 
 is_macos() { [ "$KIB_OS" = darwin ]; }
-
-# Redaction topology: cap-drop=ALL sidecar on Linux, single-container FUSE on macOS (which has
-# no shared-mount propagation). KIB_SINGLE_CONTAINER=1 forces the macOS path on Linux — the
-# test vehicle both suites run against.
-# shellcheck disable=SC2034
-if is_macos || [ "${KIB_SINGLE_CONTAINER:-0}" = 1 ]; then
-    KIB_FUSE_MODE=single
-else
-    KIB_FUSE_MODE=sidecar
-fi
 
 _is_uint() { case "$1" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac }
 

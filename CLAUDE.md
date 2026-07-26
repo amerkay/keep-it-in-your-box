@@ -54,8 +54,7 @@ pytest                        # just the Python suites
 Toolchain config is repo-root and shared by editor, container and host; the table of what lives
 where, and the pins to keep in step, is in `CONVENTIONS.md`. 100-column lines everywhere.
 
-Security-relevant changes must pass `security-test.sh` in **both** redaction modes: once
-normally, once with the container launched under `KIB_SINGLE_CONTAINER=1` (the macOS topology).
+Security-relevant changes must pass `security-test.sh`, run inside a sandbox.
 Image build (host-side): **`kib build`** (or `./tools/build-image.sh`), never a bare
 `docker build` — that pins `CLAUDE_VERSION` to the literal string `latest` and poisons Docker's
 layer cache forever (`docs/design-notes/architecture.md`).
@@ -89,6 +88,10 @@ Bash reaches Python one way only: `kib_py <module> <args…>` (host/core.sh). Pa
 
 One line each; the full story is in the `docs/design-notes/` file in parentheses.
 
+- **Don't re-split the redaction layer into a second container reached by mount propagation** —
+  `rshared`/`rslave` is a shared-kernel feature, so it can never run on macOS and it forecloses
+  every hypervisor-isolated substrate. One topology: the entrypoint mounts the view in-container.
+  The trade is capless-at-*runtime*, enforced three ways. (`microvm.md`, `macos.md`)
 - **Don't re-split `~/.claude` into a shared + per-project pair** — the destructive migration it
   needs breaks the seamless host⇄box switch (same login, `--resume`, history). Keep canonical
   stock; isolate by per-launch assembly + subtree merge-out. Unknown `~/.claude` entries stay
@@ -122,8 +125,7 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   truncates reads at a chunk boundary, and it surfaces as unexplained lint/test flakiness rather
   than an I/O error. Regression-guarded. (`redaction-config-guard.md`)
 - **Never unlink lock files**, and every backgrounded host process must close fds 200/201
-  (`200>&- 201>&-`) — one miss strands every project's containers. Unmount the FUSE view
-  *before* killing its sidecar. (`container-lifecycle.md`)
+  (`200>&- 201>&-`) — one miss strands every project's containers. (`container-lifecycle.md`)
 - **Don't put a hook back into the user's repos.** The checks live in `host/gitguard.sh` +
   `kib/host/gitaudit.py`, run at cold start, at teardown and on `kib audit`. Why a hook is not an
   option is in `kib/host/gitaudit.py`'s docstring. (`redaction-config-guard.md`)

@@ -29,8 +29,8 @@ RUN apt-get update && apt-get install -y curl \
     # Audio (PulseAudio client for voice mode)
     pulseaudio-utils libpulse0 \
     # System administration
-    # util-linux carries setpriv — the single-container FUSE mode (macOS / Plan H) uses it
-    # to drop CAP_SYS_ADMIN from the bounding set after mounting, before the agent runs.
+    # util-linux carries setpriv — the entrypoint uses it to drop CAP_SYS_ADMIN from the
+    # bounding set after mounting the redacted view, before the agent runs.
     gosu procps util-linux \
     # Clipboard support (Wayland)
     wl-clipboard \
@@ -40,7 +40,7 @@ RUN apt-get update && apt-get install -y curl \
     direnv \
     # Required for Claude Code's built-in sandbox
     bubblewrap socat \
-    # FUSE runtime for the .kibignore redacting sidecar.
+    # FUSE runtime for the .kibignore redacting mount.
     # trixie's 64-bit time_t transition renamed libfuse2 -> libfuse2t64, and fusepy is
     # packaged, so it comes from apt instead of a PEP 668 --break-system-packages override.
     fuse3 libfuse2t64 python3-fusepy \
@@ -48,8 +48,8 @@ RUN apt-get update && apt-get install -y curl \
 
 # Runtime config for the packages above. Its own RUN so editing either line is a
 # seconds-long cached rebuild rather than a full re-do of the apt layer.
-# user_allow_other lets the FUSE sidecar mount with -o allow_other, which is what
-# makes the redacted view visible to the main container's user.
+# user_allow_other lets the root-served FUSE mount use -o allow_other, which is what
+# makes the redacted view visible to the container's unprivileged agent user.
 RUN echo 'user_allow_other' > /etc/fuse.conf \
     && echo 'eval "$(direnv hook bash)"' >> /etc/bash.bashrc
 
@@ -179,9 +179,9 @@ RUN echo "Installing Claude Code version: ${CLAUDE_VERSION}" && \
 COPY guest/entrypoint/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY guest/entrypoint/entrypoint-fuse.sh /usr/local/bin/entrypoint-fuse.sh
 # The kib package is COPIED here as a fallback, then bind-mounted over at run time from the
-# checkout — so editing a sidecar takes effect on the next container with no rebuild. The
-# three shims in /usr/local/bin are baked because they never change: each is one `exec` line
-# that puts /usr/local/lib on sys.path for that process only. PYTHONPATH is deliberately NOT
+# checkout — so editing the FUSE server or a sidecar takes effect on the next container with no
+# rebuild. The three shims in /usr/local/bin are baked because they never change: each is one
+# `exec` line that puts /usr/local/lib on sys.path for that process only. PYTHONPATH is NOT
 # an image ENV — it would leak into every process the agent later runs.
 COPY kib /usr/local/lib/kib
 COPY guest/bin/fuse guest/bin/wayland-guard guest/bin/broker /usr/local/bin/

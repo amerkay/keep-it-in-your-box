@@ -102,9 +102,9 @@ def audit_nested_gitdirs(top: str) -> list[str]:
 def audit_nested_hooks(top: str) -> list[str]:
     """Executable hooks in *nested* git dirs — submodules, worktrees, sub-repos.
 
-    The top-level `.git/hooks` is left alone: it is the user's own, and kib bind-mounts it
-    read-only. Nested ones are the gap that mount cannot cover, since a repo can be cloned
-    or `git init`ed after the container started.
+    The top-level `.git/hooks` is left alone: it is the user's own, and the FUSE guard already
+    refuses writes to it. This walk is the *host*-side second opinion for the nested cases —
+    hooks that were already on disk before kib ever ran, in a submodule or sub-repo.
     """
     found: list[str] = []
     for dirpath, dirnames, filenames in os.walk(top):

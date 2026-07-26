@@ -116,28 +116,24 @@ else
     fail "unknown verb handling wrong" "rc=$verb_rc: $(printf '%s' "$verb_out" | head -2 | tr '\n' ' ')"
 fi
 
-# ── Host key vs box key (single mode) ────────────────────────────
-# Claude keys projects/, .claude.json and ↑ history by its RESOLVED cwd. Single mode adds no
-# $PWD bind and $HOST_HOME is a symlink to the container home, so a project under $HOME
-# resolves to $CONTAINER_HOME/<rel> in the box. kib_box_pwd is what keeps canonical host-keyed
-# and the session box-keyed; getting it wrong splits a project's history in two.
+# ── Host key vs box key ──────────────────────────────────────────
+# Claude keys projects/, .claude.json and ↑ history by its RESOLVED cwd. There is no $PWD bind
+# and $HOST_HOME is a symlink to the container home, so a project under $HOME resolves to
+# $CONTAINER_HOME/<rel> in the box. kib_box_pwd is what keeps canonical host-keyed and the
+# session box-keyed; getting it wrong splits a project's history in two.
 #
 # Each case sources config.sh in its OWN subshell and only the RESULT crosses back, so `is`
 # runs in the suite's shell — inside a subshell its counter bump is discarded and a regression
 # prints ✘ while the run still exits 0.
-_box_pwd_for() { # $1 = host $HOME, $2 = host $PWD, $3 = mode → the box's resolved path
+_box_pwd_for() { # $1 = the host's $HOME, $2 = the host's $PWD → the box's resolved path
     (
         HOME="$1"
         PWD="$2"
-        KIB_FUSE_MODE="${3:-single}"
         # shellcheck source=SCRIPTDIR/../../host/config.sh
         . "$KIB_ROOT/host/config.sh"
         kib_box_pwd
     )
 }
-
-is "box path == host path in sidecar mode" "/Users/veronica/proj" \
-    "$(_box_pwd_for /Users/veronica /Users/veronica/proj sidecar)"
 
 # The same five properties, whatever shape the host's $HOME has: macOS /Users/<name>, Linux
 # /home/<name>. The box key is /home/hostuser either way, and this translation runs on BOTH

@@ -179,9 +179,9 @@ def test_a_missing_current_file_is_treated_as_empty(
     assert redact("")._git_config_write_ok(str(src), "/nonexistent") is False
 
 
-# ── ownership squash (single mode / virtiofs reports root:root) ───
+# ── ownership squash (macOS virtiofs reports root:root) ───
 def test_ownership_passes_through_by_default(redact: Callable[..., Any], tmp_path: Path) -> None:
-    """The Linux sidecar sees real ownership and must keep reporting it."""
+    """A standalone mount with no --uid/--gid must keep reporting the real ownership."""
     (tmp_path / "src").mkdir(exist_ok=True)
     (tmp_path / "src" / "f").write_text("x")
     attr = redact("").getattr("/f")

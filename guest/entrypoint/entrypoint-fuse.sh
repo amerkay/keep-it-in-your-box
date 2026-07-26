@@ -1,7 +1,6 @@
 #!/bin/sh
-# Sourced by docker-entrypoint.sh (root path) when KIB_FUSE_INTERNAL=1 — the single-container
-# FUSE mode, used on macOS and under KIB_SINGLE_CONTAINER=1. Runs as root while the container
-# still has CAP_SYS_ADMIN, and:
+# Sourced by docker-entrypoint.sh (root path) — kib's redaction layer, on every platform. Runs
+# as root while the container still has CAP_SYS_ADMIN, and:
 #
 #   1. mounts the redacted view of /kib/real AT $KIB_FUSE_MNT (the project's real host path),
 #      so the agent only ever sees the redacted project;
@@ -9,7 +8,7 @@
 #   3. sets KIB_EXEC_PREFIX so the final exec drops SYS_ADMIN and SETPCAP from the bounding
 #      set — they exist only in this pre-agent window, and the agent tree is capless.
 #
-# Aborts the container on any failure rather than run unprotected, matching the sidecar.
+# Aborts the container on any failure rather than run unprotected.
 # POSIX sh, baked into the image and invoked via `.` — no bash-isms, no `local`.
 
 : "${KIB_FUSE_MNT:?entrypoint-fuse: KIB_FUSE_MNT is unset}"
@@ -42,10 +41,11 @@ chmod 700 /kib 2>/dev/null || true
 # is bind-mounted — a host file's execute bit may not survive a :ro bind (EACCES), which is why
 # invoking the mounted .py directly needed an explicit `python3`.
 #
-# --uid/--gid: the project reaches this container over the engine VM's virtiofs, which reports
-# every file as root:root. Without the squash git refuses the whole tree ("dubious ownership")
-# and nothing that shells out to it works. Redaction is uid-independent, so this is presentation
-# only.
+# --uid/--gid: unconditional. On macOS the project reaches this container over the engine VM's
+# virtiofs, which reports every file as root:root — without the squash git refuses the whole
+# tree ("dubious ownership") and nothing that shells out to it works. On Linux the ids are
+# already the agent's, so it is a no-op in the normal case. Redaction is uid-independent, so
+# this is presentation only.
 /usr/local/bin/fuse --src /kib/real --mnt "$KIB_FUSE_MNT" \
     --uid "${HOST_UID:-1000}" --gid "${HOST_GID:-1000}" \
     --patterns-file /kib/patterns --guard-file /usr/local/share/global.kibignore &
@@ -69,4 +69,4 @@ command -v setpriv >/dev/null 2>&1 \
 KIB_EXEC_PREFIX="setpriv --bounding-set -sys_admin,-setpcap"
 export KIB_EXEC_PREFIX
 
-echo "🛡️  kib: single-container FUSE redaction mounted at $KIB_FUSE_MNT; SYS_ADMIN dropped." >&2
+echo "🛡️  kib: FUSE redaction mounted at $KIB_FUSE_MNT; SYS_ADMIN dropped." >&2

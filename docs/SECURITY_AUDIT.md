@@ -70,7 +70,7 @@ Severity, mechanism, root cause and remediation for every confirmed issue. This 
 | **H8** | Wayland clipboard poisoning → host paste RCE / read exfil | 🟠 High<br>Host RCE (on paste) | Raw read-write Wayland socket, unmediated: the container could **write** the clipboard with bracketed-paste-bypass sequences (an embedded `ESC[201~`) that execute at your next host paste, and **read** it continuously (`wl-paste --watch`) | the raw socket bind (now `host/desktop.sh` `WL_HOST_SOCK`) — unmediated | ✅ **Fixed** `P2` — `kib/guest/wayland_guard.py` sidecar owns the real socket and refuses every `create_data_source`/`set_selection`/`set_primary_selection` on all four clipboard interfaces, closing that connection and raising a host desktop alert. Reads pass verbatim (`SCM_RIGHTS` fds included), so `wl-paste` and image paste are unaffected |
 | **H9** | Loader/interpreter env keys in shared `settings.json` | 🟠 High<br>Host RCE + cross-project | The shared-settings validator flagged only `env.ANTHROPIC_{BASE_URL,API_KEY,AUTH_TOKEN}`. The same file loads in a host `claude`, whose `env` is applied to every subprocess it spawns → `env.NODE_OPTIONS` (`--require evil.js`), `BASH_ENV`, `LD_PRELOAD`, `GIT_SSH_COMMAND`, `PATH` are host code execution at the next tool or git call. Same propagation path as H5, wider key set | `kib/shared/dangerous.py` `SETTINGS_ENV_KEYS` (three keys only) | ✅ **Fixed** (2nd pass) — added `SETTINGS_ENV_EXEC_KEYS` (interpreter/loader/command-override set) to `settings_findings`; both the launch validator and the merge-out vet refuse them; benign prefs (`EDITOR`, `PAGER`, `LANG`) stay clean |
 | **L1** | Unguarded project `.claude/settings*.json` & `.mcp.json` | 🟡 Low<br>In-container only | `guest/policy/global.kibignore` lists `.vscode`/`.envrc`/`.env*` but not `.claude/` or `.mcp.json`; a malicious repo's autoload files get in-container RCE — **already free** under skip-permissions | Not pruned or validated | ⬜ **Open** `P3` — defense-in-depth against a future non-skip-permissions use; add them to a validated guard section |
-| **—** | Container-escape CVEs, FUSE-sidecar pivot, symlink escape, mount-propagation, host-resolver reach, sleep-guard injection | 🟢 Info | — | — | **Verified blocked** — see below |
+| **—** | Container-escape CVEs, FUSE-server pivot, symlink escape, mount abuse, host-resolver reach, sleep-guard injection | 🟢 Info | — | — | **Verified blocked** — see below |
 
 ---
 
@@ -111,10 +111,10 @@ Tested, not assumed.
 
 | Control | Result |
 |:--|:--|
-| **All classic container-escape CVEs** | Blocked — `CapEff=0`, `CapBnd` lacks `SYS_ADMIN` (`0xcb`), `NoNewPrivs=1`, seccomp mode 2, AppArmor `docker-default` enforce, `/sys` + `/sys/fs/cgroup` (cgroup2) + `/proc/sys` read-only, `/proc/self/exe` non-writable, no docker binary or socket (removing the CVE-2024-21626 trigger). `mount(2)`/`unshare(2)` → EPERM live. |
-| **FUSE-sidecar pivot** | Blocked — the `SYS_ADMIN` sidecar is in a separate mount+PID namespace, reachable only via FUSE ops; the `_real` join is confined, `os.link` doesn't dereference the source, fusepy converts handler faults to `-EINVAL`. |
+| **All classic container-escape CVEs** | Blocked — `CapEff=0`, `CapBnd` lacks `SYS_ADMIN` (`0xcb`), `NoNewPrivs=1`, seccomp mode 2, `/sys` + `/sys/fs/cgroup` (cgroup2) + `/proc/sys` read-only, `/proc/self/exe` non-writable, no docker binary or socket (removing the CVE-2024-21626 trigger). `mount(2)`/`unshare(2)` → EPERM live. AppArmor is `unconfined`: the in-container FUSE mount requires it, and the emptied `SYS_ADMIN`/`SETPCAP` bounding set plus seccomp carry that weight instead. |
+| **FUSE-server pivot** | Blocked — the server is root and keeps `SYS_ADMIN` for the container's whole life (it holds the mount), now in the **agent's own** container rather than a separate one. Separation is by uid, verified live: `kill -0` → EPERM, `/proc/<pid>/environ` → EACCES, `/kib` root-700 unreadable, so the only reachable surface is the FUSE ops themselves — where the `_real` join is confined, `os.link` doesn't dereference the source, and fusepy converts handler faults to `-EINVAL`. The agent's own bounding set loses `SYS_ADMIN`/`SETPCAP` before it starts. |
 | **Symlink escape** | Blocked — `readlink` returns the target string only; the main-container kernel re-resolves it (in-mount targets re-enter the guard, out-of-mount ones reach only already-mounted paths). |
-| **Mount-propagation abuse** | Blocked — no `CAP_SYS_ADMIN`, seccomp blocks namespace unshare, `:rslave` is one-directional, the sidecar source is isolated. |
+| **Mount abuse** | Blocked — `CAP_SYS_ADMIN` is out of the agent's bounding set (three independent enforcement points), seccomp blocks namespace unshare, and `mount(2)`/`unshare(2)` are asserted to return EPERM in `security-test.sh`. |
 | **Host resolver reach** | Blocked — both systemd-resolved Varlink sockets are `/dev/null`-shadowed (`connect()` refused, verified live); the source dir is read-only; the root `resolv-sync` watcher is unreachable to uid 1000. |
 | **`host/sleep-guard.sh` injection** | Blocked — the one container-originated value reaching a bash-arithmetic sink (`:157`) is sanitized by `awk '$NF + 0'` (`:133`); container and session names reach host command lines only as safely-quoted args. *(Keep that `awk` coercion — it is security-load-bearing.)* |
 
@@ -204,7 +204,7 @@ are now fixed**; three residuals are called out below the table.
 | 16 | `--separate-git-dir` / gitfile redirect | ✅ H2 |
 | 17 | Hardlink alias of `.git/config` | ✅ C2 (source inode checked) |
 | 18 | Symlink to `.git/config`, then write | ✅ kernel re-resolves; `readlink` refused on masked |
-| 19 | `.git/hooks/pre-commit` direct write | ✅ `protect` + `:ro` mount |
+| 19 | `.git/hooks/pre-commit` direct write | ✅ `protect` (the `:ro` bind is gone — it would shadow the FUSE view) |
 | 20 | Submodule `.git/modules/x/config` driver | ✅ depth-aware `_git_sensitive` + host audit |
 | 21 | Worktree `.git/worktrees/x/config` driver | ✅ same |
 | 22 | Ordering: write config *before* the gitdir markers exist | ⚠️ preventer can be raced; host audit + reachability limit it (residual R1) |
@@ -229,7 +229,7 @@ are now fixed**; three residuals are called out below the table.
 | 41 | Container escape via `CAP_SYS_ADMIN` / `mount(2)` / `unshare(2)` | ✅ cap-drop, seccomp, NNP → EPERM |
 | 42 | Write `/proc/sys` or `/sys` | ✅ `:ro` |
 | 43 | Reach a docker socket / binary | ✅ absent |
-| 44 | Pivot through the SYS_ADMIN FUSE sidecar | ✅ separate ns, `--network none`, no source deref |
+| 44 | Pivot through the SYS_ADMIN FUSE server | ✅ root-700 backing store, cap dropped pre-agent, no source deref |
 | 45 | Clipboard WRITE (pastejacking / bracketed-paste bypass) | ✅ Wayland guard refuses `set_selection` |
 | 46 | Wayland object-id reuse to smuggle a write | ✅ over-denial is safe; factory opcodes frozen |
 | 47 | Host resolver Varlink `connect()` | ✅ `/dev/null`-shadowed |
@@ -278,14 +278,14 @@ Security-relevant work, oldest first. Everything before the audit built the boun
 |:--|:--|:--|
 | 2026-04-09 | `aa038fc` | **Container hardening.** `--cap-drop=ALL` with minimal add-backs, `.git/hooks` and `~/.claude/hooks` mounted read-only, `docker.io` removed from the image. |
 | 2026-04-10 | `d039d5a` | **`.kibignore` introduced** — matching paths get a read-only stub instead of real contents. |
-| 2026-04-14 | `ab3f4a8` | **FUSE redaction sidecar** closes the mid-session leak: launch-time bind masking could not cover files created after start. Aborts rather than run unprotected. |
+| 2026-04-14 | `ab3f4a8` | **FUSE redaction** closes the mid-session leak: launch-time bind masking could not cover files created after start. Aborts rather than run unprotected. |
 | 2026-06-19 | `d59e1d2` | Refuse to launch from `$HOME`, `~/Desktop`, `~/Documents`, `~/Downloads`. |
 | 2026-06-19 | `c81639d` | **Host-side leak guards** — `.kibignore` mirrored into `.gitignore`, plus `ccignore-precommit.py` aborting commits of matching paths (catches already-tracked files, which `.gitignore` cannot). |
 | 2026-07-10 | `0eb4aff` | Negation (`!`) rules honoured in both redaction layers, matching `git check-ignore` semantics. |
 | 2026-07-13 | `831d848` | **Cross-project isolation** — per-project `CLAUDE_CONFIG_DIR`, shared credential only. Ends both the daemon-lock war and one project reading another's transcripts. |
 | 2026-07-13 | `2aa8bc2` | One long-lived container per project; every terminal `docker exec`s in. |
 | 2026-07-15 | `02b66ae` | **Varlink sockets shadowed** in the DNS-sync mount. A read-only mount does not stop `connect()`: an unauthenticated connect had serviced `ResolveHostname` and dumped the host's full DNS/interface topology. |
-| 2026-07-22 | `cb71e90` | **Host-executed-config guard** — the always-on redaction sidecar and `guest/policy/global.kibignore`, built after a review against Pillar Security's *week of sandbox escapes* found four instances of that class. |
+| 2026-07-22 | `cb71e90` | **Host-executed-config guard** — always-on redaction and `guest/policy/global.kibignore`, built after a review against Pillar Security's *week of sandbox escapes* found four instances of that class. |
 | 2026-07-22 | `18b2567` | **This audit lands.** 118 vectors swept, 19 exploited live and adversarially verified: 4 Criticals, 6 host-RCE paths, container hardening confirmed holding. |
 | 2026-07-22 | `e364e23` | **`P0` wave — six host-RCE paths closed** (C1–C4, H1, H2). Two brittle assumptions were behind every one: that hand-parsing equals git's resolution, and that path strings identify inodes. |
 | 2026-07-22 | `f3fa29b` | **`P1` wave — the two surfaces outside the FUSE guard.** Shared assets locked read-only with a per-project merge farm (H6); the clipboard mediated by `kib/guest/wayland_guard.py` (H8); `settings.json` validated host-side each launch (H5). |

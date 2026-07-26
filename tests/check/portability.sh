@@ -85,7 +85,7 @@ fi
 # A bind whose destination sits inside another bind aborts the whole `docker run` on Docker
 # Desktop (runc resolves the mountpoint through the parent and finds it outside the rootfs).
 # The two dir mounts are the ones with children; anything landing inside them must go through
-# bind_via_link instead. The .git/hooks and /run/host-resolve nests are sidecar/Linux-only.
+# bind_via_link instead. The /run/host-resolve nest is Linux-only.
 nested="$(grep -n -- '-v "[^"]*:\([$]SESSION_CDIR\|[$]SHARED_CDIR\|/home/hostuser/\.claude-[a-z]*\)/' \
     "${HOST_BASH[@]}" 2>/dev/null || true)"
 if [ -n "$nested" ]; then

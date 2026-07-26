@@ -20,21 +20,14 @@ CONTAINER_HOME=/home/hostuser
 
 # Where Claude will think this project lives, from INSIDE the box.
 #
-# It keys projects/, .claude.json and history.jsonl by its resolved cwd. Sidecar mode binds the
-# project at its host path, so the two agree. Single mode adds no $PWD bind and the entrypoint
-# symlinks $HOST_HOME → the container home, so a project under $HOME resolves to
-# $CONTAINER_HOME/<rel> — and a Mac box silently kept a SECOND set of entries there, invisible
-# to the host's --resume and ↑ history (and vice versa). config_scope translates between the
-# two; canonical only ever holds the host key. A project outside $HOME needs no translation:
-# the entrypoint mkdirs that path for real, so it resolves to itself.
+# It keys projects/, .claude.json and history.jsonl by its resolved cwd — and that is NOT the
+# host path. There is no $PWD bind (the entrypoint mounts the redacted view there instead) and
+# the entrypoint symlinks $HOST_HOME → the container home, so a project under $HOME resolves to
+# $CONTAINER_HOME/<rel>. Left untranslated, the box silently keeps a SECOND set of entries
+# there, invisible to the host's --resume and ↑ history, and vice versa. config_scope
+# translates between the two; canonical only ever holds the host key. A project outside $HOME
+# needs no translation: the entrypoint mkdirs that path for real, so it resolves to itself.
 kib_box_pwd() {
-    case "${KIB_FUSE_MODE:-sidecar}" in
-        single) ;;
-        *)
-            printf '%s\n' "$PWD"
-            return 0
-            ;;
-    esac
     case "$PWD" in
         "$HOME") printf '%s\n' "$CONTAINER_HOME" ;;
         "$HOME"/*) printf '%s%s\n' "$CONTAINER_HOME" "${PWD#"$HOME"}" ;;
@@ -62,7 +55,7 @@ kib_resolve_paths() {
     LOCK_FILE="$LOCK_DIR/$SLUG.lock"
     BOOT_LOCK="$LOCK_DIR/$SLUG.boot.lock"
 
-    # Host-only state (single-container patterns, the macOS clipboard spool, the lock witness).
+    # Host-only state (the staged redaction patterns, the macOS clipboard spool, the witnesses).
     # Out of the bind-mounted dirs for the same reason as the locks — none of it is the
     # sandbox's to edit.
     STATE_DIR="$KIB_STATE_ROOT/.state"

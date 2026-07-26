@@ -5,30 +5,29 @@ differs by host OS, with the file that owns it.
 
 **This file carries no rationale.** Every "why" lives in the note named in the row — follow the
 pointer rather than restating it here. `host/portable.sh` is the only file that branches on OS;
-everything else calls its shims or tests `is_macos` / `KIB_FUSE_MODE`.
+everything else calls its shims or tests `is_macos`.
 
 ## How each row is proven
 
 | Mark | Meaning |
 |---|---|
 | ✅ | Exercised on Linux by `./dev.sh check` / `tests/check/` |
-| 🧪 | macOS behaviour proven **on Linux** by a test vehicle: `KIB_SINGLE_CONTAINER=1`, or `tests/check/portability.sh` forcing the perl/darwin paths |
+| 🧪 | macOS behaviour proven **on Linux** by a test vehicle: `tests/check/portability.sh` forcing the perl/darwin paths |
 | ⏳ | Needs Apple hardware — see [TODO](#todo--checks-not-yet-run) |
 | — | No test; behaviour is a one-line platform branch read directly from the source |
 
 ## Redaction and container topology
 
+**The topology itself no longer differs.** Both platforms run one container with the redacted
+view mounted in-container over `$PWD` by the baked entrypoint, the real project at `/kib/real`
+under a root-700 parent, and caps dropped per session. Only these remain platform-conditional:
+
 | Behaviour | Ubuntu / Linux | macOS | Owner | Proven |
 |---|---|---|---|---|
-| FUSE mode | `sidecar` — server in its own `cap-drop=ALL` container, reaching the main container by shared-mount propagation | `single` — no sidecar; the baked entrypoint mounts the redacted view in-container over `$PWD` | `macos.md` | 🧪 |
-| Real project path | Not exposed — the main container only ever sees the view | `/kib/real`, under a root-700 parent the capless agent cannot traverse | `macos.md` | 🧪 |
-| File ownership in the view | Passed through — the sidecar sees the host user's real uid/gid | Squashed to the agent's ids: `fakeowner` reports every bind as `root:root`, and git then refuses the whole tree as "dubious ownership" | `macos.md` | ✅ |
-| Mode bits inside the box | Enforced | **Advisory** — `fakeowner` records a mode but ignores it in `access(2)`, so no chmod-based control works; use a `:ro` mount | `macos.md` | ✅ |
-| Project config key | Claude's resolved cwd == the host path | Resolves to `$CONTAINER_HOME/<rel>` via the `$HOST_HOME` symlink; `kib_box_pwd` + `config_scope` translate so canonical stays host-keyed | `macos.md` | ✅ |
-| Cap posture | Capless **at creation** — the main container never holds `CAP_SYS_ADMIN` | Capless **at runtime** — created with `SYS_ADMIN`+`SETPCAP`+`/dev/fuse`; every `docker exec` re-drops them with `setpriv --bounding-set` then `gosu` | `macos.md` | 🧪 |
-| AppArmor | `docker-default (enforce)` | Absent — Docker Desktop's LinuxKit kernel ships no AppArmor, so the suite skips the label assertion rather than failing it. (Under `KIB_SINGLE_CONTAINER=1` on Linux: `unconfined`, which the mount requires.) | `macos.md` | 🧪 |
-| Sidecars per project | Up to 3 (FUSE, Wayland guard, broker) + main | Up to 1 (broker) + main | `container-lifecycle.md` | — |
-| `.git/hooks` read-only bind | Added | Skipped — it would shadow the FUSE view; the guard covers it instead | `redaction-config-guard.md` | ✅ |
+| Mode bits inside the project view | **Advisory** — the FUSE server runs as root and mounts with `default_permissions=False`, so no chmod- or owner-based control inside `$PWD` is enforced; use `.kibignore`/the guard, or a `:ro` mount | **Advisory**, for that reason *and* because `fakeowner` records a mode but ignores it in `access(2)` | `macos.md` | ✅ |
+| Ownership in the backing store | Already the agent's, so the squash is a no-op | `fakeowner` reports every bind as `root:root`; without the squash git refuses the whole tree as "dubious ownership" | `macos.md` | ✅ |
+| AppArmor | `unconfined` — the in-container mount requires it; the empty bounding set is what confines the agent instead | Absent — Docker Desktop's LinuxKit kernel ships no AppArmor, so the suite skips the label assertion rather than failing it | `macos.md` | ✅ |
+| Sidecars per project | Up to 2 (Wayland guard, broker) + main | Up to 1 (broker) + main | `container-lifecycle.md` | — |
 
 ## Clipboard
 
@@ -70,7 +69,7 @@ everything else calls its shims or tests `is_macos` / `KIB_FUSE_MODE`.
 | Host shell | bash 5, GNU userland used directly (`flock`, `setsid`, `sha256sum`) | bash 3.2 + BSD userland; `perl` shims for `lock_fd` / `detach_pgrp`, `shasum` for `hash8` | `macos.md` | 🧪 |
 | Empty-array expansion | Tolerant | Every array ever assigned `()` must expand as `${arr[@]+"${arr[@]}"}` or the launch aborts under `set -u` | `macos.md` | ✅ |
 | Host python | Modern `python3` | Stock 3.9 — `kib/host`, `kib/shared`, `kib/broker` stay 3.9-clean (enforced on **both**) | `macos.md` | ✅ |
-| Nested bind mounts | Tolerated (`.git/hooks`, the resolv-sync `/dev/null` masks) | Fatal — the whole `docker run` aborts; everything goes flat under `/run/kib/` via `bind_via_link` | `macos.md` | ✅ |
+| Nested bind mounts | Tolerated (the resolv-sync `/dev/null` masks) | Fatal — the whole `docker run` aborts; everything goes flat under `/run/kib/` via `bind_via_link` | `macos.md` | ✅ |
 | `~/.claude` bootstrap | Assembled per launch from canonical | Same; on a fresh Mac `ensure_claude_home` creates a minimal skeleton first | `container-lifecycle.md` | — |
 
 ## Identical on both platforms
@@ -81,9 +80,9 @@ start, teardown and `kib audit` · per-launch config assembly and subtree merge-
 broker and MCP interception · the verb CLI · `cap-drop=ALL` + `no-new-privileges` + seccomp on the
 agent's own process · one container per project with the same lock protocol.
 
-`tests/security-test.sh` is one suite for both: it auto-detects single mode via
-`KIB_FUSE_INTERNAL=1` and adjusts only the AppArmor and `/kib/real` expectations. Security-relevant
-changes must pass it in **both** modes.
+`tests/security-test.sh` is one suite for both, with no mode detection left in it: the only
+platform-conditional assertion is the AppArmor label, which is *skipped* when the kernel has no
+AppArmor at all (LinuxKit).
 
 ## TODO — checks not yet run
 
@@ -96,19 +95,18 @@ Tracked upstream in `docs/FUTURE_TASKS.md` § "Open questions" and `macos.md` §
 
 **virtiofs file ownership** is answered: `fakeowner` reports `root:root` and treats mode bits as
 advisory. It was not benign — see `macos.md` § "`fakeowner`". Everything else in this matrix is
-either covered by the Linux suite or proven on Linux through the `KIB_SINGLE_CONTAINER=1` /
-forced-darwin-path vehicles.
+either covered by the Linux suite or proven on Linux through the forced-darwin-path vehicle.
 
 ## Found on the first real Mac run
 
-Recorded because none of it was reproducible under the `KIB_SINGLE_CONTAINER=1` vehicle — that
-proves the *mode*, not the platform. All are fixed and regression-guarded.
+Recorded because none of it was reproducible on Linux, even with the same topology — these are
+platform facts, not topology facts. All are fixed and regression-guarded.
 
 | Symptom | Cause | Guard |
 |---|---|---|
 | Every git command refuses the repo; `dev.sh` finds no files | `fakeowner` reports the project `root:root` | `regressions.sh` (`--uid`/`--gid`), `test_fuse.py` |
 | The synthetic `.credentials.json` is writable | `chmod 0400` is a no-op on a bind | `regressions.sh` (`:ro` by mount) |
-| Two sets of `projects/`, `.claude.json`, `↑` history | box path ≠ host path in single mode | `wiring.sh`, `test_config_scope.py` |
+| Two sets of `projects/`, `.claude.json`, `↑` history | box path ≠ host path (now true on Linux too) | `wiring.sh`, `test_config_scope.py` |
 | No `commands/` in the box | the merge farm returned early with no shared source | — (entrypoint) |
 | 3 `lock_fd` failures + 2 false passes | the shim suite used GNU `flock(1)` as its own oracle | `portability.sh` now holds `shims.sh` to the contract |
 | AppArmor assertion cannot pass | LinuxKit ships no AppArmor | `security-test.sh` skips when the label is empty |
