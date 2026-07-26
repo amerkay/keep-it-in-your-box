@@ -82,7 +82,11 @@ _try() {
 
 # _want <desc> <expected> <actual> <hint>
 _want() {
-    if [ "$2" = "$3" ]; then _ok "$1"; else _no "$1" "$4"; fi
+    if [ "$2" = "$3" ]; then
+        _ok "$1"
+    else
+        _no "$1" "expected '$2', got '$3' — $4"
+    fi
 }
 
 # A privileged throwaway container in the VM's own mount namespace. The only way to observe
@@ -268,6 +272,21 @@ else
     PAT="$SRC.patterns"
     : >"$PAT"
 
+    # fusermount3 resolves getpwuid(getuid()) and aborts with "could not determine username"
+    # if the uid is unknown — the image has no entry for a host uid. The old sidecar bound the
+    # HOST's /etc/passwd, which works on Linux and CANNOT on macOS: Open Directory keeps real
+    # users out of that file, so uid 501 is absent there too. Synthesise the two lines instead.
+    PW="$SRC.passwd"
+    GR="$SRC.group"
+    {
+        echo "root:x:0:0:root:/root:/bin/bash"
+        printf '%s:x:%s:%s::/tmp:/bin/sh\n' "$(id -un)" "$(id -u)" "$(id -g)"
+    } >"$PW"
+    {
+        echo "root:x:0:"
+        printf '%s:x:%s:\n' "$(id -gn)" "$(id -g)"
+    } >"$GR"
+
     # The mountpoint must be owned by whoever mounts. The old sidecar got this free — the
     # HOST user did the mkdir. Here a root VM helper does it, so hand it over explicitly or
     # fusermount3 refuses a mountpoint the caller does not own.
@@ -285,6 +304,8 @@ else
             $_u --userns=host --network none \
             -v "$SRC:/src" \
             -v "$PAT:/patterns:ro" \
+            -v "$PW:/etc/passwd:ro" \
+            -v "$GR:/etc/group:ro" \
             -v "$KIB_ROOT/guest/policy/global.kibignore:/guard:ro" \
             -v "$PROBE_ROOT:$PROBE_ROOT:rshared" \
             -v "$KIB_ROOT/kib:/usr/local/lib/kib:ro" \
@@ -321,14 +342,16 @@ else
                 "$(_vm sh -c "ls -ldn $PROBE_ROOT/mnt" | tr -d '\r')"
             printf '  /dev/fuse in ctr : %s\n' \
                 "$(docker exec "$A" ls -ln /dev/fuse 2>&1 | tr -d '\r')"
+            # --entrypoint sh: the image's own entrypoint does user setup and would report
+            # its own failure instead of the capability we are asking about.
             printf '  CapEff as uid    : %s\n' \
                 "$(docker run --rm --cap-drop=ALL --cap-add=SYS_ADMIN \
-                    --user "$(id -u):$(id -g)" --userns=host "$KIB_IMAGE" \
-                    sh -c 'grep ^CapEff /proc/self/status' 2>&1 | tr -d '\r')"
+                    --user "$(id -u):$(id -g)" --userns=host --entrypoint sh "$KIB_IMAGE" \
+                    -c 'grep ^CapEff /proc/self/status' 2>&1 | tr -d '\r')"
             printf '  CapEff as root   : %s\n' \
                 "$(docker run --rm --cap-drop=ALL --cap-add=SYS_ADMIN \
-                    --userns=host "$KIB_IMAGE" \
-                    sh -c 'grep ^CapEff /proc/self/status' 2>&1 | tr -d '\r')"
+                    --userns=host --entrypoint sh "$KIB_IMAGE" \
+                    -c 'grep ^CapEff /proc/self/status' 2>&1 | tr -d '\r')"
         fi
     fi
 
@@ -368,8 +391,19 @@ else
         docker rm -f "$A" >/dev/null 2>&1
         sleep 1
         if _vm_mounted "$PROBE_ROOT/mnt"; then
-            _no "a stale mount survives after the sidecar died" \
-                "teardown must unmount explicitly — from macOS that needs a VM helper"
+            _skip "a stale ENOTCONN mount survives the sidecar" \
+                "expected — teardown must unmount explicitly. Testing that it can:"
+            # Whether the explicit unmount WORKS is the part that decides the design. If it
+            # does, teardown is a VM helper call; if not, macOS leaks a mount per session
+            # with no way to reap it short of restarting the VM.
+            _vm umount -l "$PROBE_ROOT/mnt" >/dev/null 2>&1
+            sleep 1
+            if _vm_mounted "$PROBE_ROOT/mnt"; then
+                _no "the stale mount could NOT be unmounted from a VM helper" \
+                    "macOS would leak a mount per session — this needs solving before build"
+            else
+                _ok "a privileged VM helper CAN reap it (teardown is a solvable call)"
+            fi
         else
             _ok "the mount died with the sidecar (no explicit unmount needed)"
         fi
@@ -381,7 +415,7 @@ else
             _ok "the agent's view is gone too, as expected"
         fi
     fi
-    rm -rf "$SRC" "$PAT"
+    rm -rf "$SRC" "$PAT" "$PW" "$GR"
 fi
 
 # ── verdict ──────────────────────────────────────────────────────
