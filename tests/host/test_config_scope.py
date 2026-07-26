@@ -238,8 +238,8 @@ def test_cli_rejects_wrong_arity() -> None:
     assert exc.value.code == cli.USAGE
 
 
-# ── host key vs box key (single mode) ────────────────────────────
-# Single mode has no $PWD bind and $HOST_HOME is a symlink to the container home, so Claude's
+# ── host key vs box key ──────────────────────────────────────────
+# There is no $PWD bind and $HOST_HOME is a symlink to the container home, so Claude's
 # resolved cwd — and therefore every key it writes — is the CONTAINER path, not the host one.
 # Canonical must still only ever hold the host key, or the host's --resume and ↑ history stop
 # seeing the box's sessions and vice versa.
@@ -336,3 +336,53 @@ def test_dedupe_survives_claudes_own_json_style(
     cs.seed_history(str(canonical), PA, str(seeded), BOX)
     cs.merge_history(str(seeded), PA, str(canonical), BOX)
     assert canonical.read_text() == js_style + "\n", "canonical was appended to, or rewritten"
+
+
+# The host key's SHAPE is not fixed: a Mac keys it under /Users/<name>, Linux under
+# /home/<name>, and the box key is /home/hostuser either way — except where kib_box_pwd hands
+# back the host path unchanged (a project outside $HOME, or a host user already called
+# `hostuser`). Those identity rows are the ones worth pinning: `box == path` must round-trip
+# byte-for-byte rather than re-keying a line onto itself and re-appending it every launch.
+@pytest.mark.parametrize(
+    ("host", "box"),
+    [
+        ("/Users/veronica/proj-a", "/home/hostuser/proj-a"),
+        ("/home/kay/proj-a", "/home/hostuser/proj-a"),
+        ("/home/hostuser/proj-a", "/home/hostuser/proj-a"),
+        ("/opt/work/proj-a", "/opt/work/proj-a"),
+    ],
+)
+def test_round_trip_holds_for_every_host_path_shape(
+    tmp_path: Path,
+    write_json: Callable[[str, object], Path],
+    write_file: Callable[[str, str], Path],
+    host: str,
+    box: str,
+) -> None:
+    canonical = write_json(
+        "canonical.json", {"projects": {host: {"allowedTools": ["OLD"]}, PB: {"keep": True}}}
+    )
+    session = tmp_path / "session.json"
+    cs.scope_in_json(str(canonical), host, str(session), box)
+    assert list(read(session)["projects"]) == [box]
+
+    write_json("session.json", {"projects": {box: {"allowedTools": ["NEW"]}}})
+    assert cs.merge_out_json(str(session), host, str(canonical), box) == cli.OK
+    out = read(canonical)
+    assert out["projects"][host]["allowedTools"] == ["NEW"]
+    assert out["projects"][PB] == {"keep": True}, "another project was rewritten"
+    if box != host:
+        assert box not in out["projects"], "the container path must never reach canonical"
+
+    # History: seed, type one line in the box, fold it back — canonical stays host-keyed and
+    # the seeded lines must not come back as duplicates.
+    hist = write_file("history.jsonl", hline(host, "mine") + "\n" + hline(PB, "OTHER") + "\n")
+    seeded = tmp_path / "session-history.jsonl"
+    cs.seed_history(str(hist), host, str(seeded), box)
+    with open(seeded, "a") as fh:
+        fh.write(hline(box, "typed-in-the-box") + "\n")
+    cs.merge_history(str(seeded), host, str(hist), box)
+
+    back = [json.loads(ln) for ln in hist.read_text().splitlines()]
+    assert {ln["project"] for ln in back} == {host, PB}, "no container path in canonical"
+    assert [ln["display"] for ln in back if ln["project"] == host] == ["mine", "typed-in-the-box"]

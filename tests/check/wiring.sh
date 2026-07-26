@@ -121,35 +121,48 @@ fi
 # $PWD bind and $HOST_HOME is a symlink to the container home, so a project under $HOME
 # resolves to $CONTAINER_HOME/<rel> in the box. kib_box_pwd is what keeps canonical host-keyed
 # and the session box-keyed; getting it wrong splits a project's history in two.
-(
-    # shellcheck source=SCRIPTDIR/../../host/config.sh
-    . "$KIB_ROOT/host/config.sh"
-    HOME=/Users/veronica
+#
+# Each case sources config.sh in its OWN subshell and only the RESULT crosses back, so `is`
+# runs in the suite's shell — inside a subshell its counter bump is discarded and a regression
+# prints ✘ while the run still exits 0.
+_box_pwd_for() { # $1 = host $HOME, $2 = host $PWD, $3 = mode → the box's resolved path
+    (
+        HOME="$1"
+        PWD="$2"
+        KIB_FUSE_MODE="${3:-single}"
+        # shellcheck source=SCRIPTDIR/../../host/config.sh
+        . "$KIB_ROOT/host/config.sh"
+        kib_box_pwd
+    )
+}
 
-    KIB_FUSE_MODE=sidecar PWD=/Users/veronica/proj
-    is "box path == host path in sidecar mode" "/Users/veronica/proj" "$(kib_box_pwd)"
+is "box path == host path in sidecar mode" "/Users/veronica/proj" \
+    "$(_box_pwd_for /Users/veronica /Users/veronica/proj sidecar)"
 
-    KIB_FUSE_MODE=single PWD=/Users/veronica/proj
-    is "single mode remaps a project under \$HOME to the container home" \
-        "/home/hostuser/proj" "$(kib_box_pwd)"
-
-    KIB_FUSE_MODE=single PWD=/Users/veronica/code/nested/proj
-    is "single mode keeps the path below \$HOME intact" \
-        "/home/hostuser/code/nested/proj" "$(kib_box_pwd)"
-
-    KIB_FUSE_MODE=single PWD=/Users/veronica
-    is "single mode maps \$HOME itself" "/home/hostuser" "$(kib_box_pwd)"
-
+# The same five properties, whatever shape the host's $HOME has: macOS /Users/<name>, Linux
+# /home/<name>. The box key is /home/hostuser either way, and this translation runs on BOTH
+# platforms, so both shapes are asserted rather than only the one this suite runs on.
+for _h in /Users/veronica /home/kay; do
+    is "a project under \$HOME ($_h) remaps to the container home" \
+        "/home/hostuser/proj" "$(_box_pwd_for "$_h" "$_h/proj")"
+    is "the path below \$HOME ($_h) survives the remap intact" \
+        "/home/hostuser/code/nested/proj" "$(_box_pwd_for "$_h" "$_h/code/nested/proj")"
+    is "\$HOME itself ($_h) maps to the container home" \
+        "/home/hostuser" "$(_box_pwd_for "$_h" "$_h")"
     # Outside $HOME the entrypoint mkdirs the real path, so it resolves to itself — remapping
     # there would invent a directory that does not exist in the box.
-    KIB_FUSE_MODE=single PWD=/opt/work/proj
-    is "single mode leaves a project outside \$HOME alone" "/opt/work/proj" "$(kib_box_pwd)"
-
+    is "a project outside \$HOME ($_h) is left alone" \
+        "/opt/work/proj" "$(_box_pwd_for "$_h" /opt/work/proj)"
     # The near-miss: a sibling whose name merely starts with $HOME must not be rewritten.
-    KIB_FUSE_MODE=single PWD=/Users/veronica-backup/proj
-    is "single mode does not remap a \$HOME prefix that is not a path boundary" \
-        "/Users/veronica-backup/proj" "$(kib_box_pwd)"
-)
+    is "a \$HOME ($_h) prefix that is not a path boundary is not remapped" \
+        "$_h-backup/proj" "$(_box_pwd_for "$_h" "$_h-backup/proj")"
+done
+unset _h
+
+# The container's user is the constant `hostuser` whatever the host user is called, so a Linux
+# host whose home already IS /home/hostuser must remap to itself — not double the prefix.
+is "a host \$HOME that already is the container home maps to itself" \
+    "/home/hostuser/proj" "$(_box_pwd_for /home/hostuser /home/hostuser/proj)"
 
 # $SESSION_BASE outlives the container, so a transcripts link keyed by a name kib no longer uses
 # is never reaped — renaming it $SLUG → $BOX_SLUG stranded the old one, and a stray dir in
@@ -169,10 +182,13 @@ ln -s /somewhere/else "$tl_tmp/projects/-not-ours"                 # not ours: l
         rm -f "$_t" 2>/dev/null || true
     done
 )
+# LC_ALL=C on every sort below: a UTF-8 collation ignores leading punctuation, so `.b.jsonl`
+# sorts after `a.jsonl` on a normal desktop and before it in a C-locale container. The expected
+# string cannot be right for both — pin the order rather than pick a side.
 is "the transcripts sweep drops every link of ours, whatever its slug" "" \
-    "$(find "$tl_tmp/projects" -lname /run/kib/transcripts -exec basename {} \; | sort | tr '\n' ' ' | sed 's/ $//')"
+    "$(find "$tl_tmp/projects" -lname /run/kib/transcripts -exec basename {} \; | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
 is "the sweep keeps a real dir and a link that is not ours" "-a-real-transcript-dir -not-ours" \
-    "$(find "$tl_tmp/projects" -mindepth 1 -maxdepth 1 -exec basename {} \; | sort | tr '\n' ' ' \
+    "$(find "$tl_tmp/projects" -mindepth 1 -maxdepth 1 -exec basename {} \; | LC_ALL=C sort | tr '\n' ' ' \
         | sed 's/ $//')"
 
 # The sweep must be the one start_container actually runs, not a copy that drifted from it.
@@ -187,7 +203,7 @@ rm -rf "$tl_tmp"
 unset tl_tmp
 
 # On the first launch after the link moved from $SLUG to $BOX_SLUG, a REAL directory sits at the
-# box slug: Claude keys by its resolved cwd, so in single mode it had been writing its transcripts
+# box slug: Claude keys by its resolved cwd, so it had been writing its transcripts
 # there all along while the link pointed at $SLUG. bind_via_link `rm -rf`s a non-symlink, so
 # relinking without migrating first destroys every prior in-box session — silently, and they were
 # never in canonical to begin with. Fold them out, and NEVER relink if the fold did not complete.
@@ -212,7 +228,7 @@ printf 'hidden\n' >"$tm_tmp/session/projects/-box-slug/.b.jsonl"
 ) >"$tm_tmp/ok"
 is "a pre-existing in-box transcripts dir is folded into canonical, not deleted" ".b.jsonl a.jsonl" \
     "$(find "$tm_tmp/canonical/projects/-host-slug" -mindepth 1 -exec basename {} \; \
-        | sort | tr '\n' ' ' | sed 's/ $//')"
+        | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
 is "the fold reports success, so the relink may proceed" "1" "$(cat "$tm_tmp/ok")"
 rm -rf "$tm_tmp"
 unset tm_tmp
