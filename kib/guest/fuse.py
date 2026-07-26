@@ -80,10 +80,10 @@ class Redact(Operations):  # type: ignore[misc]
     def _adopt(self, real: str | None = None, fd: int | None = None, *, deref: bool = True) -> None:
         """Hand a just-created inode to the caller.
 
-        The server is root — it holds the mount, and on macOS the backing store reports
-        root:root, so it cannot serve the tree as anyone else. Without this every file the
-        agent creates would be root-owned ON THE HOST. Best effort: virtiofs ignores chown,
-        and there the reported ids are invented anyway.
+        The inode lands on the HOST, so it must belong to the caller rather than to whoever
+        the server happens to run as. kib starts the server as the host user, which makes this
+        a no-op there — but the invariant is what matters, not the coincidence. Best effort:
+        virtiofs ignores chown, and there the reported ids are invented anyway.
         """
         uid, gid, _ = fuse_get_context()
         try:
@@ -430,11 +430,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         foreground=True,
         allow_other=True,
         nothreads=False,
-        # The server is root, so the backing syscalls bypass DAC entirely — without this
-        # NOTHING inside the project is permission-checked and a `chmod 000` file reads and
-        # writes fine. This makes the KERNEL re-apply a standard owner/mode check against the
-        # CALLER's ids on every op. Additive: a handler's own EACCES still stands, so the
-        # stubs (0444/0555) and the write denials are unaffected.
+        # The backing syscalls run as the SERVER, so a passthrough enforces no POSIX permission
+        # at all by default — a `chmod 000` file reads and writes fine. This makes the KERNEL
+        # re-apply a standard owner/mode check against the CALLER's ids on every op. Additive:
+        # a handler's own EACCES still stands, so the stubs (0444/0555) and the write denials
+        # are unaffected.
         default_permissions=True,
     )
 

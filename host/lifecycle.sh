@@ -9,7 +9,8 @@
 # (docs/design-notes/container-lifecycle.md)
 #
 # Reads:  KIB_ROOT IMAGE_NAME UNLOCK_SHARED and the globals host/config.sh sets
-# Writes: PROJ_HASH CNAME WL_CNAME WL_ROOT PATTERNS_STATE CLIP_STATE
+# Writes: PROJ_HASH CNAME FUSE_CNAME FUSE_ROOT WL_CNAME WL_ROOT PATTERNS_STATE PASSWD_STATE
+#         GROUP_STATE CLIP_STATE
 #         CRED_WITNESS LOCK_WITNESS SESSION_CDIR SHARED_CDIR SHARED_ASSET_CDIR
 #         LOCK_WITNESS_CPATH TRANSCRIPTS_CPATH BROKER_CNAME BROKER_NET BROKER_DIR BROKER_OUT
 #         BROKER_HASH BROKER_ENABLED REDACTION_ARGS ARGS
@@ -36,9 +37,18 @@ kib_identity() {
         SCRATCH_SUFFIX=".eph.$$"
     fi
 
+    FUSE_CNAME="${CNAME}-fuse"
+    # Platform-sensitive: on macOS the propagation root must live inside the engine VM, not on
+    # a virtiofs share of the Mac. host/portable.sh owns that choice.
+    FUSE_ROOT="$(fuse_root_path "${PROJ_HASH}${SCRATCH_SUFFIX}")"
     WL_CNAME="${CNAME}-wl"
     WL_ROOT="/tmp/kib-wl.${PROJ_HASH}${SCRATCH_SUFFIX}"
     PATTERNS_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.patterns"
+    # The sidecar's /etc/passwd + /etc/group, synthesised so fusermount3 can resolve its own uid
+    # without the host's user table crossing the boundary (see _stage_passwd). Host-side state,
+    # never inside FUSE_ROOT: on macOS that root is VM-internal and the Mac cannot write to it.
+    PASSWD_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.passwd"
+    GROUP_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.group"
     CLIP_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.clip"
     # Written at creation when the box got the REAL credential. A host-side FILE, not a shell
     # variable: the last terminal out often merely ATTACHED and never ran stage_credential, so
@@ -59,9 +69,9 @@ kib_identity() {
     BROKER_HASH="$BROKER_DIR/hash"
     BROKER_ENABLED=0
 
-    # prepare_redaction fills this with the `docker run` flags the entrypoint needs to mount
-    # the redacted view in-container. The seam is deliberate: redaction.sh stays the only file
-    # that knows about /dev/fuse and the caps that go with it.
+    # prepare_redaction fills this with the bind that brings the sidecar's redacted view in over
+    # $PWD. The seam is deliberate: redaction.sh stays the only file that knows about /dev/fuse
+    # and the caps that go with it — none of which reach this container.
     REDACTION_ARGS=()
 }
 
@@ -92,7 +102,6 @@ running_unlocked() {
 # check runs after resolution either way, so pre-creating the mountpoint does not help.
 # Mount at a flat path instead and leave a symlink to it in the parent bind's HOST-side dir:
 # dangling on the host (kib scratch — nothing reads it there), resolved in the container.
-# Not under /kib — the entrypoint chmods that 700 root to hide the real project.
 bind_via_link() { # <host src> <flat container dest> <link path in the parent's host dir> [:ro]
     local src="$1" dest="$2" link="$3" opts="${4:-}"
     # An older kib left docker's own mountpoint here, ROOT-owned; unlinking it needs only the
@@ -150,7 +159,7 @@ teardown_container() {
     # this before `docker run`, so a stopped leftover never blocks the name.
     docker rm -f "$CNAME" >/dev/null 2>&1 || true
 
-    # The redaction mount died with the container; this only clears the host-side state.
+    # After the container, so its :rslave view of the mount is gone before we unmount it.
     teardown_redaction
 
     # Each no-ops on the platform that does not use it.
@@ -217,6 +226,11 @@ start_container() {
         # depth — the session's caps are already empty, so this closes a route, not a hole.
         --security-opt no-new-privileges
 
+        # NOT here, and this is the point of the sidecar topology: no --cap-add=SYS_ADMIN, no
+        # --cap-add=SETPCAP, no --device /dev/fuse, and no apparmor override. This container is
+        # capless at CREATION — a kernel fact — rather than capless once a shell has dropped
+        # things, and it keeps docker-default's `deny mount,`.
+
         # Bridge network + Claude's own domain allowlist. --add-host so a dev server on the
         # host stays reachable.
         --add-host=host.docker.internal:host-gateway
@@ -225,8 +239,8 @@ start_container() {
         -e DISABLE_ERROR_REPORTING=1
     )
 
-    # No bind for $PWD: the real project comes in at /kib/real and the entrypoint mounts the
-    # redacted view over $PWD itself, so a bind here would shadow it.
+    # The project comes in here and ONLY here: prepare_redaction binds the sidecar's redacted
+    # view over $PWD (:rslave). There is no second, unredacted path to it.
     ARGS+=(${REDACTION_ARGS[@]+"${REDACTION_ARGS[@]}"})
 
     # Clipboard mounts: the mediated Wayland socket on Linux (reads pass, writes refused), or
@@ -258,15 +272,14 @@ start_container() {
     # what the bind never could: nested repos, submodules, and repos created mid-session.
 
     # This project's transcripts, shared host<->box so --resume lists the same sessions on
-    # both sides. Would nest inside the session mount, hence the link.
-    # SOURCE is canonical's host-keyed dir; the LINK carries the box slug, because that is the
-    # name Claude will look for from inside (see kib_box_pwd). The two differ for any project
-    # under $HOME.
+    # both sides. Would nest inside the session mount, hence the link. The sidecar binds the
+    # view at the project's host path, so Claude — which keys by its RESOLVED cwd — uses the
+    # same $SLUG canonical does, and source and link agree.
     #
     # Drop OUR links first, exactly as the shared-asset farm does. $SESSION_BASE outlives the
-    # container, so a link keyed by a name we no longer use is never reaped: renaming this from
-    # $SLUG to $BOX_SLUG stranded the old one, and it reads to an auditor as another project's
-    # transcripts. Only links INTO $TRANSCRIPTS_CPATH are ours; a real dir is Claude's.
+    # container, so a link keyed by a name we no longer use is never reaped, and it reads to an
+    # auditor as another project's transcripts. Only links INTO $TRANSCRIPTS_CPATH are ours; a
+    # real dir is Claude's.
     for _t in "$SESSION_BASE"/projects/*; do
         [ -L "$_t" ] || continue
         [ "$(readlink "$_t" 2>/dev/null)" = "$TRANSCRIPTS_CPATH" ] || continue
@@ -274,15 +287,17 @@ start_container() {
     done
     unset _t
 
-    # A REAL directory at the box slug is a previous in-box session's transcripts. Before the
-    # link was keyed by the box slug, Claude — which keys by its RESOLVED cwd — created its own
-    # directory under that name, and nothing ever tied it to canonical. bind_via_link `rm -rf`s
-    # a non-symlink, so migrate it out first or the upgrade destroys every prior in-box session
-    # and `--resume` simply stops listing them.
-    _bt="$SESSION_BASE/projects/$BOX_SLUG"
+    # A REAL directory at either slug is a previous in-box session's transcripts that nothing
+    # ever tied to canonical. bind_via_link `rm -rf`s a non-symlink, so fold them out first or
+    # the upgrade destroys every prior in-box session and `--resume` stops listing them. Two
+    # spellings: $SLUG, and the container-home key the in-container-mount window used
+    # (kib_legacy_box_pwd) — drop that one once no session dir predates the sidecar restore.
     _bt_ok=1
-    if [ -d "$_bt" ] && [ ! -L "$_bt" ]; then
-        _bt_ok=0
+    for _bt in "$SESSION_BASE/projects/$SLUG" "$SESSION_BASE/projects/$LEGACY_BOX_SLUG"; do
+        # The two spellings coincide for a project outside $HOME — fold once, warn once.
+        [ "$_bt" = "$SESSION_BASE/projects/$SLUG" ] || [ "$SLUG" != "$LEGACY_BOX_SLUG" ] || continue
+        { [ -d "$_bt" ] && [ ! -L "$_bt" ]; } || continue
+        _bt_this=0
         if [ "$EPHEMERAL" != 1 ] && mkdir -p "$CLAUDE_HOME/projects/$SLUG" 2>/dev/null; then
             for _f in "$_bt"/* "$_bt"/.[!.]*; do
                 [ -e "$_f" ] || continue
@@ -292,21 +307,27 @@ start_container() {
             done
             # Only an EMPTY dir may go: anything left means a move failed, and keeping the
             # data unlinked beats relinking over it.
-            rmdir "$_bt" 2>/dev/null && _bt_ok=1
+            rmdir "$_bt" 2>/dev/null && _bt_this=1
         fi
-        [ "$_bt_ok" = 1 ] || warn "could not fold this box's old transcripts into" \
-            "$CLAUDE_HOME/projects/$SLUG — leaving them in place, so --resume will not" \
-            "show them on the host. Nothing was deleted."
-    fi
+        if [ "$_bt_this" != 1 ]; then
+            # Only the CURRENT slug blocks the link below; a stranded legacy dir is inert.
+            [ "$_bt" = "$SESSION_BASE/projects/$SLUG" ] && _bt_ok=0
+            # Not a failure for an ephemeral session: it persists nothing to canonical BY
+            # DESIGN, so the fold is skipped rather than attempted.
+            [ "$EPHEMERAL" = 1 ] || warn "could not fold this box's old transcripts at $_bt" \
+                "into $CLAUDE_HOME/projects/$SLUG — leaving them in place, so --resume will" \
+                "not show them on the host. Nothing was deleted."
+        fi
+    done
 
     # Skipped for an ephemeral session — it must persist nothing to canonical. A link left
     # DANGLING would be worse than none: Claude cannot create its transcript dir over one,
     # which is why the sweep above drops ours whenever canonical has lost the directory.
     if [ "$_bt_ok" = 1 ] && [ "$EPHEMERAL" != 1 ] && [ -d "$CLAUDE_HOME/projects/$SLUG" ]; then
         bind_via_link "$CLAUDE_HOME/projects/$SLUG" "$TRANSCRIPTS_CPATH" \
-            "$SESSION_BASE/projects/$BOX_SLUG"
+            "$SESSION_BASE/projects/$SLUG"
     fi
-    unset _bt _bt_ok _f
+    unset _bt _bt_ok _bt_this _f
 
     # settings.json / keybindings.json are deliberately NOT bound: stage_shared_settings puts
     # writable COPIES in $SHARED_BASE (already served by the dir mount above) and vets them
@@ -497,16 +518,13 @@ kib_run_session() {
     trap 'exit 129' HUP
     trap 'exit 143' TERM
 
-    # The container is created with SYS_ADMIN so the entrypoint can mount, and `docker exec`
-    # hands EVERY session the container's full cap set — it does NOT inherit PID 1's reduced
-    # bounding set. So drop per session: enter as root, `setpriv` off SYS_ADMIN/SETPCAP (which
-    # needs CAP_SETPCAP, so `--user` here would be too late), then `gosu` to the agent uid.
-    # What is left in the agent's bounding set is the entrypoint's own add-backs (0xcb:
-    # CHOWN/DAC_OVERRIDE/FOWNER/SETGID/SETUID), inert under no-new-privileges at a non-root
-    # uid. security-test.sh asserts CapEff=0 and that SYS_ADMIN and SETPCAP are both gone.
-    # shellcheck disable=SC2054  # the comma is setpriv's own bounding-set syntax
+    # No `setpriv` here. The container never had SYS_ADMIN or SETPCAP to drop — the sidecar
+    # holds the mount — so `docker exec` handing a session the container's full cap set is
+    # harmless: that set is the entrypoint's own add-backs (0xcb:
+    # CHOWN/DAC_OVERRIDE/FOWNER/SETGID/SETUID), inert under no-new-privileges at a non-root uid.
+    # security-test.sh asserts CapEff=0 and that SYS_ADMIN is absent from the bounding set.
     local -a incmd=(
-        setpriv --bounding-set -sys_admin,-setpcap gosu "$(id -u):$(id -g)"
+        gosu "$(id -u):$(id -g)"
         /usr/local/bin/docker-entrypoint.sh "$@"
     )
 

@@ -28,9 +28,8 @@ RUN apt-get update && apt-get install -y curl \
     fontconfig fonts-dejavu fonts-liberation \
     # Audio (PulseAudio client for voice mode)
     pulseaudio-utils libpulse0 \
-    # System administration
-    # util-linux carries setpriv — the entrypoint uses it to drop CAP_SYS_ADMIN from the
-    # bounding set after mounting the redacted view, before the agent runs.
+    # System administration. util-linux is here for nsenter: on macOS the FUSE root lives
+    # inside the engine VM, and kib enters that VM's mount namespace through this image.
     gosu procps util-linux \
     # Clipboard support (Wayland)
     wl-clipboard \
@@ -48,8 +47,8 @@ RUN apt-get update && apt-get install -y curl \
 
 # Runtime config for the packages above. Its own RUN so editing either line is a
 # seconds-long cached rebuild rather than a full re-do of the apt layer.
-# user_allow_other lets the root-served FUSE mount use -o allow_other, which is what
-# makes the redacted view visible to the container's unprivileged agent user.
+# user_allow_other lets the sidecar's FUSE mount use -o allow_other, which is what makes the
+# propagated view readable by the agent container's root entrypoint as well as its agent user.
 RUN echo 'user_allow_other' > /etc/fuse.conf \
     && echo 'eval "$(direnv hook bash)"' >> /etc/bash.bashrc
 
@@ -173,13 +172,12 @@ RUN echo "Installing Claude Code version: ${CLAUDE_VERSION}" && \
 
 # Entrypoints + guest shims (after the Claude install so edits don't bust its cache).
 #
-# The entrypoints are BAKED, not bind-mounted: docker-entrypoint.sh is the container's
-# ENTRYPOINT, and entrypoint-fuse.sh is sourced by it as root with SYS_ADMIN — a sandboxed
-# session must not be able to edit either, so both need a rebuild to change.
+# The entrypoint is BAKED, not bind-mounted: it is the container's ENTRYPOINT and runs as root,
+# so a sandboxed session must not be able to edit it. Changing it needs a rebuild.
 COPY guest/entrypoint/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-COPY guest/entrypoint/entrypoint-fuse.sh /usr/local/bin/entrypoint-fuse.sh
 # The kib package is COPIED here as a fallback, then bind-mounted over at run time from the
-# checkout — so editing the FUSE server or a sidecar takes effect on the next container with no
+# checkout — in the SIDECARS, which are the only containers that import it (the agent's runs no
+# kib code). So editing the FUSE server or a sidecar takes effect on the next container with no
 # rebuild. The three shims in /usr/local/bin are baked because they never change: each is one
 # `exec` line that puts /usr/local/lib on sys.path for that process only. PYTHONPATH is NOT
 # an image ENV — it would leak into every process the agent later runs.
@@ -187,7 +185,6 @@ COPY kib /usr/local/lib/kib
 COPY guest/bin/fuse guest/bin/wayland-guard guest/bin/broker /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
 	/usr/local/bin/fuse /usr/local/bin/wayland-guard /usr/local/bin/broker \
-	&& chmod 0644 /usr/local/bin/entrypoint-fuse.sh \
 	&& chmod -R a+rX /usr/local/lib/kib \
 	&& python3 -c "import sys; sys.path.insert(0, '/usr/local/lib'); import kib.shared.rules, kib.broker.cli; print('kib package OK')"
 

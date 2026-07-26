@@ -8,8 +8,8 @@
 # and locking. (docs/design-notes/container-lifecycle.md)
 #
 # Reads:  KIB_ROOT KIB_STATE_ROOT PWD
-# Writes: CLAUDE_HOME CLAUDE_JSON SLUG BOX_PWD BOX_SLUG SESSION_BASE SHARED_BASE LOCK_DIR LOCK_FILE
-#         BOOT_LOCK STATE_DIR EPHEMERAL SCRATCH_SUFFIX
+# Writes: CLAUDE_HOME CLAUDE_JSON SLUG LEGACY_BOX_SLUG SESSION_BASE SHARED_BASE LOCK_DIR
+#         LOCK_FILE BOOT_LOCK STATE_DIR EPHEMERAL SCRATCH_SUFFIX
 # shellcheck disable=SC2034  # the globals above are read in bin/kib and the other units
 
 _scope() { kib_py host.config_scope "$@"; }
@@ -18,16 +18,17 @@ _scope() { kib_py host.config_scope "$@"; }
 # called, so this is a constant, not $HOME.
 CONTAINER_HOME=/home/hostuser
 
-# Where Claude will think this project lives, from INSIDE the box.
+# ── Legacy box key (migration only) ──────────────────────────────
+# Claude keys projects/, .claude.json and history.jsonl by its RESOLVED cwd. The sidecar binds
+# the redacted view at the project's host path, so that resolves to $PWD and the box key equals
+# the host key — nothing to translate, and config_scope's `box` argument is left at its default.
 #
-# It keys projects/, .claude.json and history.jsonl by its resolved cwd — and that is NOT the
-# host path. There is no $PWD bind (the entrypoint mounts the redacted view there instead) and
-# the entrypoint symlinks $HOST_HOME → the container home, so a project under $HOME resolves to
-# $CONTAINER_HOME/<rel>. Left untranslated, the box silently keeps a SECOND set of entries
-# there, invisible to the host's --resume and ↑ history, and vice versa. config_scope
-# translates between the two; canonical only ever holds the host key. A project outside $HOME
-# needs no translation: the entrypoint mkdirs that path for real, so it resolves to itself.
-kib_box_pwd() {
+# It was NOT equal during the one window kib mounted the view in-container: with no $PWD bind
+# the entrypoint's $HOST_HOME symlink made a project under $HOME resolve to $CONTAINER_HOME/<rel>
+# and Claude kept a second, host-invisible set of entries there. This survives only to find that
+# directory and fold it back in (start_container). Delete once no session dir predates the
+# sidecar restore.
+kib_legacy_box_pwd() {
     case "$PWD" in
         "$HOME") printf '%s\n' "$CONTAINER_HOME" ;;
         "$HOME"/*) printf '%s%s\n' "$CONTAINER_HOME" "${PWD#"$HOME"}" ;;
@@ -41,8 +42,7 @@ kib_resolve_paths() {
     CLAUDE_HOME="$HOME/.claude"
     CLAUDE_JSON="$HOME/.claude.json"
     SLUG="$(printf '%s' "$PWD" | sed 's/[^a-zA-Z0-9]/-/g')"
-    BOX_PWD="$(kib_box_pwd)"
-    BOX_SLUG="$(printf '%s' "$BOX_PWD" | sed 's/[^a-zA-Z0-9]/-/g')"
+    LEGACY_BOX_SLUG="$(printf '%s' "$(kib_legacy_box_pwd)" | sed 's/[^a-zA-Z0-9]/-/g')"
     SESSION_BASE="$KIB_STATE_ROOT/$SLUG/session"
     SHARED_BASE="$KIB_STATE_ROOT/$SLUG/shared"
     EPHEMERAL=0
@@ -223,11 +223,15 @@ assemble_session_dir() {
 
     if have_python; then
         # Scoped .claude.json (globals + this project's entry only). Fail-soft to empty.
-        _scope scope-in-json "$CLAUDE_JSON" "$PWD" "$SESSION_BASE/.claude.json" "$BOX_PWD" \
+        # The box key IS the host key — the sidecar binds the project at its host path, so
+        # Claude resolves the same cwd canonical is keyed by (see kib_legacy_box_pwd). Passed
+        # explicitly rather than omitted: config_scope's dispatcher checks arity exactly, so a
+        # 3-arg call aborts and the session silently starts from an empty config.
+        _scope scope-in-json "$CLAUDE_JSON" "$PWD" "$SESSION_BASE/.claude.json" "$PWD" \
             || warn "could not scope .claude.json — starting this session from an empty config."
         # This project's ↑ history only (never another project's prompts/pastes).
         _scope seed-history "$CLAUDE_HOME/history.jsonl" "$PWD" "$SESSION_BASE/history.jsonl" \
-            "$BOX_PWD" \
+            "$PWD" \
             || : >"$SESSION_BASE/history.jsonl"
     else
         printf '{\n  "projects": {}\n}\n' >"$SESSION_BASE/.claude.json"
@@ -271,10 +275,10 @@ merge_out_session() {
     }
     exec 203>"$CLAUDE_JSON.lock"
     if lock_fd -w 30 -x 203; then
-        _scope merge-out-json "$SESSION_BASE/.claude.json" "$PWD" "$CLAUDE_JSON" "$BOX_PWD" \
+        _scope merge-out-json "$SESSION_BASE/.claude.json" "$PWD" "$CLAUDE_JSON" "$PWD" \
             || warn "could not merge this project's .claude.json changes back to ~/.claude.json."
         _scope merge-history "$SESSION_BASE/history.jsonl" "$PWD" "$CLAUDE_HOME/history.jsonl" \
-            "$BOX_PWD" \
+            "$PWD" \
             || true
         merge_out_credential
         merge_out_shared_settings

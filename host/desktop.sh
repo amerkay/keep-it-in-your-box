@@ -148,8 +148,6 @@ _clip_bridge_answered() { [ -e "$CLIP_STATE/done.$_CLIP_PROBE" ]; }
 
 add_clipboard_bridge_args() {
     [ -d "$CLIP_STATE" ] || return 0
-    # /kib-clip, NOT under /kib: entrypoint-fuse.sh does `chmod 700 /kib` to fence the real
-    # project, which would also lock the agent out of the clipboard spool it must reach.
     ARGS+=(
         -v "$CLIP_STATE:/kib-clip"
         -e KIB_CLIP_BRIDGE=1

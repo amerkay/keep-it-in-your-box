@@ -5,20 +5,18 @@ set -e
 HOST_UID="${HOST_UID:-1000}"
 HOST_GID="${HOST_GID:-1000}"
 
-# Fail-closed cap check. The container is created with CAP_SYS_ADMIN (needed once, to mount the
-# redacted view) and relies on kib's `setpriv` to drop it from every session's bounding set.
-# This is the last line of that guarantee: running as the unprivileged agent just before exec,
-# it REFUSES to start if SYS_ADMIN is still there, so a bug or a manual `docker exec` cannot
-# silently run the agent cap-capable. Unconditional — capless-at-runtime is the only shape kib
-# ships. Defence in depth (a bounding-set cap is already inert under no-new-privileges) and
-# baked into the image, so a sandboxed session cannot edit it.
+# Fail-closed cap check. This container is created with no CAP_SYS_ADMIN at all — the redacted
+# view is mounted by the FUSE sidecar, in its own container — so seeing it here means the launch
+# path regressed to the shape where the agent could mount. Baked into the image, so a sandboxed
+# session cannot edit it, and unconditional: refuse rather than run the agent cap-capable.
 assert_no_sysadmin() {
     ans_bnd=$(awk '/^CapBnd:/{print $2}' /proc/self/status 2>/dev/null)
     [ -n "$ans_bnd" ] || return 0
     if [ $((0x$ans_bnd & 0x200000)) -ne 0 ]; then
-        echo "✗ kib: refusing to run — CAP_SYS_ADMIN is still in this session's bounding set." >&2
-        echo "  It must be dropped (setpriv) before the agent runs; it was not. Aborting rather" >&2
-        echo "  than run the agent with mount capability. (CapBnd=$ans_bnd)" >&2
+        echo "✗ kib: refusing to run — CAP_SYS_ADMIN is in this session's bounding set." >&2
+        echo "  The sandbox container is not supposed to have it at all; the redaction mount" >&2
+        echo "  belongs to the sidecar. Aborting rather than run the agent with mount" >&2
+        echo "  capability. (CapBnd=$ans_bnd)" >&2
         exit 1
     fi
 }
@@ -274,8 +272,9 @@ fi
 # This allows /resume to find conversations started on the host
 if [ -n "${HOST_HOME:-}" ] && [ "$HOST_HOME" != "$USER_HOME" ] && [ ! -e "$HOST_HOME" ]; then
     # The parent may not exist: macOS homes live under /Users, which a debian image has no
-    # reason to have, and there is no $PWD bind to create it. `ln` would then fail ENOENT and
-    # `set -e` would kill PID 1 — the container dying during startup with no message.
+    # reason to have. A project UNDER $HOME gets it free — the $PWD bind's mountpoint creates
+    # the whole chain, and this branch is then skipped — but one outside $HOME does not, and
+    # `ln` would fail ENOENT with `set -e` killing PID 1: the container dying with no message.
     mkdir -p "$(dirname "$HOST_HOME")"
     ln -sf "$USER_HOME" "$HOST_HOME"
 fi
@@ -286,13 +285,18 @@ fi
 # host-installed plugin dangles and its MCP servers silently never start — enabledPlugins true,
 # nothing in /mcp.
 #
-# Placed on $USER_HOME, not $HOST_HOME: the link above makes the two the same directory, so
-# aiming at $HOST_HOME would only work when it happened to be a real dir — which it no longer
-# ever is. This spelling also covers the host user who is already called `hostuser`.
-if [ -n "$CLAUDE_SESSION_DIR" ] && [ ! -e "$USER_HOME/.claude" ] && [ ! -L "$USER_HOME/.claude" ]; then
-    ln -s "$CLAUDE_SESSION_DIR" "$USER_HOME/.claude" 2>/dev/null || true
-    chown -h "$HOST_UID:$HOST_GID" "$USER_HOME/.claude" 2>/dev/null || true
-fi
+# BOTH spellings, because which one Claude resolves depends on the block above: a project under
+# $HOME gets $HOST_HOME as a REAL directory (the $PWD bind's mountpoint made it) and no symlink,
+# so only $HOST_HOME/.claude resolves; one outside $HOME gets the symlink, and $USER_HOME is the
+# reachable target. $USER_HOME also covers a host user already called `hostuser`.
+for _h in "$USER_HOME" "${HOST_HOME:-}"; do
+    if [ -n "$CLAUDE_SESSION_DIR" ] && [ -n "$_h" ] && [ -d "$_h" ] && [ ! -L "$_h" ] \
+        && [ ! -e "$_h/.claude" ] && [ ! -L "$_h/.claude" ]; then
+        ln -s "$CLAUDE_SESSION_DIR" "$_h/.claude" 2>/dev/null || true
+        chown -h "$HOST_UID:$HOST_GID" "$_h/.claude" 2>/dev/null || true
+    fi
+done
+unset _h
 
 # Playwright's Chromium, parked where Puppeteer's `--channel stable` resolution looks. Still
 # load-bearing after the shim below: a caller who passes their own `--channel` gets no
@@ -359,21 +363,14 @@ if [ "${KIB_CLIP_BRIDGE:-0}" = 1 ]; then
     install_clipboard_shims
 fi
 
-# Redaction: mount the redacted view over the project path and set KIB_EXEC_PREFIX to drop
-# CAP_SYS_ADMIN before the agent runs. Sourced while still root/SYS_ADMIN-capable, and
-# unconditional — it aborts the container rather than let a session run unprotected.
-# shellcheck source=SCRIPTDIR/entrypoint-fuse.sh
-. /usr/local/bin/entrypoint-fuse.sh
-
 # Set up environment for the target user
 export HOME="$USER_HOME"
 export PATH="$USER_HOME/.local/bin:${KIB_PREPEND_PATH:+$KIB_PREPEND_PATH:}$PATH"
 
-# Switch to the host project directory — which is the redacted FUSE view.
+# Switch to the host project directory — which is the sidecar's redacted view, propagated in.
+# kib refuses to start the container at all if that mount is not up, so there is nothing to
+# check here.
 cd "${HOST_PWD:-/workspace}"
 
 # exec gosu preserves the TTY properly (unlike su -c which wraps in a subshell).
-# $KIB_EXEC_PREFIX is the setpriv bounding-set drop entrypoint-fuse.sh just set; it must stay
-# unquoted so its words split into argv.
-# shellcheck disable=SC2086
-exec $KIB_EXEC_PREFIX gosu "$HOST_UID:$HOST_GID" "$@"
+exec gosu "$HOST_UID:$HOST_GID" "$@"
