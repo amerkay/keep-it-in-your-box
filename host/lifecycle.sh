@@ -77,7 +77,17 @@ kib_identity() {
 
 # Container-side paths. The two dir mounts, then the flat ones for the binds that would
 # otherwise nest inside them (see bind_via_link).
-SESSION_CDIR=/home/hostuser/.claude-session
+#
+# The session dir is mounted at the HOST user's OWN ~/.claude path — /home/kay/.claude,
+# /Users/veronica/.claude — never a fixed /home/hostuser spelling. Claude records plugin paths
+# absolute (installLocation, installPath) and now VALIDATES them against the running config
+# dir, so a box whose config dir is spelled differently refuses the state canonical hands it
+# ("corrupted installLocation … expected a path inside …"). Same spelling both sides means
+# there is nothing to translate, and no per-field rewrite to keep in step with upstream.
+SESSION_CDIR="${HOME%/}/.claude"
+# …except for a project INSIDE canonical's own store, where that would nest the $PWD bind in
+# this one and abort the whole `docker run` on Docker Desktop (macos.md). Rare; step aside.
+case "$PWD/" in "$SESSION_CDIR"/*) SESSION_CDIR=/home/hostuser/.claude-session ;; esac
 SHARED_CDIR=/home/hostuser/.claude-shared
 SHARED_ASSET_CDIR=/run/kib/shared
 LOCK_WITNESS_CPATH=/run/kib/shared/.kib-shared-locked

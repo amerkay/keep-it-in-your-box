@@ -394,6 +394,23 @@ else
         "host-installed plugins dangle and their MCP servers silently never start"
 fi
 
+# …and the alias only makes a recorded path RESOLVE. Claude also validates it is inside the running
+# config dir, which no symlink can satisfy, so the dir must be SPELLED the way the host spells it.
+# The real assignment is evaluated against a fake HOME/PWD, step-aside included.
+_cdir_src="$(sed -n '/^SESSION_CDIR=/,/esac$/p' "$KIB_ROOT/host/lifecycle.sh")"
+_cdir() (
+    HOME="$1" PWD="$2"
+    eval "$_cdir_src"
+    printf '%s\n' "$SESSION_CDIR"
+)
+is "the config dir is spelled with the host's own home (linux)" \
+    "/home/kay/.claude" "$(_cdir /home/kay /home/kay/proj)"
+is "the config dir is spelled with the host's own home (macos)" \
+    "/Users/veronica/.claude" "$(_cdir /Users/veronica /Users/veronica/proj)"
+is "a project inside canonical's store steps aside from a nested bind" \
+    "/home/hostuser/.claude-session" "$(_cdir /home/kay /home/kay/.claude/plugins/foo)"
+unset _cdir_src
+
 # ── The plugin farm must be real dirs down to where the installer writes ──────────────
 # `/plugin install` clones into plugins/cache/temp_git_*, then renames onto
 # plugins/cache/<marketplace>/<plugin>/<version>. A farm that stopped one level down left

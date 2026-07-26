@@ -120,6 +120,11 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   SOURCED by both the guard and the diagnostic — never copy it. (`sleep-guard.md`)
 - **Don't re-enable `leftArrowOpensAgents`, and don't re-investigate the ←-key data loss** — the
   sandbox is exonerated; it's the binary's abort-then-fork. Keep the pin. (`terminal-and-security.md`)
+- **Don't re-pin the box's config dir to a fixed `/home/hostuser` spelling** — it mounts at the
+  host's OWN `~/.claude` (`/home/kay/.claude`, `/Users/veronica/.claude`). Claude records plugin
+  paths absolute and *validates* them against the running config dir, so any other spelling
+  makes it reject the state canonical hands it. Same path both sides = nothing to translate;
+  translating per field instead was tried and thrown away. (`redaction-config-guard.md`)
 - **No `tput reset`** (regression-guarded); keep `|| true` on `tput cols`/`lines` and `read`.
   (`terminal-and-security.md`)
 - **FUSE passthrough I/O is `os.pread`/`os.pwrite`, never `lseek`+`read`** — the shared fd offset
