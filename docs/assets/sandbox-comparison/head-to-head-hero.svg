@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 400" width="1200" height="400" role="img" aria-labelledby="t d">
-  <title id="t">Head to head — kib measured against five agent sandboxes</title>
-  <desc id="d">kib compared with fence, sandbox-runtime, cplt, yoloAI and aicontainer. Of those five: none content-validate .git/config, none mediate the clipboard read versus write, two default-deny egress, and two broker credentials. kib has the first two, brokers credentials too, and lacks only default-deny egress.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 444" width="1200" height="444" role="img" aria-labelledby="t d">
+  <title id="t">Head to head — kib measured against seven agent sandboxes</title>
+  <desc id="d">kib compared with fence, sandbox-runtime, cplt, yoloAI, aicontainer, agent-safehouse and claude-code-devcontainer. Of those seven: none content-validate .git/config, none mediate the clipboard read versus write, five put the host home directory out of reach by default, two default-deny egress, and two broker credentials. kib has the first two, confines the home directory and brokers credentials too, and lacks only default-deny egress.</desc>
   <defs>
     <linearGradient id="bgh" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#0d1424"/>
@@ -15,36 +15,37 @@
     </style>
   </defs>
 
-  <rect width="1200" height="400" fill="url(#bgh)"/>
-  <rect width="1200" height="400" fill="url(#gridh)"/>
+  <rect width="1200" height="444" fill="url(#bgh)"/>
+  <rect width="1200" height="444" fill="url(#gridh)"/>
 
   <!-- ── left: title + verdict ─────────────────────────────────────────── -->
   <g>
     <text x="64" y="108" class="mono" font-size="17" letter-spacing="3.5" fill="#58a6ff">kib &#183; HEAD-TO-HEAD SECURITY REVIEW</text>
 
-    <text x="61" y="172" class="sans" font-size="56" font-weight="800" fill="#e6edf3" letter-spacing="-1">Six sandboxes,</text>
+    <text x="61" y="172" class="sans" font-size="56" font-weight="800" fill="#e6edf3" letter-spacing="-1">Eight sandboxes,</text>
     <text x="61" y="226" class="sans" font-size="56" font-weight="800" fill="#e6edf3" letter-spacing="-1">side by side</text>
 
-    <text x="64" y="264" class="sans" font-size="19" fill="#adbac7">fence &#183; sandbox-runtime &#183; cplt &#183; yoloAI &#183; aicontainer</text>
+    <text x="64" y="262" class="sans" font-size="17" fill="#adbac7">fence &#183; sandbox-runtime &#183; cplt &#183; yoloAI</text>
+    <text x="64" y="286" class="sans" font-size="17" fill="#adbac7">aicontainer &#183; agent-safehouse &#183; claude-code-devcontainer</text>
 
     <g class="mono" font-weight="700">
-      <rect x="64" y="296" width="234" height="44" rx="22" fill="#0f2417" stroke="#238636" stroke-width="1.5"/>
-      <path d="M92 318 l7 8 l13 -16" fill="none" stroke="#3fb950" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
-      <text x="124" y="324" font-size="17" fill="#56d364" textLength="154" lengthAdjust="spacingAndGlyphs">ALONE ON 2</text>
+      <rect x="64" y="310" width="234" height="44" rx="22" fill="#0f2417" stroke="#238636" stroke-width="1.5"/>
+      <path d="M92 332 l7 8 l13 -16" fill="none" stroke="#3fb950" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="124" y="338" font-size="17" fill="#56d364" textLength="154" lengthAdjust="spacingAndGlyphs">ALONE ON 2</text>
 
-      <rect x="314" y="296" width="220" height="44" rx="22" fill="#2d1214" stroke="#da3633" stroke-width="1.5"/>
-      <path d="M340 312 l14 14 M354 312 l-14 14" fill="none" stroke="#f85149" stroke-width="3.4" stroke-linecap="round"/>
-      <text x="370" y="324" font-size="17" fill="#ff7b72" textLength="142" lengthAdjust="spacingAndGlyphs">OUTVOTED ON 1</text>
+      <rect x="314" y="310" width="220" height="44" rx="22" fill="#2d1214" stroke="#da3633" stroke-width="1.5"/>
+      <path d="M340 326 l14 14 M354 326 l-14 14" fill="none" stroke="#f85149" stroke-width="3.4" stroke-linecap="round"/>
+      <text x="370" y="338" font-size="17" fill="#ff7b72" textLength="142" lengthAdjust="spacingAndGlyphs">OUTVOTED ON 1</text>
     </g>
   </g>
 
   <!-- ── right: scorecard ──────────────────────────────────────────────── -->
   <g>
-    <rect x="668" y="96" width="468" height="244" rx="12" fill="#0d1117" stroke="#21262d" stroke-width="1.5"/>
+    <rect x="668" y="96" width="468" height="288" rx="12" fill="#0d1117" stroke="#21262d" stroke-width="1.5"/>
 
     <g class="mono" font-size="15" letter-spacing="1.6" fill="#6e7681">
       <text x="692" y="130">CONTROL</text>
-      <text x="1112" y="130" text-anchor="end">OF THE 5</text>
+      <text x="1112" y="130" text-anchor="end">OF THE 7</text>
     </g>
     <path d="M692 144 H1112" stroke="#21262d" stroke-width="1.5"/>
 
@@ -57,13 +58,17 @@
       <text x="718" y="234" class="sans" fill="#adbac7">Mediates the clipboard</text>
       <text x="1112" y="234" class="mono" font-weight="700" fill="#56d364" text-anchor="end">0</text>
 
-      <circle cx="700" cy="272" r="4.5" fill="#f85149"/>
-      <text x="718" y="278" class="sans" fill="#adbac7">Default-deny egress</text>
-      <text x="1112" y="278" class="mono" font-weight="700" fill="#ff7b72" text-anchor="end">2</text>
+      <circle cx="700" cy="272" r="4.5" fill="#3fb950"/>
+      <text x="718" y="278" class="sans" fill="#adbac7">Host $HOME out of reach</text>
+      <text x="1112" y="278" class="mono" font-weight="700" fill="#56d364" text-anchor="end">5</text>
 
-      <circle cx="700" cy="316" r="4.5" fill="#3fb950"/>
-      <text x="718" y="322" class="sans" fill="#adbac7">Brokers credentials</text>
-      <text x="1112" y="322" class="mono" font-weight="700" fill="#56d364" text-anchor="end">2</text>
+      <circle cx="700" cy="316" r="4.5" fill="#f85149"/>
+      <text x="718" y="322" class="sans" fill="#adbac7">Default-deny egress</text>
+      <text x="1112" y="322" class="mono" font-weight="700" fill="#ff7b72" text-anchor="end">2</text>
+
+      <circle cx="700" cy="360" r="4.5" fill="#3fb950"/>
+      <text x="718" y="366" class="sans" fill="#adbac7">Brokers credentials</text>
+      <text x="1112" y="366" class="mono" font-weight="700" fill="#56d364" text-anchor="end">2</text>
     </g>
   </g>
 </svg>
