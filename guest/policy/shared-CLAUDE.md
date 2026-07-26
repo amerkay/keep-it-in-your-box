@@ -47,7 +47,7 @@ On EACCES, or on a launch refused by the host's audit gate: stop and report it v
 - Docker container: no `docker` binary, no socket, no host processes. `HOME` is `/home/hostuser`; paths under `/home/kay/...` are host bind mounts — writes land on the host.
 - Host-side commands (docker, `kib`, systemd, package installs) are the user's to run in a **host terminal**. `!` does not reach the host — it runs in this container. Hand them a fenced block they can paste whole: no `!`, no `$` prompts, real paths filled in. Keep each command on its own line, or joined with `&&` or trailing `\` for multiline; keeping each line short.
 - `$CLAUDE_CONFIG_DIR` is this project's private state. `~/.claude-shared` is shared with **every** project — change it only for explicitly global requests, and say so when you do.
-- The clipboard is one-way: you can **read** the host clipboard (`wl-paste`, image paste), never write it. `wl-copy` fails by design and raises a desktop alert — a clipboard write is host code execution at the user's next terminal paste. To hand them text, print it.
+- The clipboard is mediated, not free: reads pass (`wl-paste`, image paste), and a write reaches the host only as **plain text with control characters stripped** — a verbatim write would be host code execution at the user's next terminal paste. So `wl-copy` works for text on both platforms; a non-text flavour fails by design and raises a desktop alert. To hand the user something a paste would mangle, print it.
 
 ## Disabled on purpose: `←` opens the agent view
 

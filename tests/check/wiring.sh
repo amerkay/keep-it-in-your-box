@@ -337,3 +337,22 @@ else
 fi
 rm -rf "$sm_stub"
 unset sm_stub sm_out sm_rc
+
+# The clipboard notifier is a grep contract across the trust boundary: the guard writes
+# WLGUARD-<KIND> lines (kib/guest/wayland_guard.py) and start_wayland_notifier greps them out of
+# `docker logs`. Rename a kind on either side and NOTHING fails — the proxy keeps filtering, the
+# desktop just stops being told, which is exactly the failure nobody notices. Kinds are
+# discovered from both sources, so a new one is covered the day it is added.
+wg_emitted="$(grep -oE 'log\("[A-Z]+"' "$KIB_ROOT/kib/guest/wayland_guard.py" | sed 's/log("//; s/"//' | sort -u)"
+wg_watched="$(grep -oE 'WLGUARD-[A-Z]+\*' "$KIB_ROOT/host/desktop.sh" | sed 's/WLGUARD-//; s/\*//' | sort -u)"
+wg_missing=""
+for wg_k in $wg_watched; do
+    printf '%s\n' "$wg_emitted" | grep -qx "$wg_k" || wg_missing="$wg_missing $wg_k"
+done
+if [ -z "$wg_missing" ] && [ -n "$wg_watched" ]; then
+    pass "every WLGUARD kind the notifier greps is one the guard still emits"
+else
+    fail "the clipboard notifier greps a kind the guard never emits:${wg_missing:- (none watched)}" \
+        "a renamed log kind silently ends every clipboard desktop alert"
+fi
+unset wg_emitted wg_watched wg_missing wg_k

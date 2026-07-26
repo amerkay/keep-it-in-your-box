@@ -109,8 +109,11 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   help. Mount flat under `/run/kib/` via `bind_via_link`, or copy the file in. (`macos.md`)
 - **Don't drop the main container's dual-homing** (`connect_broker_network`) — host dev servers
   and LAN must stay reachable alongside the broker net. (`credential-broker.md`)
-- **Don't hide clipboard interfaces from the Wayland registry** — it broke `wl-paste`; refuse the
-  write *requests* instead. (`clipboard-and-dns.md`)
+- **Don't hide clipboard interfaces from the Wayland registry** — it broke `wl-paste`; sanitise
+  the write *content* at the `send` event instead. (`clipboard-and-dns.md`)
+- **Don't refuse clipboard writes outright, and don't gate them on who is asking** — refusal
+  broke the fullscreen TUI's select-to-copy, and the sidecar's own PID namespace makes
+  `SO_PEERCRED` useless (pid 0). The content is the boundary. (`clipboard-and-dns.md`)
 - **Don't wrap `google-chrome` image-wide with `--no-sandbox`** — the entrypoint's `npx` shim
   already makes the stock `chrome-devtools-mcp` plugin launch a browser; a Dockerfile wrapper is
   redundant, needs a rebuild, and disarms every other Chrome caller. (`terminal-and-security.md`)

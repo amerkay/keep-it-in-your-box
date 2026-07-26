@@ -38,8 +38,8 @@ creation. What differs is only *where the propagation root lives*, and how it is
 |---|---|---|---|---|
 | Transport | Wayland proxy sidecar holds the only real compositor socket | Host watcher (`host/clipboard-bridge.sh`) over a spool dir bind-mounted at `/kib-clip` | `clipboard-and-dns.md` | — |
 | Reads | Relayed verbatim by the proxy | Answered host-side with `pbpaste` / osascript PNG extraction | `clipboard-and-dns.md`, `macos.md` | — |
-| Writes | Refused at the protocol level (`WLGUARD-DENY`) | Refused at the shim; the host **never** calls `pbcopy` | `clipboard-and-dns.md` | ✅ |
-| Write-denial alert | `notify-send`, one per 30 s | None | `clipboard-and-dns.md` | — |
+| Writes | Sanitised in flight at the `send` event — control characters stripped, non-text flavours refused (`WLGUARD-STRIP` / `WLGUARD-DENY`) | Sanitised host-side through `kib.shared.clipboard`, then `pbcopy`; non-text refused at the shim | `clipboard-and-dns.md` | ✅ |
+| Write alert (strip or refusal) | `notify-send`, one per 30 s | None | `clipboard-and-dns.md` | — |
 | Paste trigger env | `WAYLAND_DISPLAY=wayland-0` + proxied socket | `WAYLAND_DISPLAY=kib-clip` + spool. No `DISPLAY`: Claude's `xclip \|\| wl-paste` chain reads neither | `host/desktop.sh` | ✅ |
 | Reader request type | n/a — the proxy relays verbatim | `wl-paste`/`xclip` spellings both map to text/png/list; 10 s budget for osascript png extraction | `clipboard-and-dns.md` | ✅ |
 | No clipboard available | No Wayland socket → info line, paste disabled (fail-soft) | No `pbpaste` → info line, paste disabled | `clipboard-and-dns.md` | — |

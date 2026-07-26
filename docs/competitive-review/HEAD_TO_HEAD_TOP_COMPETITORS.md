@@ -91,7 +91,7 @@ A bind mount cannot cover a file that isn't there yet. cplt hits the same wall (
 
 | Project | Clipboard |
 |---|---|
-| `kib` | A proxy sidecar holds the only real socket. **Reads pass, writes refused** across all four Wayland clipboard protocol families (`wl_data_device{_manager}`, `zwp_primary_selection_*`, `zwlr_data_control_*`, `ext_data_control_*` — six interfaces, drag included); denials close the connection and raise a desktop notification. macOS gets the same asymmetry via a one-way `pbpaste` bridge — the host never calls `pbcopy`. |
+| `kib` | A proxy sidecar holds the only real socket. **Reads pass, writes sanitised in flight** across every Wayland clipboard protocol family the tooling can bind (`wl_data_device{_manager}`, `zwp_primary_selection_*`, `zwlr_data_control_*`, `ext_data_control_*`, `gtk_primary_selection_*`, drag included), and an unrecognised selection interface is refused at `bind` rather than passed through; denials close the connection and raise a desktop notification. macOS runs the same filter at its `pbpaste` spool before the one `pbcopy` call. |
 | cplt | `--deny-clipboard` on macOS — all-or-nothing, and **reachable by default** (it rides the blanket `mach-lookup` Node.js needs). Listed under "Out of scope". |
 | agent-safehouse | Clipboard entries appear in its policy tests, but as a **block**. Its README documents no clipboard behaviour. |
 | fence · sandbox-runtime · claude-code-devcontainer | Not documented. |

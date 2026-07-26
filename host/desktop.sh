@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Clipboard mediation: a filtering Wayland proxy on Linux, a one-way pbpaste bridge on macOS.
 #
-# The socket is mounted for one job — pasting an image *from* the host clipboard — but a raw
-# socket also grants clipboard WRITES, and a write is host code execution at your next terminal
+# The socket is mounted for pasting an image *from* the host clipboard, but a raw socket also
+# grants clipboard WRITES, and a *verbatim* write is host code execution at your next terminal
 # paste: an embedded ESC[201~ ends bracketed paste early and the rest is interpreted as typed
 # input (audit H8). So the main container never sees the real socket. A sidecar runs
-# kib.guest.wayland_guard, which relays the protocol, forwards reads verbatim and refuses every
-# selection-setting request. Host-side select+copy is unaffected — your terminal is a host
-# client and never comes through here.
+# kib.guest.wayland_guard, which relays the protocol, forwards reads verbatim and strips
+# control characters out of every write in flight — the content is the boundary, since nothing
+# in here can tell the agent's own copy from a script's. Host-side select+copy is unaffected —
+# your terminal is a host client and never comes through here.
 #
 # Fail-soft, unlike the FUSE sidecar: no Wayland or no proxy means no socket is mounted at all.
 # Losing image paste is not a security hole; falling back to the raw socket would be.
@@ -30,8 +31,11 @@ add_wayland_args() {
     )
 }
 
-# Raises a proxy denial as a desktop notification — the sidecar has no desktop session of its
-# own. setsid + a pid file so teardown kills the whole pipeline by process group (a plain kill
+# Raises a proxy event as a desktop notification — the sidecar has no desktop session of its
+# own. STRIP is the interesting one: an ordinary copy is silent, so a line here means the box
+# wrote something that CONTAINED a paste escape, which is worth seeing.
+#
+# setsid + a pid file so teardown kills the whole pipeline by process group (a plain kill
 # leaves `docker logs -f` running). One alert per 30s, so a wl-copy loop cannot spam the desktop.
 #
 # 200>&- 201>&- is LOAD-BEARING: this follower outlives the kib that started it, and inheriting
@@ -43,13 +47,20 @@ start_wayland_notifier() {
     setsid sh -c '
         last=0
         docker logs -f "$1" 2>&1 | while IFS= read -r line; do
-            case "$line" in WLGUARD-DENY*) ;; *) continue ;; esac
+            case "$line" in
+                WLGUARD-STRIP*) t="clipboard write cleaned"
+                    b="Control characters were stripped from a write by the sandbox — your next paste is safe." ;;
+                WLGUARD-DENY*)  t="clipboard write blocked"
+                    b="A clipboard write from the sandbox was refused — not plain text, too large, or an unrecognised clipboard protocol. Your clipboard is unchanged." ;;
+                WLGUARD-ERROR*) t="clipboard proxy failed"
+                    b="The proxy could not reach the compositor: paste into the sandbox will not work this session." ;;
+                *) continue ;;  # READY is a breadcrumb, not a problem
+            esac
             now=$(date +%s)
             [ $((now - last)) -lt 30 ] && continue
             last=$now
-            notify-send -u critical -i dialog-error "kib · clipboard write blocked" "$2" || true
-        done' _ "$WL_CNAME" \
-        "The sandbox tried to write your clipboard. Blocked — your next paste is safe. Project: $(basename "$PWD")" \
+            notify-send -u critical -i dialog-error "kib · $t" "$b Project: $2" || true
+        done' _ "$WL_CNAME" "$(basename "$PWD")" \
         >/dev/null 2>&1 200>&- 201>&- &
     echo $! >"$WL_ROOT/notify.pid"
 }
@@ -91,7 +102,7 @@ start_wayland_guard() {
         return 0
     fi
     start_wayland_notifier
-    echo "📋 clipboard: mediated (read-only from the sandbox; sidecar: $WL_CNAME)" >&2
+    echo "📋 clipboard: mediated (reads pass; writes stripped of control chars; $WL_CNAME)" >&2
 }
 
 stop_wayland_guard() {
@@ -109,8 +120,8 @@ stop_wayland_guard() {
 # macOS has no socket to proxy, so instead of a protocol proxy a host-side watcher
 # (host/clipboard-bridge.sh) serves a spool dir bind-mounted at /kib-clip: the entrypoint's
 # shims drop a request file and read the response, the host answers reads with pbpaste or an
-# osascript PNG extraction and NEVER calls pbcopy. Same outcome as the Wayland guard — reads
-# pass, writes are refused at the shim.
+# osascript PNG extraction, and a WRITE reaches pbcopy only through kib.shared.clipboard — the
+# same filter the Wayland guard applies in flight, so both platforms strip the same bytes.
 start_clipboard_bridge() {
     is_macos || return 0
     command -v pbpaste >/dev/null 2>&1 || {

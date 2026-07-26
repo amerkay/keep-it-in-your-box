@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/readme/hero.svg" width="100%" alt="Keep It in Your Box — a Docker sandbox for AI coding agents. Run Claude Code in YOLO mode without the YOLO. The box redacts .env, validates .git/config, and keeps the clipboard read-only.">
+  <img src="docs/assets/readme/hero.svg" width="100%" alt="Keep It in Your Box — a Docker sandbox for AI coding agents. Run Claude Code in YOLO mode without the YOLO. The box redacts .env, validates .git/config, and filters what the clipboard can carry.">
 </p>
 
 <p align="center">
@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <b>A Docker sandbox for AI coding agents:</b> FUSE-redacted secrets, guarded host-executed config, a clipboard that only goes one way.
+  <b>A Docker sandbox for AI coding agents:</b> FUSE-redacted secrets, guarded host-executed config, a filtered clipboard.
 </p>
 
 <p align="center">
@@ -27,7 +27,7 @@
 You want to run an AI coding agent with `--dangerously-skip-permissions` so it stops asking. The problem was never the agent editing your code — that's the job. It's everything *around* the code: your `.env`, your OAuth token, a `.git/config` the host runs on the next commit, a clipboard write that becomes keystrokes at your next paste. Keep It in Your Box puts the agent in a container that can touch the project and nothing that would let it reach back out to the host.
 
 <p align="center">
-  <img src="docs/assets/readme/boundary.svg" width="100%" alt="At the box boundary: .env and .kibignore are stubbed on read with writes refused; .git/config is validated and host-executed keys refused; clipboard writes are refused while reads pass; the OAuth token is readable so rotate after untrusted runs; your project code is read-write.">
+  <img src="docs/assets/readme/boundary.svg" width="100%" alt="At the box boundary: .env and .kibignore are stubbed on read with writes refused; .git/config is validated and host-executed keys refused; clipboard writes are stripped to plain text while reads pass; the OAuth token is readable so rotate after untrusted runs; your project code is read-write.">
 </p>
 
 ### Two ways to box an agent
@@ -38,7 +38,7 @@ The sharpest comparison is with Docker's brand-new **[Docker Sandboxes](https://
 |---|---|---|
 | Workspace secrets (`.env`) | **Redacted** — stub on read, even for files created after launch | Readable — the git root is mounted into the VM |
 | `.git/config` + host-run config | **Validated** — `hooksPath` / `sshCommand` / `alias.*` refused | Left to you — *"review Git hooks / Makefiles / CI after the session"* |
-| Clipboard | **Mediated** — reads pass, writes refused | n/a — no host display is exposed |
+| Clipboard | **Mediated** — reads pass, writes stripped to plain text | n/a — no host display is exposed |
 | Egress | Open — an accepted risk | **Deny-by-default** host proxy |
 | Credential | In the box, readable — *rotate after untrusted runs* | **Brokered** — injected on egress, never in the box |
 | Kernel isolation | Shared host kernel, `cap-drop=ALL` | **microVM**, own kernel |
@@ -49,7 +49,7 @@ Neither is strictly safer — they defend different halves. The [full 7-sandbox 
 
 - **Secrets are redacted, not just hidden.** A FUSE layer over the project stubs reads and refuses writes to `.env`, `.env.*`, and anything in `.kibignore` — including files created *after* launch, which no bind mount can cover. Committed placeholders (`.env.example`, `.env.sample`, …) stay readable.
 - **Host-executed config is guarded.** The real boundary isn't the container — it's what the *host* runs later. `.git/config` is content-validated on write (a new `core.hooksPath`, `core.sshCommand`, `alias.*`, `filter.*.clean`, or `include` is refused; `git remote add` and `push -u` still work). `.vscode/`, `.devcontainer/`, `.envrc`, git hooks and submodule/worktree equivalents are read-through, write-denied. At launch and teardown an audit gate refuses to start a session into a poisoned config, and names any hidden path git is tracking anyway — without writing a hook into your repo.
-- **The clipboard only goes one way.** The host Wayland socket is proxied, not handed over: clipboard *reads* pass (so image paste works), every clipboard *write* is refused — a write is host code execution at your next terminal paste. macOS gets the same asymmetry via a `pbpaste` bridge.
+- **The clipboard is filtered, not handed over.** The host Wayland socket is proxied: *reads* pass (so image paste works), and a *write* reaches your clipboard only as plain text with control characters stripped out in flight — a verbatim write is host code execution at your next terminal paste (an embedded `ESC[201~` ends bracketed paste and the rest is typed). So select-to-copy works and the escape can't ride along. macOS gets the same filter through its `pbpaste` bridge, which cleans the text before it ever reaches `pbcopy`.
 - **Projects can't read each other, and `~/.claude` stays stock.** kib keeps your canonical `~/.claude`/`~/.claude.json` untouched and assembles each container from only *this* project's slice per launch (its transcripts, prompt history and `.claude.json` entry), merging changes back out on exit. So a plain host `claude` and `cc` share one login, one `--resume` list and one history — while no project's box can see another's data.
 - **One container per project, shared by every terminal.** Every terminal `docker exec`s into the same long-lived container, so `/resume`, prompt history and background jobs are shared across tabs. It's torn down only when the last session exits.
 - **Follows your network.** On Linux a lightweight watcher keeps the container's DNS in step with the host across wifi/VPN changes — no host-netns sidecar, works behind a per-connection host firewall. (Not needed on macOS: the engine VM tracks the host resolver.)

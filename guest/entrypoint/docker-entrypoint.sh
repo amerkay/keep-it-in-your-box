@@ -78,25 +78,48 @@ SHIM
     cat >/usr/local/bin/xclip <<'SHIM'
 #!/bin/sh
 # kib clipboard bridge — xclip-compatible. `-o`/`-out` reads via the bridge; anything else
-# is a write and is refused.
+# is a write and goes through the same spool as wl-copy.
 # "$@" is forwarded, not dropped: xclip asks for an image as `-t image/png -o`, and without
 # the args wl-paste defaulted to text and returned the wrong selection entirely.
 for a in "$@"; do case "$a" in -o | -out) exec /usr/local/bin/wl-paste "$@" ;; esac; done
-DIR=/kib-clip
-[ -d "$DIR" ] && : > "$DIR/deny.$$" 2>/dev/null
-echo "kib: clipboard WRITE refused — the sandbox clipboard is read-only." >&2
-exit 1
+exec /usr/local/bin/wl-copy "$@"
 SHIM
 
     for w in wl-copy pbcopy; do
         cat >"/usr/local/bin/$w" <<'SHIM'
 #!/bin/sh
-# kib clipboard bridge — WRITE refused. A clipboard write is host code execution at the
-# user's next paste, so it is blocked here exactly as the Wayland guard blocks it.
+# kib clipboard bridge — WRITE, spooled. The host half strips control characters before it
+# calls pbcopy (kib.shared.clipboard, the same filter the Wayland guard applies in flight):
+# a VERBATIM write would be host code execution at the user's next terminal paste.
+#
+# Text only, like the Wayland side — the filter guarantees nothing about bytes it cannot read
+# as text, and there is no select-to-copy for an image to serve.
 DIR=/kib-clip
-[ -d "$DIR" ] && : > "$DIR/deny.$$" 2>/dev/null
-echo "kib: clipboard WRITE refused — the sandbox clipboard is read-only." >&2
-exit 1
+[ -d "$DIR" ] || { echo "kib: no clipboard bridge — write refused." >&2; exit 1; }
+for a in "$@"; do
+	case "$a" in
+		-t | --type | -target) t=next ;;
+		text/* | TEXT | STRING | UTF8_STRING) [ "${t:-}" = next ] && t=ok ;;
+		-*) ;;
+		*) [ "${t:-}" = next ] && { t=bad; break; } ;;
+	esac
+done
+if [ "${t:-}" = bad ] || [ "${t:-}" = next ]; then
+	: > "$DIR/deny.$$" 2>/dev/null
+	echo "kib: clipboard WRITE refused — text only." >&2
+	exit 1
+fi
+id="$$.$(date +%s%N 2>/dev/null || date +%s)"
+# Content from argv when given (`wl-copy some text`), else stdin — Claude's TUI pipes it.
+if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then printf '%s' "$*" > "$DIR/data.$id"; else cat > "$DIR/data.$id"; fi
+printf 'write\n' > "$DIR/req.$id"
+i=0
+while [ ! -e "$DIR/done.$id" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+rc=1
+[ -s "$DIR/resp.$id" ] && rc=0                  # the host writes `ok` only after pbcopy succeeds
+rm -f "$DIR/data.$id" "$DIR/resp.$id" "$DIR/done.$id" 2>/dev/null
+[ "$rc" = 0 ] || echo "kib: clipboard WRITE failed — see the desktop alert." >&2
+exit "$rc"
 SHIM
     done
 
@@ -252,8 +275,24 @@ if [ -n "$CLAUDE_SESSION_DIR" ] && [ -d "$CLAUDE_SHARED_DIR" ]; then
     # and re-chowns. Safe here: container creation, so nothing can be mid-install.
     rm -rf "$CLAUDE_SESSION_DIR"/plugins/cache/temp_git_* 2>/dev/null || true
 
-    for entry in plugins skills agents commands; do
-        farm_dir "$CLAUDE_SHARED_DIR/$entry" "$CLAUDE_SESSION_DIR/$entry"
+    farm_dir "$CLAUDE_SHARED_DIR/plugins" "$CLAUDE_SESSION_DIR/plugins"
+
+    # Prompt-only trees are SHARED, not farmed: a skill authored in a box must land in canonical
+    # so every project and a host `claude` get it — which is the whole point of authoring one.
+    # They mount writable (host/config.sh, "Shared-asset tiers"), so one symlink is enough.
+    for entry in skills agents commands; do
+        src="$CLAUDE_SHARED_DIR/$entry"
+        dst="$CLAUDE_SESSION_DIR/$entry"
+        [ -d "$src" ] || continue
+        # An older kib farmed these. `ln -sfn` onto a real dir plants the link INSIDE it, so
+        # take the farm down first — and leave it alone if it still holds project-local content,
+        # which rmdir refuses to remove. That content then wins as this project's override.
+        if [ -d "$dst" ] && [ ! -L "$dst" ]; then
+            prune_farm "$dst" 0
+            rmdir "$dst" 2>/dev/null || true
+        fi
+        [ -e "$dst" ] && [ ! -L "$dst" ] && continue
+        ln -sfn "$src" "$dst" 2>/dev/null || true
     done
 
     # Deeper where the installer writes: it renames onto cache/<marketplace>/<plugin>/<version>

@@ -126,7 +126,7 @@ parsed-and-normalised lines now.
 
 ## Clipboard and DNS on macOS
 
-macOS clipboard: `clipboard-bridge.sh` (host, POSIX sh) watches a spool dir at `/kib-clip`; the entrypoint installs `wl-paste`/`xclip` reader shims and `wl-copy`/`pbcopy` deny-marker shims; the host answers with `pbpaste`/osascript PNG extraction and **never calls `pbcopy`**. Started/stopped like the Wayland notifier including the `200>&- 201>&-`.
+macOS clipboard: `clipboard-bridge.sh` (host, POSIX sh) watches a spool dir at `/kib-clip`; the entrypoint installs `wl-paste`/`xclip` reader shims and `wl-copy`/`pbcopy` writer shims that spool the bytes; the host answers reads with `pbpaste`/osascript PNG extraction, and a write reaches `pbcopy` **only** through `kib.shared.clipboard` (opened `O_NOFOLLOW` — the spool is sandbox-writable). Non-text is refused at the shim, which leaves the deny marker the host alerts on. Started/stopped like the Wayland notifier including the `200>&- 201>&-`.
 
 DNS sync is skipped on macOS (the engine VM tracks the host resolver). No migration step: on a fresh Mac `ensure_claude_home` creates a minimal `~/.claude` skeleton on first launch (first login populates it); nothing to bootstrap.
 

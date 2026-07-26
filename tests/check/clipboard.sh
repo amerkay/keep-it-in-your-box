@@ -15,14 +15,22 @@ section "Clipboard bridge shims (macOS reader protocol)"
 _clip_tmp="$(mktemp -d)"
 mkdir -p "$_clip_tmp/bin" "$_clip_tmp/spool"
 
-for _s in wl-paste xclip; do
-    awk -v n="$_s" '$0 ~ ("cat >/usr/local/bin/" n " <<") {f=1; next} f && /^SHIM$/ {exit} f' \
+for _s in wl-paste xclip wl-copy; do
+    # wl-copy and pbcopy share ONE heredoc, written from a `for w in …` loop, so its start
+    # marker is the loop variable rather than the shim's name. index(), not a regex, so the `$`
+    # needs no escaping.
+    case "$_s" in
+        wl-copy) _mark="cat >\"/usr/local/bin/\$w\" <<" ;; # \$w: the entrypoint's own loop var
+        *) _mark="cat >/usr/local/bin/$_s <<" ;;
+    esac
+    awk -v m="$_mark" 'index($0, m) {f=1; next} f && /^SHIM$/ {exit} f' \
         "$KIB_ROOT/guest/entrypoint/docker-entrypoint.sh" >"$_clip_tmp/bin/$_s"
     if [ ! -s "$_clip_tmp/bin/$_s" ]; then
         fail "extract the $_s shim" "install_clipboard_shims no longer defines it as a heredoc"
     fi
     sed -i.bak "s#DIR=/kib-clip#DIR=$_clip_tmp/spool#" "$_clip_tmp/bin/$_s"
     sed -i.bak "s#/usr/local/bin/wl-paste#$_clip_tmp/bin/wl-paste#g" "$_clip_tmp/bin/$_s"
+    sed -i.bak "s#/usr/local/bin/wl-copy#$_clip_tmp/bin/wl-copy#g" "$_clip_tmp/bin/$_s"
     chmod +x "$_clip_tmp/bin/$_s"
 done
 rm -f "$_clip_tmp/bin"/*.bak
@@ -86,15 +94,32 @@ is "the liveness probe never reads the pasteboard" "0" \
 rm -f "$_clip_tmp/spool"/req.probe1 "$_clip_tmp/spool"/resp.probe1 "$_clip_tmp/spool"/done.probe1
 unset _clip_i
 
-# Writes stay refused, and still leave the deny marker the host alerts on.
-rm -f "$_clip_tmp/spool"/deny.* 2>/dev/null
-if echo x | "$_clip_tmp/bin/xclip" -i >/dev/null 2>&1; then
-    fail "xclip write is refused" "a clipboard write is host code execution at the next paste"
+# The WRITE path, end to end against the real host half. A write is allowed — refusing it broke
+# the fullscreen TUI's select-to-copy — but it reaches pbcopy only through kib.shared.clipboard,
+# the same filter the Wayland guard applies in flight on Linux. The probe carries the sequence
+# that would end bracketed paste and run the rest as typed input at the user's next paste.
+printf '#!/bin/sh\ncat > "%s/pasteboard"\n' "$_clip_tmp" >"$_clip_tmp/bin/pbcopy"
+chmod +x "$_clip_tmp/bin/pbcopy"
+printf 'kib\033[201~probe' | "$_clip_tmp/bin/wl-copy" >/dev/null 2>&1
+_clip_i=0
+while [ ! -f "$_clip_tmp/pasteboard" ] && [ "$_clip_i" -lt 100 ]; do
+    sleep 0.05
+    _clip_i=$((_clip_i + 1))
+done
+is "a text write reaches pbcopy with the paste escape stripped" "kib[201~probe" \
+    "$(cat "$_clip_tmp/pasteboard" 2>/dev/null)"
+
+# Text only, exactly like the Wayland side: the filter says nothing about bytes it cannot read
+# as text, so a non-text flavour is refused at the shim and leaves the marker the host alerts on.
+rm -f "$_clip_tmp/spool"/deny.* "$_clip_tmp/pasteboard" 2>/dev/null
+if printf x | "$_clip_tmp/bin/xclip" -t image/png -i >/dev/null 2>&1; then
+    fail "an image write is refused" "the sanitiser guarantees nothing about non-text bytes"
 else
-    pass "xclip write is refused"
+    pass "an image write is refused"
 fi
 is "a refused write leaves a deny marker for the host" "1" \
     "$(find "$_clip_tmp/spool" -name 'deny.*' | wc -l | tr -d ' ')"
+is "a refused write never reached pbcopy" "" "$(cat "$_clip_tmp/pasteboard" 2>/dev/null)"
 
 # The png path is answered by osascript, whose cold start passed the original 2s budget.
 _clip_budget="$(sed -n 's/.*"\$i" -lt \([0-9]*\).*/\1/p' "$_clip_tmp/bin/wl-paste" | head -1)"
@@ -108,4 +133,4 @@ fi
 kill "$_clip_host_pid" 2>/dev/null
 rm -rf "$_clip_tmp"
 wait "$_clip_host_pid" 2>/dev/null || true
-unset _clip_tmp _clip_host_pid _clip_budget _s _req _id
+unset _clip_tmp _clip_host_pid _clip_budget _s _mark _req _id

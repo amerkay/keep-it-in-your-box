@@ -527,19 +527,37 @@ fi
 section "Clipboard mediation (H8)"
 
 if [ "$DO_CLIPBOARD" = 0 ]; then
-    skip "clipboard write is refused" "--no-clipboard"
+    skip "clipboard writes are sanitised" "--no-clipboard"
 elif ! command -v wl-copy >/dev/null || [ ! -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/${WAYLAND_DISPLAY:-wayland-0}" ]; then
-    skip "clipboard write is refused" "no Wayland socket in this container"
+    skip "clipboard writes are sanitised" "no Wayland socket in this container"
 else
-    deny "clipboard WRITE is refused (raises a host alert)" timeout 5 wl-copy 'kib-sectest-probe'
-    allow "regression: clipboard READ still works" timeout 5 wl-paste --list-types
-    # The write must not merely error — the selection must be untouched. Compared without
-    # printing, so the real clipboard never enters a log.
-    if timeout 5 wl-paste 2>/dev/null | grep -qxF 'kib-sectest-probe'; then
-        fail "clipboard was not poisoned" "the probe string reached the host clipboard"
+    # A write is ALLOWED — refusing it is what broke the fullscreen TUI's select-to-copy — but
+    # never verbatim. The probe carries the sequence that would end bracketed paste and run the
+    # rest as typed input at the user's next paste; only that sequence may go missing.
+    # NOTE: this leaves the probe on the real clipboard.
+    #
+    # Redirected inside the shell, never captured: wl-copy forks a daemon that OWNS the
+    # selection until something replaces it, and that daemon inherits stdout — so a captured
+    # `$(wl-copy …)` blocks for the daemon's lifetime, not the copy's. Cost 30s a run, and only
+    # once writes began succeeding.
+    #
+    # Piped with no --type, which is exactly how the fullscreen TUI copies a selection.
+    allow "clipboard WRITE is allowed (select-to-copy)" \
+        bash -c "printf 'kib-sectest-plain' | timeout 5 wl-copy >/dev/null 2>&1"
+
+    # --type is explicit HERE only because wl-copy infers the flavour from the content, and
+    # content carrying an ESC infers as binary — which the guard refuses outright. Without it
+    # the escape never reaches the sanitiser this check exists to exercise.
+    bash -c "printf 'kib-sectest\033[201~probe' | timeout 5 wl-copy --type text/plain >/dev/null 2>&1"
+    # Compared without printing, so a clipboard that did NOT take the probe never enters a log.
+    if timeout 5 wl-paste 2>/dev/null | grep -qxF 'kib-sectest[201~probe'; then
+        pass "the paste escape was stripped in flight"
     else
-        pass "clipboard was not poisoned"
+        fail "the paste escape was stripped in flight" "the probe did not arrive as clean text"
     fi
+    deny "a non-text flavour is refused (raises a host alert)" \
+        bash -c "printf x | timeout 5 wl-copy --type image/png"
+    allow "regression: clipboard READ still works" timeout 5 wl-paste --list-types
 fi
 
 # ═════════════════════════════════════════════════════════════════
