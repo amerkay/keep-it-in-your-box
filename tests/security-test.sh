@@ -372,6 +372,24 @@ else
     fail "regression: clone a marketplace per-project" \
         "plugins/marketplaces is a symlink into the read-only shared dir — /plugin install will fail"
 fi
+# …and one level deeper, where an install actually lands: a version inside a plugin of a
+# marketplace the shared dir already holds. While cache/<marketplace> was a read-only symlink that
+# rename failed EROFS, so `/plugin install` sat on "Installing…" and stranded its staging clone.
+_mkt=""
+for _m in "$CFG"/plugins/cache/*; do
+    case "${_m##*/}" in temp_git_* | '*') continue ;; esac
+    [ -e "$_m" ] || continue # unmatched glob
+    _mkt="$_m"
+    break
+done
+if [ -n "$_mkt" ]; then
+    allow "regression: /plugin install can write inside a cached marketplace" \
+        mkdir -p "$_mkt/.sectest/1.0.0"
+    rm -rf "$_mkt/.sectest" 2>/dev/null
+else
+    skip "regression: /plugin install can write inside a cached marketplace" "no marketplace cached"
+fi
+unset _mkt _m
 rm -rf "$CFG/skills/.sectest" "$CFG/agents/.sectest.md" 2>/dev/null
 
 # ── Cross-project isolation: the assembled config is THIS project only ──────────
