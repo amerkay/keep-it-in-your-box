@@ -137,37 +137,108 @@ else
         "chmod alone is a no-op on Docker Desktop's fakeowner binds"
 fi
 
-# The mount must remap ownership: on macOS the project arrives over virtiofs as root:root, and
-# without --uid/--gid git reads the whole tree as another user's and refuses it.
-if grep -q -- '--uid' "$KIB_ROOT/guest/entrypoint/entrypoint-fuse.sh" \
-    && grep -q -- '--gid' "$KIB_ROOT/guest/entrypoint/entrypoint-fuse.sh"; then
+# ── The sidecar topology ─────────────────────────────────────────
+# The whole point of serving the view from its own container: the agent's must be capless at
+# CREATION. Each of these was a live property of the in-container-mount window, and losing any
+# one silently hands the agent mount capability back.
+_red="$(sed 's/#.*$//' "$KIB_ROOT/host/redaction.sh")"
+_life="$(sed 's/#.*$//' "$KIB_ROOT/host/lifecycle.sh")"
+
+# lifecycle.sh builds the agent container's whole argv, so none of the four may appear in it at
+# all. (redaction.sh legitimately passes them — to the SIDECAR.)
+_leaked=""
+for _flag in 'cap-add=SYS_ADMIN' 'cap-add=SETPCAP' '/dev/fuse' 'apparmor=unconfined'; do
+    case "$_life" in *"$_flag"*) _leaked="$_leaked $_flag" ;; esac
+done
+# …and the one thing redaction.sh hands the agent is the bind, nothing else. Pinned exactly:
+# an added flag lands on this line.
+# shellcheck disable=SC2016  # matching redaction.sh's source text; the $vars stay literal
+printf '%s\n' "$_red" | grep -q '^ *REDACTION_ARGS=(-v "\$FUSE_ROOT/mnt:\$PWD:rslave")$' \
+    || _leaked="$_leaked REDACTION_ARGS"
+if [ -z "$_leaked" ]; then
+    pass "the agent's container is capless at creation (no SYS_ADMIN/SETPCAP//dev/fuse/apparmor)"
+else
+    fail "the agent's container regained:$_leaked" \
+        "the sidecar holds the mount; nothing the agent runs may be able to mount"
+fi
+
+# `setpriv` was how the in-container mount clawed the caps back off each session. Its return
+# means the container is being created with caps to drop again.
+if printf '%s\n' "$_life" | grep -q 'setpriv'; then
+    fail "host/lifecycle.sh runs setpriv on the session exec again" \
+        "capless-at-runtime is the shape the sidecar exists to replace"
+else
+    pass "sessions need no runtime cap drop (nothing was granted to drop)"
+fi
+
+# Ordering, not presence: killing the server first leaves a mounted-but-ENOTCONN path that the
+# next launch's rm -rf would delete THROUGH — the real project. Confirmed live on Docker Desktop
+# that the mount outlives the container, so this is not theoretical.
+_td="$(printf '%s\n' "$_red" | awk '/^teardown_redaction\(\)/,/^}/')"
+if printf '%s\n' "$_td" | grep -q '_unmount_view' \
+    && [ "$(printf '%s\n' "$_td" | grep -n '_unmount_view' | head -1 | cut -d: -f1)" \
+        -lt "$(printf '%s\n' "$_td" | grep -n 'docker rm' | head -1 | cut -d: -f1)" ]; then
+    pass "teardown unmounts the view BEFORE removing the sidecar"
+else
+    fail "teardown_redaction removes the sidecar before unmounting its view" \
+        "a stale ENOTCONN mount is orphaned every exit, and rm -rf then hits the real project"
+fi
+
+# …and it must WARN, not die: teardown_redaction runs from the EXIT trap ahead of
+# merge_out_session, so aborting there loses the session's .claude.json/history fold-back and
+# overwrites its exit code. The refusal to delete a live view moves to the next launch instead.
+if printf '%s\n' "$_td" | grep -q '_stale_mount_report warn' \
+    && ! printf '%s\n' "$_td" | grep -q '_stale_mount_report die'; then
+    pass "a view that will not unmount warns at teardown (the exit path still merges out)"
+else
+    fail "teardown_redaction dies on a view it could not unmount" \
+        "it runs before merge_out_session, so the session's config changes are lost"
+fi
+
+# The sidecar's own /etc/passwd is synthesised, never the host's. fusermount3 aborts if it
+# cannot resolve its uid, and binding the host's file works on Linux but CANNOT on macOS, where
+# Open Directory keeps real users out of it.
+# shellcheck disable=SC2016  # matching redaction.sh's source text: $PASSWD_STATE stays literal
+if printf '%s\n' "$_red" | grep -q -- '-v "\$PASSWD_STATE:/etc/passwd:ro"' \
+    && ! printf '%s\n' "$_red" | grep -q -- '-v /etc/passwd'; then
+    pass "the sidecar gets a synthesised /etc/passwd, not the host's"
+else
+    fail "the sidecar binds the host's /etc/passwd" \
+        "fusermount3 cannot resolve uid 501 from it on macOS — and it leaks the user table"
+fi
+unset _red _life _agent_args _leaked _flag _td
+
+# The mount must remap ownership: on macOS the project reaches the sidecar over virtiofs as
+# root:root, and without --uid/--gid git reads the whole tree as another user's and refuses it.
+if grep -q -- '--uid' "$KIB_ROOT/host/redaction.sh" \
+    && grep -q -- '--gid' "$KIB_ROOT/host/redaction.sh"; then
     pass "the FUSE view remaps ownership to the agent (git 'dubious ownership')"
 else
-    fail "entrypoint-fuse.sh lost its --uid/--gid remap" \
+    fail "the sidecar lost its --uid/--gid remap" \
         "virtiofs reports root:root; git then refuses the whole tree"
 fi
 
-# The server runs as root, so the backing syscalls bypass DAC: without default_permissions
-# NOTHING inside the project is permission-checked and a `chmod 000` file reads and writes fine.
+# The server's syscalls run as ITS uid, not the caller's. Without default_permissions nothing in
+# the project is permission-checked and a `chmod 000` file reads and writes fine.
 if grep -q 'default_permissions=True' "$KIB_ROOT/kib/guest/fuse.py"; then
     pass "the FUSE mount asks the kernel to enforce owner/mode (default_permissions)"
 else
     fail "kib/guest/fuse.py no longer mounts with default_permissions=True" \
-        "a root-served passthrough enforces no POSIX permission at all without it"
+        "a passthrough enforces no POSIX permission at all without it"
 fi
 
-# Root creates root-owned inodes, and those land on the HOST. Every path that makes a new inode
-# has to hand it to the caller.
+# Inodes the server creates land on the HOST. Every path that makes one has to hand it to the
+# caller, or a project file ends up owned by whoever the server happens to run as.
 _unadopted=""
 for _op in create mkdir symlink; do
     awk -v op="$_op" '$0 ~ "^    def " op "\\(" {f=1} f && /_adopt\(/ {ok=1} f && /^$/ {f=0}
         END {exit ok?0:1}' "$KIB_ROOT/kib/guest/fuse.py" || _unadopted="$_unadopted $_op"
 done
 if [ -z "$_unadopted" ]; then
-    pass "every inode the root server creates is chown'd to the caller"
+    pass "every inode the server creates is chown'd to the caller"
 else
     fail "kib/guest/fuse.py:$_unadopted no longer adopts the inode it creates" \
-        "the file lands on the host owned by root"
+        "the file lands on the host owned by the server's uid"
 fi
 
 # The pre-commit hook kib used to install into every project is gone, and the marker it left
@@ -306,17 +377,20 @@ else
         "on macOS /Users is not in the image, so the container exits during startup"
 fi
 
-# …and the `.claude` alias one level down must target $USER_HOME, not $HOST_HOME. The block
-# above always makes $HOST_HOME a symlink to $USER_HOME, so a link aimed at $HOST_HOME/.claude
-# only ever fired when $HOST_HOME happened to be a real directory — which, with no $PWD bind,
-# it never is. Aimed there it was dead code, and a host-installed plugin's absolute installPath
-# dangled: enabledPlugins true, nothing in /mcp, no error anywhere.
+# …and the `.claude` alias one level down must cover BOTH $USER_HOME and $HOST_HOME, because
+# which one Claude resolves depends on the block above. The sidecar's $PWD bind makes $HOST_HOME
+# a REAL directory for a project under $HOME, so that block is skipped and $USER_HOME/.claude is
+# invisible; a project outside $HOME gets the symlink and needs the $USER_HOME spelling instead.
+# Pinning one spelling is how a host-installed plugin's absolute installPath dangled:
+# enabledPlugins true, nothing in /mcp, no error anywhere.
 # shellcheck disable=SC2016  # literal grep pattern: it must match the source text verbatim
-if grep -q 'ln -s "\$CLAUDE_SESSION_DIR" "\$USER_HOME/\.claude"' \
-    "$KIB_ROOT/guest/entrypoint/docker-entrypoint.sh"; then
-    pass "the .claude alias targets \$USER_HOME (reachable), not \$HOST_HOME (a symlink to it)"
+if grep -q 'for _h in "\$USER_HOME" "\${HOST_HOME:-}"' \
+    "$KIB_ROOT/guest/entrypoint/docker-entrypoint.sh" \
+    && grep -q 'ln -s "\$CLAUDE_SESSION_DIR" "\$_h/\.claude"' \
+        "$KIB_ROOT/guest/entrypoint/docker-entrypoint.sh"; then
+    pass "the .claude alias is placed at both \$USER_HOME and \$HOST_HOME"
 else
-    fail "the entrypoint's .claude alias is not aimed at \$USER_HOME" \
+    fail "the entrypoint's .claude alias covers only one of \$USER_HOME / \$HOST_HOME" \
         "host-installed plugins dangle and their MCP servers silently never start"
 fi
 

@@ -338,11 +338,11 @@ def test_dedupe_survives_claudes_own_json_style(
     assert canonical.read_text() == js_style + "\n", "canonical was appended to, or rewritten"
 
 
-# The host key's SHAPE is not fixed: a Mac keys it under /Users/<name>, Linux under
-# /home/<name>, and the box key is /home/hostuser either way — except where kib_box_pwd hands
-# back the host path unchanged (a project outside $HOME, or a host user already called
-# `hostuser`). Those identity rows are the ones worth pinning: `box == path` must round-trip
-# byte-for-byte rather than re-keying a line onto itself and re-appending it every launch.
+# kib no longer passes a differing box key — the sidecar binds the project at its host path, so
+# `box == path` is the shipping case and the identity rows below are the ones that matter: a
+# key must round-trip byte-for-byte rather than be re-keyed onto itself and re-appended every
+# launch. The translating rows stay because the API still takes both, and because a session dir
+# written during the in-container-mount window is still folded back through them.
 @pytest.mark.parametrize(
     ("host", "box"),
     [

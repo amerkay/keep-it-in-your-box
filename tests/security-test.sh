@@ -79,8 +79,24 @@ fixture() { # fixture <name> [git-init-args…] — echoes its path, creating it
     local name="$1"
     shift
     local path="$ARTIFACTS/$name"
-    # shellcheck disable=SC1007  # GIT_TEMPLATE_DIR= is a deliberate empty per-command env
-    [ -e "$path" ] || GIT_TEMPLATE_DIR= git init -q "$@" "$path" 2>/dev/null
+    # Ask git, not the filesystem. `[ -e "$path" ]` reused a HOLLOW directory as if it were a
+    # repo: the guard refuses to unlink a .git/config, so a `rm -rf` of the fixture dir from
+    # inside the box leaves the directories behind without their .git — and every check needing
+    # that fixture then skipped itself, reporting coverage the suite was not providing.
+    #
+    # The git dir must be INSIDE $path. A bare `rev-parse --git-dir` walks UP, so an empty
+    # fixture dir answers with THIS repo's .git and reads as perfectly healthy — which is the
+    # same false pass one level along. ($ARTIFACTS/wt is not built here; it needs
+    # --separate-git-dir, whose git dir is deliberately elsewhere.)
+    local gd
+    gd="$(git -C "$path" rev-parse --absolute-git-dir 2>/dev/null || true)"
+    case "$gd" in
+        "$path" | "$path"/*) ;;
+        *)
+            # shellcheck disable=SC1007  # GIT_TEMPLATE_DIR= is a deliberate empty per-command env
+            GIT_TEMPLATE_DIR= git init -q "$@" "$path" 2>/dev/null
+            ;;
+    esac
     printf '%s' "$path"
 }
 
@@ -88,7 +104,11 @@ fixture() { # fixture <name> [git-init-args…] — echoes its path, creating it
 section "Container boundary — escape classes (info-tier controls)"
 
 is "all capabilities dropped (CapEff)" "0000000000000000" "$(awk '/^CapEff:/{print $2}' /proc/self/status)"
-is "CAP_SYS_ADMIN not in the bounding set" "0" "$((0x$(awk '/^CapBnd:/{print $2}' /proc/self/status) & 0x200000 ? 1 : 0))"
+# Capless at CREATION, not merely at runtime: nothing in this container ever drops SYS_ADMIN,
+# because `docker run` never granted it. That makes the bounding set a kernel-level statement
+# about the container rather than a claim about what some shell remembered to do.
+is "CAP_SYS_ADMIN was never granted (bounding set)" "0" "$((0x$(awk '/^CapBnd:/{print $2}' /proc/self/status) & 0x200000 ? 1 : 0))"
+is "CAP_SETPCAP was never granted either" "0" "$((0x$(awk '/^CapBnd:/{print $2}' /proc/self/status) & 0x100 ? 1 : 0))"
 is "no-new-privileges set" "1" "$(awk '/^NoNewPrivs:/{print $2}' /proc/self/status)"
 is "seccomp in filter mode" "2" "$(awk '/^Seccomp:/{print $2}' /proc/self/status)"
 _lsm_label="$(tr -d '\0' </proc/self/attr/current 2>/dev/null)"
@@ -98,9 +118,12 @@ if [ -z "$_lsm_label" ]; then
     # the caps, seccomp and no-new-privs assertions above carry the same weight and still run.
     skip "AppArmor label" "no AppArmor in this kernel (LinuxKit / Docker Desktop)"
 else
-    # Confinement is dropped so the in-container FUSE mount is permitted; SYS_ADMIN is dropped
-    # from the bounding set instead (asserted just above, and again below).
-    is "AppArmor unconfined (the in-container FUSE mount needs it)" "unconfined" "$_lsm_label"
+    # docker-default, NOT unconfined. Its `deny mount,` is incompatible with mounting inside
+    # this container — which is exactly why the FUSE server lives in the sidecar instead.
+    case "$_lsm_label" in
+        docker-*) pass "AppArmor confined by docker-default ($_lsm_label)" ;;
+        *) fail "AppArmor label is '$_lsm_label', not a docker-* profile" ;;
+    esac
 fi
 unset _lsm_label
 is "/proc/sys mounted read-only" "ro" "$(awk '$5=="/proc/sys"{split($6,o,",");print o[1]}' /proc/self/mountinfo | head -1)"
@@ -120,30 +143,33 @@ is "mount(2) refused" "Operation not permitted" "$(syscall_errno mount)"
 is "unshare(2) refused" "Operation not permitted" "$(syscall_errno unshare)"
 
 # ═════════════════════════════════════════════════════════════════
-section "In-container FUSE redaction"
+section "FUSE redaction (served by the sidecar, propagated in)"
 
-# The redacted view is served in-container and mounted over the project path itself. readlink
-# -f: the entrypoint's HOST_HOME symlink means the mount is recorded under the resolved path.
+# The view is mounted in the SIDECAR's container and reaches this one by mount propagation.
+# readlink -f is kept because the mount is recorded under the resolved path either way.
 fuse_at_pwd() {
     local p
     p="$(readlink -f "$PWD")"
     awk -v p="$p" '$2==p && $3 ~ /^fuse/ {print "fuse"; exit}' /proc/self/mounts
 }
 is "redaction is a FUSE mount at the project root" "fuse" "$(fuse_at_pwd)"
-# The real project is exposed to root at /kib/real under a 700 parent; the capless agent
-# must not be able to reach it — every access has to go through the redacting view.
-deny "agent cannot reach the real project at /kib/real" ls /kib/real
-deny "agent cannot traverse the /kib parent" ls /kib
-# The headline property: SYS_ADMIN existed only to mount, and setpriv dropped it from the
-# bounding set before the agent ran.
-is "CAP_SYS_ADMIN dropped from the bounding set (setpriv)" "0" \
-    "$((0x$(awk '/^CapBnd:/{print $2}' /proc/self/status) & 0x200000 ? 1 : 0))"
-is "CAP_SETPCAP dropped from the bounding set too" "0" \
-    "$((0x$(awk '/^CapBnd:/{print $2}' /proc/self/status) & 0x100 ? 1 : 0))"
 
-# The server is root, so every backing syscall bypasses DAC. default_permissions is the only
-# thing making the kernel re-check owner and mode against the CALLER — without it nothing
-# inside the project is permission-checked at all.
+# There is no second, unredacted path to the project here. The sidecar topology means the real
+# tree is only ever mounted in the OTHER container, so nothing to fence off and nothing to
+# traverse into — /kib should not exist at all.
+is "no unredacted copy of the project in this container" "absent" \
+    "$([ -e /kib ] && echo present || echo absent)"
+
+# …and no FUSE server beside the agent to pivot into. Asserted STRUCTURALLY, on the device: a
+# FUSE server cannot run without /dev/fuse, so its absence proves the property outright. A
+# `pgrep -f kib.guest.fuse` cannot — it matches the command line of any process that merely
+# mentions the string, this suite's own shell included, and reads as a leak that is not there.
+is "no /dev/fuse, so no FUSE server can run in this container" "absent" \
+    "$([ -e /dev/fuse ] && echo present || echo absent)"
+
+# The server's syscalls run as ITS uid, not the caller's. default_permissions is what makes the
+# kernel re-check owner and mode against the CALLER — without it nothing inside the project is
+# permission-checked at all.
 is "the view is mounted default_permissions (POSIX perms are enforced)" "yes" \
     "$(awk -v p="$(readlink -f "$PWD")" '$2==p && $4 ~ /(^|,)default_permissions(,|$)/ {
         print "yes"; exit }' /proc/self/mounts)"
@@ -224,6 +250,45 @@ if [ ! -e "$ARTIFACTS/wt" ]; then
 fi
 deny "H2  gitfile redirect → separate gitdir" git -C "$ARTIFACTS/wt" config core.fsmonitor /tmp/fsm.sh
 resolves_to_nothing "H2  redirected fsmonitor resolves to nothing" "$ARTIFACTS/wt" core.fsmonitor
+
+# A submodule's real config lives at .git/modules/<name>/config and its worktree carries only a
+# gitfile. This is the coverage a `.git/hooks:ro` bind never had — it can only mask paths that
+# exist at launch, and these three (submodule, nested repo, repo created mid-session) do not.
+# The whole suite runs against repos this script git-inits, so "created mid-session" is implicit
+# in every case above; these two add the shapes.
+# H3 — a submodule. Its worktree carries only a gitfile; the real config lives at
+# .git/modules/<name>/config. Built with --separate-git-dir, NOT `git submodule add`, because
+# that CANNOT run in the box: it clones, a clone creates .git/hooks/ from the template, and the
+# guard refuses that write. (Same for a plain `git clone` — worth knowing, and working as
+# designed: creating a hooks dir is creating something the host would execute.) The layout
+# --separate-git-dir produces is the one a real submodule has, which is what the guard sees.
+SUBHOST="$(fixture subhost)"
+if [ ! -e "$SUBHOST/lib/.git" ]; then
+    mkdir -p "$SUBHOST/.git/modules" 2>/dev/null
+    # shellcheck disable=SC1007  # deliberate empty per-command env
+    GIT_TEMPLATE_DIR= git init -q --separate-git-dir="$SUBHOST/.git/modules/lib" \
+        "$SUBHOST/lib" 2>/dev/null
+fi
+if [ -e "$SUBHOST/lib/.git" ]; then
+    deny "H3  submodule config (real file under .git/modules)" \
+        git -C "$SUBHOST/lib" config core.hooksPath /tmp/evilhooks
+    deny "H3b hooks inside the submodule's gitdir" \
+        bash -c "mkdir -p '$SUBHOST/.git/modules/lib/hooks'; echo x > '$SUBHOST/.git/modules/lib/hooks/pre-commit'"
+    resolves_to_nothing "H3  submodule hooksPath resolves to nothing" "$SUBHOST/lib" core.hooksPath
+    # Proves the three denials above are the GUARD refusing, not git rejecting a broken fixture
+    # — which is exactly how this section passed while testing nothing.
+    allow "regression: a benign key in the submodule's config" \
+        git -C "$SUBHOST/lib" config user.name 'Test User'
+else
+    skip "H3  submodule config" "could not build the submodule fixture"
+fi
+
+# A nested repo: an ordinary .git directory that is not the project root's, and that the launch
+# never saw. Same guard, no bind could have covered it.
+NESTED="$(fixture outer/inner)"
+deny "H4  nested repo config" git -C "$NESTED" config core.pager /tmp/x.sh
+deny "H4b hooks in the nested repo" bash -c "echo x > '$NESTED/.git/hooks/pre-commit'"
+resolves_to_nothing "H4  nested repo pager resolves to nothing" "$NESTED" core.pager
 
 # Regression half — the guard must not break ordinary git.
 allow "regression: benign git config write" git -C "$REPO" config user.name 'Test User'

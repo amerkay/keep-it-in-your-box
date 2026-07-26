@@ -117,48 +117,95 @@ else
 fi
 
 # ── Host key vs box key ──────────────────────────────────────────
-# Claude keys projects/, .claude.json and ↑ history by its RESOLVED cwd. There is no $PWD bind
-# and $HOST_HOME is a symlink to the container home, so a project under $HOME resolves to
-# $CONTAINER_HOME/<rel> in the box. kib_box_pwd is what keeps canonical host-keyed and the
-# session box-keyed; getting it wrong splits a project's history in two.
+# Claude keys projects/, .claude.json and ↑ history by its RESOLVED cwd. The sidecar binds the
+# redacted view at the project's HOST path, so the container's $HOME-shaped parent is a real
+# directory, $HOST_HOME is never symlinked to the container home, and the box key equals the
+# host key. config_scope is therefore called with no `box` argument at all — assert that,
+# because passing a differing one would split a project's history in two.
+# `cli.dispatch` checks arity EXACTLY, so a call one argument short aborts the whole verb and
+# the launch falls back to an empty config — losing this project's MCP servers, approved tools
+# and ↑ history for the session, with only a warning. That shipped: dropping the now-redundant
+# box key looked safe because the Python parameter defaults, but the dispatcher never gets there.
+# Every _scope call is checked against the table rather than eyeballed.
+arity_bad="$(
+    python3 - "$KIB_ROOT" <<'PY'
+import pathlib, re, sys
+root = pathlib.Path(sys.argv[1])
+table = dict(
+    (m[1], int(m[2]))
+    for m in re.finditer(r'"([a-z-]+)": \([a-z_]+, (\d+)\)',
+                         (root / "kib/host/config_scope.py").read_text())
+)
+# Join backslash continuations so a wrapped call counts as one.
+src = (root / "host/config.sh").read_text().replace("\\\n", " ")
+for line in src.splitlines():
+    m = re.search(r'\b_scope\s+([a-z-]+)((?:\s+"[^"]*")+)', line)
+    if not m:
+        continue
+    verb, want = m[1], table.get(m[1])
+    got = len(re.findall(r'"[^"]*"', m[2]))
+    if want is None:
+        print(f"{verb}: not in the dispatch table")
+    elif got != want:
+        print(f"{verb}: passes {got} argument(s), the table wants {want}")
+PY
+)" || arity_bad="the arity scan itself failed"
+if [ -n "$arity_bad" ]; then
+    fail "a host/config.sh _scope call does not match config_scope's dispatch table" \
+        "$(printf '%s' "$arity_bad" | head -4)"
+else
+    pass "every _scope call passes the argument count cli.dispatch demands"
+fi
+
+# …and the key it passes is the host path on both sides: the sidecar binds the project there,
+# so canonical and the session agree and no translation is left to drift.
+if grep -qE '_scope (scope-in-json|seed-history|merge-out-json|merge-history).*BOX_PWD' \
+    "$KIB_ROOT/host/config.sh"; then
+    fail "config.sh still passes a separate box key to config_scope" \
+        "the sidecar binds the project at its host path; the two keys are one"
+else
+    pass "canonical and the session share one project key (no box-key translation)"
+fi
+
+# The translation survives for ONE job: finding transcripts the in-container-mount window left
+# under the container-home key, so start_container can fold them back in.
 #
 # Each case sources config.sh in its OWN subshell and only the RESULT crosses back, so `is`
 # runs in the suite's shell — inside a subshell its counter bump is discarded and a regression
 # prints ✘ while the run still exits 0.
-_box_pwd_for() { # $1 = the host's $HOME, $2 = the host's $PWD → the box's resolved path
+_legacy_pwd_for() { # $1 = the host's $HOME, $2 = the host's $PWD → the legacy box path
     (
         HOME="$1"
         PWD="$2"
         # shellcheck source=SCRIPTDIR/../../host/config.sh
         . "$KIB_ROOT/host/config.sh"
-        kib_box_pwd
+        kib_legacy_box_pwd
     )
 }
 
 # The same five properties, whatever shape the host's $HOME has: macOS /Users/<name>, Linux
-# /home/<name>. The box key is /home/hostuser either way, and this translation runs on BOTH
-# platforms, so both shapes are asserted rather than only the one this suite runs on.
+# /home/<name>. The legacy key is /home/hostuser either way, and an upgrader may be on either,
+# so both shapes are asserted rather than only the one this suite runs on.
 for _h in /Users/veronica /home/kay; do
     is "a project under \$HOME ($_h) remaps to the container home" \
-        "/home/hostuser/proj" "$(_box_pwd_for "$_h" "$_h/proj")"
+        "/home/hostuser/proj" "$(_legacy_pwd_for "$_h" "$_h/proj")"
     is "the path below \$HOME ($_h) survives the remap intact" \
-        "/home/hostuser/code/nested/proj" "$(_box_pwd_for "$_h" "$_h/code/nested/proj")"
+        "/home/hostuser/code/nested/proj" "$(_legacy_pwd_for "$_h" "$_h/code/nested/proj")"
     is "\$HOME itself ($_h) maps to the container home" \
-        "/home/hostuser" "$(_box_pwd_for "$_h" "$_h")"
-    # Outside $HOME the entrypoint mkdirs the real path, so it resolves to itself — remapping
-    # there would invent a directory that does not exist in the box.
+        "/home/hostuser" "$(_legacy_pwd_for "$_h" "$_h")"
+    # Outside $HOME the entrypoint mkdir'd the real path, so it resolved to itself even then.
     is "a project outside \$HOME ($_h) is left alone" \
-        "/opt/work/proj" "$(_box_pwd_for "$_h" /opt/work/proj)"
+        "/opt/work/proj" "$(_legacy_pwd_for "$_h" /opt/work/proj)"
     # The near-miss: a sibling whose name merely starts with $HOME must not be rewritten.
     is "a \$HOME ($_h) prefix that is not a path boundary is not remapped" \
-        "$_h-backup/proj" "$(_box_pwd_for "$_h" "$_h-backup/proj")"
+        "$_h-backup/proj" "$(_legacy_pwd_for "$_h" "$_h-backup/proj")"
 done
 unset _h
 
 # The container's user is the constant `hostuser` whatever the host user is called, so a Linux
 # host whose home already IS /home/hostuser must remap to itself — not double the prefix.
 is "a host \$HOME that already is the container home maps to itself" \
-    "/home/hostuser/proj" "$(_box_pwd_for /home/hostuser /home/hostuser/proj)"
+    "/home/hostuser/proj" "$(_legacy_pwd_for /home/hostuser /home/hostuser/proj)"
 
 # $SESSION_BASE outlives the container, so a transcripts link keyed by a name kib no longer uses
 # is never reaped — renaming it $SLUG → $BOX_SLUG stranded the old one, and a stray dir in
@@ -198,34 +245,41 @@ fi
 rm -rf "$tl_tmp"
 unset tl_tmp
 
-# On the first launch after the link moved from $SLUG to $BOX_SLUG, a REAL directory sits at the
-# box slug: Claude keys by its resolved cwd, so it had been writing its transcripts
-# there all along while the link pointed at $SLUG. bind_via_link `rm -rf`s a non-symlink, so
-# relinking without migrating first destroys every prior in-box session — silently, and they were
-# never in canonical to begin with. Fold them out, and NEVER relink if the fold did not complete.
+# A REAL directory in $SESSION_BASE/projects/ is a previous in-box session's transcripts, which
+# nothing ever tied to canonical. bind_via_link `rm -rf`s a non-symlink, so relinking without
+# folding first destroys every prior in-box session — silently. Two slugs can hold one: $SLUG
+# (the sidecar's key, and the pre-sidecar link name) and the container-home key the
+# in-container-mount window used. Both must be folded, and the relink must NOT proceed if the
+# fold of the CURRENT slug failed.
+#
+# Extracted from lifecycle.sh rather than retyped: an inline copy drifts, and the whole point of
+# the block is that it matches what start_container runs.
 tm_tmp="$(mktemp -d)"
-mkdir -p "$tm_tmp/session/projects/-box-slug" "$tm_tmp/canonical/projects/-host-slug"
-printf 'old\n' >"$tm_tmp/session/projects/-box-slug/a.jsonl"
-printf 'hidden\n' >"$tm_tmp/session/projects/-box-slug/.b.jsonl"
+mkdir -p "$tm_tmp/session/projects/-host-slug" "$tm_tmp/session/projects/-box-slug" \
+    "$tm_tmp/canonical/projects/-host-slug"
+printf 'old\n' >"$tm_tmp/session/projects/-host-slug/a.jsonl"
+printf 'hidden\n' >"$tm_tmp/session/projects/-host-slug/.b.jsonl"
+printf 'legacy\n' >"$tm_tmp/session/projects/-box-slug/c.jsonl"
+awk '/^    _bt_ok=1$/{f=1} f{print} /^    done$/{if(f) exit}' \
+    "$KIB_ROOT/host/lifecycle.sh" >"$tm_tmp/block.sh"
 (
-    EPHEMERAL=0 CLAUDE_HOME="$tm_tmp/canonical" SLUG=-host-slug
-    _bt="$tm_tmp/session/projects/-box-slug" _bt_ok=1
-    if [ -d "$_bt" ] && [ ! -L "$_bt" ]; then
-        _bt_ok=0
-        if [ "$EPHEMERAL" != 1 ] && mkdir -p "$CLAUDE_HOME/projects/$SLUG" 2>/dev/null; then
-            for _f in "$_bt"/* "$_bt"/.[!.]*; do
-                [ -e "$_f" ] || continue
-                mv -n "$_f" "$CLAUDE_HOME/projects/$SLUG/" 2>/dev/null || true
-            done
-            rmdir "$_bt" 2>/dev/null && _bt_ok=1
-        fi
-    fi
-    printf '%s' "$_bt_ok"
+    # shellcheck disable=SC2034  # consumed by the extracted block
+    EPHEMERAL=0 CLAUDE_HOME="$tm_tmp/canonical" SLUG=-host-slug LEGACY_BOX_SLUG=-box-slug
+    SESSION_BASE="$tm_tmp/session"
+    # Both codes: the host's shellcheck and the image's report an indirect call differently.
+    # shellcheck disable=SC2317,SC2329  # called by the sourced block
+    warn() { :; } # the block warns on a failed fold; the assertions below are the signal
+    # shellcheck source=/dev/null
+    . "$tm_tmp/block.sh"
+    printf '%s' "${_bt_ok:-unset}" # the sourced block sets it; :- keeps shellcheck honest
 ) >"$tm_tmp/ok"
-is "a pre-existing in-box transcripts dir is folded into canonical, not deleted" ".b.jsonl a.jsonl" \
+is "both in-box transcripts dirs are folded into canonical, not deleted" ".b.jsonl a.jsonl c.jsonl" \
     "$(find "$tm_tmp/canonical/projects/-host-slug" -mindepth 1 -exec basename {} \; \
         | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
 is "the fold reports success, so the relink may proceed" "1" "$(cat "$tm_tmp/ok")"
+is "nothing is left behind in the session dir" "" \
+    "$(find "$tm_tmp/session/projects" -mindepth 1 -exec basename {} \; | LC_ALL=C sort | tr '\n' ' ' \
+        | sed 's/ $//')"
 rm -rf "$tm_tmp"
 unset tm_tmp
 

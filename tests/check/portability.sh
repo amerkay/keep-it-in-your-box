@@ -74,13 +74,29 @@ done
 # host path means a second, un-shimmed code path has appeared. Exempt: portable.sh itself,
 # sleep-guard.sh's documented fallback probe (it must never hard-fail at startup), and this
 # suite, whose own grep pattern would otherwise match itself.
-stray_os="$(grep -ln 'uname -s\|Darwin)' "${HOST_BASH[@]}" 2>/dev/null \
+stray_os="$(grep -ln 'uname -s\|Darwin)\|KIB_OS[^_]*=[[:space:]]*"\{0,1\}darwin' "${HOST_BASH[@]}" \
+    2>/dev/null \
     | grep -vE '^(host/portable\.sh|host/sleep-guard\.sh|tests/check/.*\.sh)$' || true)"
 if [ -n "$stray_os" ]; then
     fail "OS branching outside host/portable.sh" "$(printf '%s' "$stray_os" | tr '\n' ' ')"
 else
     pass "all OS branching stays in host/portable.sh (sleep-guard's fallback probe excepted)"
 fi
+
+# The FUSE sidecar is the one topology on both platforms, and exactly these five functions are
+# what differ. Each must exist and be defined HERE, so a platform fix cannot quietly grow a
+# sixth branch somewhere else. (docs/design-notes/macos.md)
+missing=""
+for fn in fuse_root_path fuse_root_create fuse_root_destroy fuse_mounted unmount_fuse; do
+    grep -q "^$fn() {" host/portable.sh || missing="$missing $fn"
+done
+if [ -n "$missing" ]; then
+    fail "host/portable.sh is missing a FUSE platform shim:$missing" \
+        "the sidecar's only OS-sensitive parts live here — a caller must never branch itself"
+else
+    pass "the five FUSE platform shims are all defined in host/portable.sh"
+fi
+unset missing fn
 
 # A bind whose destination sits inside another bind aborts the whole `docker run` on Docker
 # Desktop (runc resolves the mountpoint through the parent and finds it outside the rootfs).
