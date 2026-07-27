@@ -11,7 +11,7 @@
 # Reads:  KIB_ROOT IMAGE_NAME UNLOCK_SHARED and the globals host/config.sh sets
 # Writes: PROJ_HASH CNAME FUSE_CNAME FUSE_ROOT WL_CNAME WL_ROOT PATTERNS_STATE PASSWD_STATE
 #         GROUP_STATE CLIP_STATE
-#         CRED_WITNESS LOCK_WITNESS SESSION_CDIR SHARED_CDIR SHARED_ASSET_CDIR
+#         CRED_WITNESS LOCK_WITNESS ASSET_WATCH_PID SESSION_CDIR SHARED_CDIR SHARED_ASSET_CDIR
 #         LOCK_WITNESS_CPATH TRANSCRIPTS_CPATH BROKER_CNAME BROKER_NET BROKER_DIR BROKER_OUT
 #         BROKER_HASH BROKER_ENABLED REDACTION_ARGS ARGS
 #         SLEEP_GUARD_PID SESSION_TAG EPH_ROOT
@@ -59,6 +59,8 @@ kib_identity() {
     # running container's mounts by `running_unlocked`. A witness that always exists when
     # locked, unlike any individual shared asset — a fresh user may have no plugins at all.
     LOCK_WITNESS="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.lockwitness"
+    # host/shared-watch.sh: one alert on the first write to the writable prompt-asset trees.
+    ASSET_WATCH_PID="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.assetwatch.pid"
 
     # Always defined so teardown/attach can reference them unconditionally. The network name
     # maps the ephemeral suffix's dots to dashes to stay inside docker's charset.
@@ -125,6 +127,18 @@ bind_via_link() { # <host src> <flat container dest> <link path in the parent's 
     ARGS+=(-v "$src:$dest$opts")
 }
 
+# One shared asset dir into the box, or a stale link dropped. `if`, not `[ … ] && ARGS+=`: a
+# false test on a caller's final iteration would make its whole loop exit 1, which under
+# `set -e` kills kib before the container starts.
+_bind_shared_asset() { # <asset name> <mount opts>
+    if [ -e "$CLAUDE_HOME/$1" ]; then
+        bind_via_link "$CLAUDE_HOME/$1" "$SHARED_ASSET_CDIR/$1" "$SHARED_BASE/$1" "$2"
+    elif [ -L "$SHARED_BASE/$1" ]; then
+        # Gone from canonical since the last launch — drop our link rather than dangle.
+        rm -f "$SHARED_BASE/$1" 2>/dev/null || true
+    fi
+}
+
 # `docker run -d` returns as soon as PID 1 exists, but the entrypoint still has real work to
 # do as root — useradd, the shared-asset symlink farm, chown of the session dir — before it
 # execs `gosu … sleep infinity`. An immediate `docker exec` would land mid-setup: no home dir
@@ -183,6 +197,7 @@ teardown_container() {
     # Each no-ops on the platform that does not use it.
     stop_wayland_guard
     stop_clipboard_bridge
+    stop_asset_watch
 
     # After the main container is stopped, so its network has no endpoint and `network rm`
     # succeeds. (The resolv.conf watcher needs nothing: it died with the container.)
@@ -352,23 +367,25 @@ start_container() {
     # before they re-enter canonical. Binding canonical rw here — as this once did — let a
     # sandboxed session write the settings.json a HOST `claude` loads.
 
-    # These auto-load in EVERY project's next session and the host claude, so a write from one
-    # sandboxed repo is a cross-project pivot (audit H6) — READ-ONLY by default. Nothing is
-    # lost: the entrypoint farms a per-project dir, so in-session installs still work, they
-    # just land per-project. --unlock-shared makes them writable into canonical ~/.claude.
-    local _ro=":ro"
+    # Two tiers, one table — host/config.sh has the why. LOCKED (plugins, hooks) carry a command
+    # the host executes, so a write is host RCE: :ro unless --unlock-shared, with the entrypoint
+    # farming them per project so in-session installs still work. OPEN (skills, agents, commands)
+    # are prompt text and mount WRITABLE, so a skill authored in a box is shared like one authored
+    # on the host — unless validate_shared_assets found a tree configuring a command to AUTO-run
+    # (never merely an executable file: that rule was tried and thrown away).
+    local _entry _ro=":ro"
     [ "$UNLOCK_SHARED" = 1 ] && _ro=""
-    local _entry
-    # `if`, not `[ … ] && ARGS+=`: a false test on the final iteration would make the whole
-    # loop exit 1, which under `set -e` kills kib before the container starts.
-    for _entry in plugins skills agents commands hooks; do
-        if [ -e "$CLAUDE_HOME/$_entry" ]; then
-            bind_via_link "$CLAUDE_HOME/$_entry" "$SHARED_ASSET_CDIR/$_entry" \
-                "$SHARED_BASE/$_entry" "$_ro"
-        elif [ -L "$SHARED_BASE/$_entry" ]; then
-            # Gone from canonical since the last launch — drop our link rather than dangle.
-            rm -f "$SHARED_BASE/$_entry" 2>/dev/null || true
-        fi
+    for _entry in ${KIB_ASSETS_LOCKED:-}; do
+        _bind_shared_asset "$_entry" "$_ro"
+    done
+    for _entry in ${KIB_ASSETS_OPEN:-}; do
+        # Always present, so the entrypoint has something to symlink: with no dir there is
+        # nowhere in the box for `/agents` or skill authoring to land.
+        mkdir -p "$CLAUDE_HOME/$_entry" 2>/dev/null || true
+        case " ${KIB_ASSETS_DEMOTED:-} " in
+            *" $_entry "*) _bind_shared_asset "$_entry" ":ro" ;;
+            *) _bind_shared_asset "$_entry" "" ;;
+        esac
     done
 
     # Lock witness: a read-only bind that exists ONLY when locked, so running_unlocked can
@@ -394,7 +411,26 @@ start_container() {
     # replace the default bridge; connecting keeps both + enables embedded DNS for the
     # broker alias). host-gateway + default-bridge/LAN reachability are preserved.
     connect_broker_network
+
+    start_asset_watch
 }
+
+# The writable prompt-asset trees reach every other project, so the first write earns one
+# desktop alert. Create path only: one watcher per container, not per terminal.
+start_asset_watch() {
+    # An alert is a nicety: every step tolerates failure and the function ends on `return 0`, so
+    # it can never abort a launch. One line for the job, because the fd-leak guard reads
+    # `200>&- 201>&-` off the same line — and those closes are load-bearing.
+    # shellcheck disable=SC2086  # the tier list is space-separated on purpose: one arg per tree
+    set -- "$CLAUDE_HOME" "$(basename "$PWD")" "$CNAME" ${KIB_ASSETS_OPEN:-}
+    detach_pgrp "$KIB_ROOT/host/shared-watch.sh" "$@" >/dev/null 2>&1 200>&- 201>&- || true
+    # The watcher exits after its one alert, so by teardown this pid is usually DEAD and its
+    # number recycled. Reaping it is kill_pgrp's job, and only kill_pgrp's. (container-lifecycle.md)
+    echo $! >"$ASSET_WATCH_PID" 2>/dev/null || true
+    return 0
+}
+
+stop_asset_watch() { kill_pgrp "${ASSET_WATCH_PID:-}"; }
 
 # ── Session preparation ──────────────────────────────────────────
 # Config dirs, the project lock, and the shared-config banner. Their CONTENTS are assembled
@@ -403,12 +439,15 @@ kib_prepare_session() {
     mkdir -p "$LOCK_DIR" && chmod 700 "$LOCK_DIR"
     mkdir -p "$STATE_DIR" && chmod 700 "$STATE_DIR"
     validate_shared_settings
+    validate_shared_assets
+    report_shared_asset_writes
 
     if [ "$UNLOCK_SHARED" = 1 ]; then
-        echo "⚠️  --unlock-shared: your ~/.claude plugins/skills/agents/commands/hooks are WRITABLE" >&2
-        echo "   this session — an install lands in ~/.claude, shared with every project + host claude." >&2
+        echo "⚠️  --unlock-shared: your ~/.claude plugins + hooks are WRITABLE this session —" >&2
+        echo "   an install lands in ~/.claude, shared with every project + host claude." >&2
     else
-        echo "🔒 shared config: read-only (installs land per-project; kib unlock-shared to share)" >&2
+        echo "🔒 shared config: plugins + hooks read-only (installs land per-project;" >&2
+        echo "   kib unlock-shared to share). skills/agents/commands are shared and writable." >&2
     fi
 
     mkdir -p "$SESSION_BASE" && chmod 700 "$SESSION_BASE"
@@ -467,6 +506,11 @@ kib_bring_up() {
         # Cold start only: refuse to launch into a repo whose git config the host would
         # execute. Nothing is running yet, so exiting here strands nothing.
         kib_audit_gate launch
+        # Legacy per-project skills/agents/commands out to canonical, before anything reads
+        # either tree. Only a fold-out that MOVED something needs the re-vet, which is what
+        # start_container mounts by — and skipping it otherwise keeps one payload to one warning.
+        fold_out_project_assets
+        [ "${KIB_ASSETS_FOLDED:-0}" = 1 ] && validate_shared_assets
         # Rebuild this project's config from canonical ~/.claude, then pin. Only here — never
         # while a container is attached to these bind-mounted files.
         assemble_session_dir

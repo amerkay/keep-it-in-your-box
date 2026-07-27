@@ -24,7 +24,7 @@ kib — run Claude Code in a Docker sandbox, one container per project.
   kib mcp add <name> …        declare a brokered MCP
   kib mcp adopt <name>        move an inline-credential MCP into the broker
   kib audit                   report host-executed git config + tracked hidden paths
-  kib unlock-shared [verb…]   this session may write ~/.claude's shared assets
+  kib unlock-shared [verb…]   this session may write ~/.claude's plugins + hooks
   kib build [--background]    rebuild the image
   kib sleep-monitor [iv] [id] diagnose "why won't it idle-suspend?"
   kib help                    this table
@@ -132,8 +132,9 @@ case "$VERB" in
 esac
 
 # ── Session verbs: claude | exec ─────────────────────────────────
-# --unlock-shared drops the read-only mounts over the shared assets, so an install lands in
-# canonical ~/.claude for EVERY project (and the host claude) rather than just this one.
+# --unlock-shared drops the read-only mounts over the assets the HOST executes (plugins, hooks),
+# so an install lands in canonical ~/.claude for EVERY project (and the host claude) rather than
+# just this one. skills/agents/commands need no flag — they are always shared and writable.
 # shellcheck disable=SC2034  # read by host/lifecycle.sh (start_container, kib_bring_up)
 UNLOCK_SHARED="${KIB_UNLOCK_SHARED:-0}"
 if [ "$VERB" = unlock-shared ]; then

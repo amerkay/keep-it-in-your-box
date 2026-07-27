@@ -133,8 +133,19 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
 - **FUSE passthrough I/O is `os.pread`/`os.pwrite`, never `lseek`+`read`** — the shared fd offset
   truncates reads at a chunk boundary, and it surfaces as unexplained lint/test flakiness rather
   than an I/O error. Regression-guarded. (`redaction-config-guard.md`)
+- **Never `kill -TERM "-$pid"` from a pidfile — call `kill_pgrp`**, and never require `KIB_ROOT`
+  from the environment in an *executed* host script (`detach_pgrp` gives it a fresh env; derive it
+  from `$0`). A dead detached child's pid gets recycled into the next launch's own process group,
+  so the stale pidfile made kib SIGTERM itself right after the banner: silent, no container, looks
+  exactly like a `set -e` abort. Both regression-guarded. (`container-lifecycle.md`)
 - **Never unlink lock files**, and every backgrounded host process must close fds 200/201
   (`200>&- 201>&-`) — one miss strands every project's containers. (`container-lifecycle.md`)
+- **Shared assets are two tiers, and don't "harden" the open one by refusing scripts** —
+  `plugins`/`hooks` are `:ro` (the host executes them); `skills`/`agents`/`commands` are rw and
+  symlinked at canonical so authoring one shares it. The vetting line is auto-execution (a
+  `hooks`/`mcpServers` `command`), never the exec bit or a `#!`: most real skills ship a helper
+  script, so that rule demotes `skills/` on first contact and buys nothing a prose "run this"
+  wouldn't. (`redaction-config-guard.md`)
 - **Don't put a hook back into the user's repos.** The checks live in `host/gitguard.sh` +
   `kib/host/gitaudit.py`, run at cold start, at teardown and on `kib audit`. Why a hook is not an
   option is in `kib/host/gitaudit.py`'s docstring. (`redaction-config-guard.md`)

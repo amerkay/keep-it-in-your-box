@@ -10,6 +10,7 @@
 # Reads:  KIB_ROOT KIB_STATE_ROOT PWD
 # Writes: CLAUDE_HOME CLAUDE_JSON SLUG LEGACY_BOX_SLUG SESSION_BASE SHARED_BASE LOCK_DIR
 #         LOCK_FILE BOOT_LOCK STATE_DIR EPHEMERAL SCRATCH_SUFFIX
+#         KIB_ASSETS_LOCKED KIB_ASSETS_OPEN KIB_ASSETS_DEMOTED KIB_ASSETS_FOLDED
 # shellcheck disable=SC2034  # the globals above are read in bin/kib and the other units
 
 _scope() { kib_py host.config_scope "$@"; }
@@ -74,7 +75,7 @@ ensure_claude_home() {
 # Regenerated, not merge-preserved — the user's `#` memory lives in canonical and flows in
 # every launch, so anything written to the in-box copy is transient by design.
 assemble_sandbox_claude_md() {
-    local policy="$KIB_ROOT/guest/policy/shared-CLAUDE.md"
+    local policy="$KIB_ROOT/guest/policy/KEEP-IT-IN-THE-BOX-INSTRUCTIONS.md"
     [ -f "$policy" ] || return 0
     local md="$SESSION_BASE/CLAUDE.md"
     local b="<!-- >>> kib sandbox policy (auto-synced by kib — do not edit this block) >>> -->"
@@ -128,6 +129,114 @@ validate_shared_settings() {
         "A sandboxed session can write this file, and it loads in EVERY project (and the" \
         "host claude). Remove the key, then relaunch:" \
         "    \$EDITOR ~/.claude/settings.json"
+}
+
+# ── Shared-asset tiers ───────────────────────────────────────────
+# Both tiers auto-load in every project and in a host `claude`; they differ in what a WRITE buys,
+# so they mount differently (audit H6). LOCKED carries a `command` the host EXECUTES, so :ro
+# unless `kib unlock-shared`, farmed per project. OPEN is prompt text with none, so it is
+# writable and symlinked straight at canonical. (`redaction-config-guard.md`)
+KIB_ASSETS_LOCKED="plugins hooks"
+KIB_ASSETS_OPEN="skills agents commands"
+
+# ── Open asset trees: refuse a smuggled executable ───────────────
+# Same placement and reasoning as validate_shared_settings above — vet on the host, before any
+# container reads it, on both the create and attach paths. Sets KIB_ASSETS_DEMOTED to the trees
+# that must mount :ro this launch; a clean tree stays writable. Never deletes or moves anything:
+# the file stays where you left it, and the banner names it.
+validate_shared_assets() {
+    KIB_ASSETS_DEMOTED=""
+    have_python || {
+        warn "python3 not found on the host — cannot vet the shared skills/agents/commands." \
+            "Mounting them read-only for this session."
+        KIB_ASSETS_DEMOTED="$KIB_ASSETS_OPEN"
+        return 0
+    }
+    local _t bad
+    for _t in $KIB_ASSETS_OPEN; do
+        [ -d "$CLAUDE_HOME/$_t" ] || continue
+        bad="$(kib_py host.asset_scan scan "$CLAUDE_HOME/$_t")" && continue
+        KIB_ASSETS_DEMOTED="$KIB_ASSETS_DEMOTED $_t"
+        # shellcheck disable=SC2088  # the tilde is prose for the user, not a path we open
+        warn "~/.claude/$_t is read-only this session — it configures a command to RUN:" \
+            "$(printf '%s\n' "$bad" | sed 's/^/    /')" \
+            "These trees are shared BECAUSE nothing in them auto-runs. Remove it and relaunch."
+    done
+    # Explicit: a loop whose last iteration ends on a false test returns 1, and under `set -e`
+    # that aborts the launch with no message at all. Never end a launch-path function on a test.
+    return 0
+}
+
+# ── One-time fold-out of per-project prompt assets ───────────────
+# `ln -sfn` cannot replace a non-empty dir, so a project still holding real entries here — any
+# project used before these trees became shared, since the read-only tier sent every install
+# there — keeps a private dir that SHADOWS the whole shared tree. Folding out is the safer half
+# of the trade, not a nicety. It promotes what a box wrote per-project to global, which the rw
+# mount already allows anyway; never overwrites, and always names what moved. Cold start only:
+# the session dir is bind-mounted, so moving entries out from under a live container makes them
+# vanish mid-session. (`redaction-config-guard.md`)
+fold_out_project_assets() {
+    local _t _e _name _moved=""
+    KIB_ASSETS_FOLDED=0
+    for _t in ${KIB_ASSETS_OPEN:-}; do
+        [ -d "$SESSION_BASE/$_t" ] || continue
+        for _e in "$SESSION_BASE/$_t"/*; do
+            # `-L` too: any symlink here is the old farm's and DANGLES (its mount is gone), and
+            # -e follows the link — so -e alone skips exactly the entries that block the rmdir.
+            # Also the bash-3.2 no-nullglob guard: an empty dir yields the pattern, which is
+            # neither.
+            [ -e "$_e" ] || [ -L "$_e" ] || continue
+            if [ -L "$_e" ]; then
+                rm -f "$_e" 2>/dev/null || true
+                continue
+            fi
+            _name="$(basename "$_e")"
+            mkdir -p "$CLAUDE_HOME/$_t" 2>/dev/null || true
+            if [ -e "$CLAUDE_HOME/$_t/$_name" ]; then
+                warn "kept this project's $_t/$_name — a shared one already has that name." \
+                    "It stays private to this project and shadows the shared tree." \
+                    "Rename or delete one:  \$EDITOR $SESSION_BASE/$_t/$_name"
+                continue
+            fi
+            if mv "$_e" "$CLAUDE_HOME/$_t/$_name" 2>/dev/null; then
+                _moved="$_moved $_t/$_name"
+            else
+                warn "could not move $_e into ~/.claude/$_t — it stays project-private."
+            fi
+        done
+        # Only succeeds once the tree is empty, which is exactly the condition to symlink it.
+        rmdir "$SESSION_BASE/$_t" 2>/dev/null || true
+    done
+    case "$_moved" in *[![:space:]]*) ;; *) return 0 ;; esac
+    KIB_ASSETS_FOLDED=1 # the caller re-vets only when something actually moved
+    # shellcheck disable=SC2088  # the tilde is prose for the user, not a path we open
+    warn "moved this project's prompt assets into the shared ~/.claude:$_moved" \
+        "They were written when those trees were read-only, and a project-private copy now" \
+        "hides every shared one. They load in EVERY project from now on."
+    return 0
+}
+
+# What a sandboxed session (or anything else) wrote into the open trees since the last launch.
+# Reported HERE, not only mid-session, because a write while no session ran — another project's
+# box, a host process — still loads in this one. The stamp is refreshed after reporting.
+report_shared_asset_writes() {
+    local stamp="$STATE_DIR/assets.seen" _t hits=""
+    if [ -f "$stamp" ]; then
+        for _t in $KIB_ASSETS_OPEN; do
+            [ -d "$CLAUDE_HOME/$_t" ] || continue
+            # NO pipe here, and `sed` not `head` below. Under `set -o pipefail` a `find | head`
+            # returns 141 the moment head closes the pipe early, and `find` alone returns 1 on
+            # any unreadable subdir — either one aborts the launch silently.
+            hits="$hits$(find "$CLAUDE_HOME/$_t" -type f -newer "$stamp" 2>/dev/null || true)
+"
+        done
+    fi
+    : >"$stamp" 2>/dev/null || true
+    case "$hits" in *[![:space:]]*) ;; *) return 0 ;; esac
+    warn "shared prompt assets changed since the last launch:" \
+        "$(printf '%s\n' "$hits" | sed -n '/./{s/^/    /;p;}' | sed -n '1,5p')" \
+        "They load in every project from now on. Review them if that was not you."
+    return 0
 }
 
 # These used to be bind-mounted rw from canonical, so a sandboxed session could write the exact

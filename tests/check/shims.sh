@@ -143,6 +143,56 @@ t_detach_fds() {
     rm -rf "$d"
 }
 
+# kill_pgrp undoes detach_pgrp. `kill -TERM -$pid` from a pidfile is only safe while the pid is
+# still OURS: a detached child that exited frees it, Linux recycles numbers near-sequentially, and
+# the group it then names was kib's own — one launch SIGTERMed itself right after the banner, with
+# no message and no container. Both guards are load-bearing, so both are tested.
+t_kill_pgrp() {
+    local d pid child ours
+    d="$(mktemp -d)"
+
+    detach_pgrp sleep 5
+    pid=$!
+    sleep 0.3
+    echo "$pid" >"$d/live.pid"
+    kill_pgrp "$d/live.pid"
+    sleep 0.2
+    if kill -0 "$pid" 2>/dev/null; then
+        fail "kill_pgrp does not kill its own detached group" "pid=$pid survived"
+        kill -TERM "-$pid" 2>/dev/null || true
+    else
+        pass "kill_pgrp: reaps a detach_pgrp'd group"
+    fi
+    if [ -e "$d/live.pid" ]; then
+        fail "kill_pgrp leaves the pidfile behind" "$d/live.pid"
+    else
+        pass "kill_pgrp: drops the pidfile"
+    fi
+
+    # The shipped bug, exactly: a recycled number that happens to name kib's own group.
+    ours="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
+    echo "$ours" >"$d/self.pid"
+    kill_pgrp "$d/self.pid" # a suicide here takes the whole check run with it
+    pass "kill_pgrp: refuses our own process group"
+
+    # A recycled pid usually names an ordinary child, not a group leader — spare it.
+    sleep 5 &
+    child=$!
+    echo "$child" >"$d/recycled.pid"
+    kill_pgrp "$d/recycled.pid"
+    sleep 0.2
+    if kill -0 "$child" 2>/dev/null; then
+        pass "kill_pgrp: spares a pid that does not lead its group"
+    else
+        fail "kill_pgrp signals a group it does not own" "killed non-leader $child"
+    fi
+    kill "$child" 2>/dev/null
+    wait "$child" 2>/dev/null || true
+
+    is "kill_pgrp: empty pidfile path is a no-op" 0 "$(kill_pgrp '' && echo 0)"
+    rm -rf "$d"
+}
+
 # The sleep guard's metric, called through the SHARED implementation both it and
 # host/sleep-monitor.sh source — so this covers the diagnostic's copy too, which is the whole
 # reason the sampler was extracted.
@@ -180,6 +230,7 @@ t_hash8
 t_lockfd
 t_detach
 t_detach_fds
+t_kill_pgrp
 t_busiest
 t_wait_until
 

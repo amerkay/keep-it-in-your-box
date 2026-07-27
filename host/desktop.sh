@@ -106,12 +106,7 @@ start_wayland_guard() {
 }
 
 stop_wayland_guard() {
-    local pid
-    pid="$(cat "$WL_ROOT/notify.pid" 2>/dev/null || true)"
-    # Negative pid: the notifier is a setsid'd pipeline, so kill the whole process group.
-    if [ -n "$pid" ]; then
-        kill -TERM "-$pid" 2>/dev/null || true
-    fi
+    kill_pgrp "$WL_ROOT/notify.pid" # whole group: the notifier is a setsid'd pipeline
     docker rm -f "$WL_CNAME" >/dev/null 2>&1 || true
     rm -rf "$WL_ROOT" 2>/dev/null || true
 }
@@ -172,15 +167,6 @@ add_clipboard_bridge_args() {
 
 stop_clipboard_bridge() {
     is_macos || return 0
-    local pid
-    pid="$(cat "${CLIP_STATE}.pid" 2>/dev/null || true)"
-    # Numeric-only, even though the pid file is host-only: `kill -TERM -<pid>` signals a
-    # whole process group, so a non-numeric or empty value must never reach it.
-    case "$pid" in '' | *[!0-9]*) pid="" ;; esac
-    # Negative pid: the bridge runs in its own process group (detach_pgrp).
-    if [ -n "$pid" ]; then
-        kill -TERM "-$pid" 2>/dev/null || true
-    fi
-    rm -f "${CLIP_STATE}.pid" 2>/dev/null || true
+    kill_pgrp "${CLIP_STATE}.pid" # whole group: the bridge is its own (detach_pgrp)
     rm -rf "$CLIP_STATE" 2>/dev/null || true
 }

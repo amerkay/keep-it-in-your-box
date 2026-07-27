@@ -329,12 +329,26 @@ allow "regression: .env.example is not redacted" \
 section "Shared config surface — cross-project pivot (H5, H6)"
 
 SHARED="$HOME/.claude-shared"
-for d in skills agents commands plugins hooks; do
+# Two tiers (host/config.sh). plugins/ and hooks/ hold a command the HOST executes, so a write
+# is host RCE and must be refused. skills/agents/commands are prompt text and deliberately
+# writable-and-shared — asserted so, because a regression that re-locks them breaks skill
+# authoring silently, and one that widens the locked pair is the H6 pivot coming back.
+for d in plugins hooks; do
     if [ -d "$SHARED/$d" ]; then
-        deny "shared $d/ is read-only" bash -c "touch '$SHARED/$d/.sectest-probe'"
+        deny "shared $d/ is read-only (the host executes it)" \
+            bash -c "touch '$SHARED/$d/.sectest-probe'"
         rm -f "$SHARED/$d/.sectest-probe" 2>/dev/null
     else
-        skip "shared $d/ is read-only" "not present"
+        skip "shared $d/ is read-only (the host executes it)" "not present"
+    fi
+done
+for d in skills agents commands; do
+    if [ -d "$SHARED/$d" ]; then
+        allow "shared $d/ is writable (prompt text, shared on purpose)" \
+            bash -c "touch '$SHARED/$d/.sectest-probe'"
+        rm -f "$SHARED/$d/.sectest-probe" 2>/dev/null
+    else
+        skip "shared $d/ is writable (prompt text, shared on purpose)" "not present"
     fi
 done
 # CLAUDE.md is no longer a shared file — kib assembles it (policy + the user's canonical
@@ -357,14 +371,19 @@ else
     is ".credentials.json stays writable (in-sandbox OAuth refresh, broker off)" "writable" "$_cred_state"
 fi
 
-# The lock must not cost in-session authoring: that is what the merge farm buys.
+# The lock on plugins/ must not cost in-session installing: that is what the merge farm buys.
 CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude-session}"
-for d in skills agents commands plugins; do
-    is "$d/ is a per-project merge farm, not a symlink" "real dir" \
-        "$([ -d "$CFG/$d" ] && [ ! -L "$CFG/$d" ] && echo 'real dir' || echo 'symlink ***')"
+is "plugins/ is a per-project merge farm, not a symlink" "real dir" \
+    "$([ -d "$CFG/plugins" ] && [ ! -L "$CFG/plugins" ] && echo 'real dir' || echo 'symlink ***')"
+# The open tier is the opposite: a SYMLINK at canonical, so a skill authored here is shared with
+# every project rather than trapped in this one. A farm here would silently un-share authoring.
+for d in skills agents commands; do
+    is "$d/ is a symlink to the shared tree, not a farm" "symlink" \
+        "$([ -L "$CFG/$d" ] && echo symlink || echo 'real dir ***')"
 done
 allow "regression: create a skill in-session" bash -c "mkdir -p '$CFG/skills/.sectest' && echo x > '$CFG/skills/.sectest/SKILL.md'"
 allow "regression: create an agent in-session" bash -c "echo x > '$CFG/agents/.sectest.md'"
+rm -rf "$CFG/skills/.sectest" "$CFG/agents/.sectest.md" 2>/dev/null
 if [ -d "$CFG/plugins/marketplaces" ] && [ ! -L "$CFG/plugins/marketplaces" ]; then
     allow "regression: clone a marketplace per-project" mkdir -p "$CFG/plugins/marketplaces/.sectest"
     rmdir "$CFG/plugins/marketplaces/.sectest" 2>/dev/null

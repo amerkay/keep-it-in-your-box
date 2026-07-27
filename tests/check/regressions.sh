@@ -13,13 +13,14 @@ section "Regression guards"
 # and hooks[].command / apiKeyHelper in it are host code execution. The box gets a vetted COPY.
 # Match on the BIND, not the filename — the old code took the name from a loop variable, so
 # grepping "settings.json:" silently never fired. Two $CLAUDE_HOME binds are legitimate (this
-# project's transcripts, the ro-by-default asset loop); anything else is the regression.
+# project's transcripts, and `_bind_shared_asset`, the one helper both tiers go through);
+# anything else is the regression.
 # Both spellings of "mount this": the direct one and bind_via_link, which takes the same source
 # as its first argument.
 # shellcheck disable=SC2016  # literal grep patterns: they must match the source text verbatim
 stray_home_binds="$(grep -E '^[[:space:]]*(ARGS\+=\(-v|bind_via_link) "\$CLAUDE_HOME/' \
     "$KIB_ROOT/host/lifecycle.sh" \
-    | grep -vE '\$CLAUDE_HOME/projects/\$SLUG[":]' | grep -vE '\$CLAUDE_HOME/\$_entry[":]' || true)"
+    | grep -vE '\$CLAUDE_HOME/projects/\$SLUG[":]' | grep -vE '\$CLAUDE_HOME/\$1[":]' || true)"
 if [ -n "$stray_home_binds" ]; then
     fail "canonical ~/.claude content is bind-mounted into the container: $(printf '%s' "$stray_home_binds" | tr -s ' ')" \
         "a sandboxed session could then write the settings.json the host claude loads"
@@ -125,6 +126,40 @@ else
         "it holds the shared lock, so the last session out cannot tear the containers down"
 fi
 unset fd_bad fd_f fd_line
+
+# The mirror of the above: undoing detach_pgrp goes through kill_pgrp, never a hand-rolled
+# `kill -TERM -$pid` from a pidfile. A detached child that already exited frees its pid, Linux
+# recycles numbers near-sequentially, and one launch's stale pidfile named the NEXT launch's own
+# process group — SIGTERMing bin/kib right after the banner, silently, with no container. Four
+# copies of the pattern existed; two had no guard at all.
+# shellcheck disable=SC2016  # a literal grep pattern: it must match the source text verbatim
+kp_bad="$(grep -rln 'kill -TERM "-\$' "$KIB_ROOT"/bin/kib "$KIB_ROOT"/host/*.sh \
+    | grep -v '/portable\.sh$' || true)"
+if [ -z "$kp_bad" ]; then
+    pass "process groups are killed only through kill_pgrp (no recycled-pid signal)"
+else
+    fail "a hand-rolled group kill from a pidfile: $kp_bad" \
+        "a recycled pid can name kib's own group — use kill_pgrp, which refuses that"
+fi
+unset kp_bad
+
+# A script started BY detach_pgrp is a separate process, and bin/kib never exports KIB_ROOT — so
+# requiring it from the environment makes the script exit instantly on every launch. It shipped
+# that way in shared-watch.sh: the notifier never ran once, and the dead pid it recorded is what
+# armed the group-kill above. Sourced files (host/_load.sh) are exempt: they see the caller's.
+kr_bad=""
+for kr_f in "$KIB_ROOT"/host/*.sh; do
+    case "$kr_f" in */_load.sh) continue ;; esac
+    grep -q '^#!' "$kr_f" 2>/dev/null || continue # sourced unit, not an executed script
+    grep -q 'KIB_ROOT:?' "$kr_f" && kr_bad="$kr_bad $(basename "$kr_f")"
+done
+if [ -z "$kr_bad" ]; then
+    pass "no detached host script demands KIB_ROOT from the environment"
+else
+    fail "script(s) require an unexported KIB_ROOT:$kr_bad" \
+        "detach_pgrp gives them a fresh environment — derive it from \$0 instead"
+fi
+unset kr_bad kr_f
 
 # The synthetic placeholder credential is held read-only by a :ro MOUNT, never by chmod.
 # Docker Desktop's `fakeowner` bind layer records the mode but ignores it in access(2), so a

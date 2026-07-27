@@ -118,6 +118,26 @@ detach_pgrp() {
     fi
 }
 
+# Kill the process group recorded in <pidfile>, and drop the file. The only sanctioned way to
+# undo detach_pgrp: a bare `kill -TERM -$pid` is a loaded gun, because a detached child that
+# already exited frees its pid, the number is recycled — near-sequentially on Linux, so often
+# by the very next launch — and the group it now names can be kib's OWN. That shipped once: it
+# SIGTERMed bin/kib right after the banner, with no message and no container. Hence both
+# guards: never our group, and the pid must still LEAD its group (a recycled number is almost
+# never a group leader).
+kill_pgrp() { # <pidfile>
+    local pid ours
+    [ -n "${1:-}" ] || return 0
+    pid="$(cat "$1" 2>/dev/null || true)"
+    rm -f "$1" 2>/dev/null || true
+    case "$pid" in '' | *[!0-9]*) return 0 ;; esac
+    ours="$(ps -p $$ -o pgid= 2>/dev/null | tr -d ' ')"
+    [ "$pid" = "$ours" ] && return 0
+    [ "$(ps -p "$pid" -o pgid= 2>/dev/null | tr -d ' ')" = "$pid" ] || return 0
+    kill -TERM "-$pid" 2>/dev/null || true
+    return 0
+}
+
 # ── desktop notification ──────────────────────────────────────────
 # <urgency: normal|critical> <title> <body>. Best-effort no-op with no notifier
 # or no desktop session (ssh, `-p`).

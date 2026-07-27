@@ -24,7 +24,7 @@
 
 [redact]
 # Stub on read + write-deny — the existing .kibignore behaviour. Secrets, not executables.
-# Mirrors the policy already stated in shared-CLAUDE.md ("treat .env* as suspect").
+# Mirrors the "Redacted" tier in KEEP-IT-IN-THE-BOX-INSTRUCTIONS.md.
 #
 # '!' works here and applies within the guard set only (last match wins), so these
 # carve-outs cannot be used by a *project* to un-redact itself. The placeholder files

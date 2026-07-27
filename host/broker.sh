@@ -432,13 +432,7 @@ verify_broker_attach() {
 }
 
 stop_broker() {
-    local pid
-    pid="$(cat "$BROKER_DIR/notify.pid" 2>/dev/null || true)"
-    case "$pid" in '' | *[!0-9]*) pid="" ;; esac
-    # Negative pid: the notifier is a setsid'd pipeline — kill the whole process group.
-    if [ -n "$pid" ]; then
-        kill -TERM "-$pid" 2>/dev/null || true
-    fi
+    kill_pgrp "$BROKER_DIR/notify.pid" # whole group: the notifier is a setsid'd pipeline
     docker rm -f "$BROKER_CNAME" >/dev/null 2>&1 || true
     # Hosted-MCP sidecars share the broker net and must go before `network rm`. Match by the
     # ${CNAME}-hmcp-* name prefix so we get every one without tracking their ids here.

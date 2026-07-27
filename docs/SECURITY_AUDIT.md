@@ -26,7 +26,7 @@
 **As audited, yes.** Six confirmed paths reached the host, four rated **Critical**. The container hardening is excellent — every classic container-escape class was tested and blocked — but the sandbox's own stated boundary, *"what the host runs later,"* had multiple holes in the **git-config guard**, and the shared credential surface is exfiltrable by design.
 
 > [!TIP]
-> **All `P0` and `P1` work has shipped.** C1–C4, H1, H2, H6 and H8 are **fixed**; H5 is **mitigated**; H3/H4 remain the deliberate accepted risk. Findings are retained as the record of *why* each control exists — see [Changelog](#changelog).
+> **All `P0` and `P1` work has shipped.** C1–C4, H1, H2 and H8 are **fixed**; H5 is **mitigated**; H6 is **split** — its host-RCE half (`plugins`/`hooks`) fixed, its prompt-asset half deliberately reopened and accepted ([why](#reopening-the-prompt-asset-tier--2026-07-26)); H3/H4 remain the deliberate accepted risk. Findings are retained as the record of *why* each control exists — see [Changelog](#changelog).
 
 > [!NOTE]
 > **Second pass — 2026-07-25.** A re-audit found **two more host-RCE paths of already-known classes**, both now fixed: **C5** — the git-config write validator was not quote-aware, so a driver hidden in a double-quoted subsection name (`[filter "e]v"]clean = …`, or `#`/`;` inside the quotes) slipped past it into the real `.git/config` (the same parser-divergence class as C3); and **H9** — the shared `settings.json` env allow-check was a three-key denylist, so `NODE_OPTIONS` / `BASH_ENV` / `LD_PRELOAD` / `PATH` propagated to a host `claude`'s subprocesses (the same propagation path as H5). See [Second audit pass](#second-audit-pass--2026-07-25) for detail, the 50-vector sweep, and recommendations.
@@ -66,7 +66,7 @@ Severity, mechanism, root cause and remediation for every confirmed issue. This 
 | **H3** | Shared OAuth token exfiltration over open egress | 🟠 High<br>Host credential theft A real credential in the container's shared-assets mount (0600, **same-uid readable**, outside FUSE) plus **fully open egress** → the account token leaves the box with no host trigger | Open egress + a durable credential in a container-reachable mount | 🟡 **Mitigated** — the **broker is now on by default**, so that mount normally holds only a synthetic placeholder and the real token never enters the box. H3 applies to the fallback path only (`broker = off`, or headless with no stored token). Egress stays open by design — default-deny contradicts the sandbox's purpose. **Rotate the token if an untrusted session has run unbrokered** |
 | **H4** | Prompt injection → unattended token exfil | 🟠 High<br>Host credential theft | Injected content runs any in-container command with no consent; read→exfil of the host token needs *no host trigger*, and it arms every other chain. *Upgraded* from in-container-only under adversarial review | By design (`--dangerously-skip-permissions`) + H3 | ⚪ **Accepted** with H3 — in-container execution is the design; every *host-reaching* target it armed (C1–C4, H5, H6, H8) is now closed or mitigated |
 | **H5** | Poison shared `settings.json` | 🟠 High<br>Host cred theft + cross-project | Writable and **outside** FUSE; the entrypoint symlinked it into every project and folded in-session edits back into the shared copy, with no validation → `ANTHROPIC_BASE_URL`, `apiKeyHelper` and inline `hooks[].command` propagate to every project's next session | the entrypoint's settings fold-back (since moved host-side to `merge_out_shared_settings`); no content validation | 🟡 **Mitigated** `P1` — `validate_shared_settings` (the `host/` units) vets the file host-side on every launch, before any container reads it, refusing `apiKeyHelper`/`awsAuthRefresh`/`awsCredentialExport`/`otelHeadersHelper`, `env.ANTHROPIC_{BASE_URL,API_KEY,AUTH_TOKEN}`, `statusLine.command` and inline `hooks[].command`. Left writable on purpose (`/config`, theme) — so it is prevention **at launch, not at write** |
-| **H6** | Poison shared `plugins`/`skills`/`agents`/`commands` | 🟠 High<br>Cross-project persistence | 0775, writable, symlinked into every project and — unlike `hooks/` — not read-only mounted → injected assets auto-run in every project's next session; with H3, exfil the token | Shared writable assets, no validation | ✅ **Fixed** `P1` — all four mounted `:ro` individually (the dir itself must stay writable for OAuth refresh), with a per-project **merge farm** in `guest/entrypoint/docker-entrypoint.sh` so in-session authoring and `/plugin install` still work and land per-project. `kib unlock-shared` is the deliberate opt-out |
+| **H6** | Poison shared `plugins`/`skills`/`agents`/`commands` | 🟠 High<br>Cross-project persistence | 0775, writable, symlinked into every project and — unlike `hooks/` — not read-only mounted → injected assets auto-run in every project's next session; with H3, exfil the token | Shared writable assets, no validation | 🟡 **Split** `P1` — **`plugins`/`hooks` fixed:** mounted `:ro` individually (the dir itself must stay writable for OAuth refresh), with a per-project **merge farm** in `guest/entrypoint/docker-entrypoint.sh` so `/plugin install` still works and lands per-project; `kib unlock-shared` is the deliberate opt-out. **`skills`/`agents`/`commands` deliberately reopened (2026-07-26):** prompt text with no executed command, mounted rw and symlinked at canonical so authoring one shares it, with `asset_scan` refusing a `hooks`/`mcpServers` command and a first-write desktop alert. The prompt-injection half of this finding is therefore **accepted**, like H3/H4 — see [Reopening the prompt-asset tier](#reopening-the-prompt-asset-tier--2026-07-26) |
 | **H8** | Wayland clipboard poisoning → host paste RCE / read exfil | 🟠 High<br>Host RCE (on paste) | Raw read-write Wayland socket, unmediated: the container could **write** the clipboard with bracketed-paste-bypass sequences (an embedded `ESC[201~`) that execute at your next host paste, and **read** it continuously (`wl-paste --watch`) | the raw socket bind (now `host/desktop.sh` `WL_HOST_SOCK`) — unmediated | ✅ **Fixed** `P2` — `kib/guest/wayland_guard.py` sidecar owns the real socket. Reads pass verbatim (`SCM_RIGHTS` fds included), so `wl-paste` and image paste are unaffected. **Policy revised 2026-07-26:** blanket refusal broke the fullscreen TUI's select-to-copy, so writes are now *sanitised* instead — the guard swaps the compositor's pipe on `send` and strips control characters (C0/DEL/C1 bar tab and newline) in flight, refusing non-`text/*` flavours and payloads over 1 MiB. The `ESC[201~` payload below is stripped rather than blocked; the rows recording the original behaviour are the audit-date observation |
 | **H9** | Loader/interpreter env keys in shared `settings.json` | 🟠 High<br>Host RCE + cross-project | The shared-settings validator flagged only `env.ANTHROPIC_{BASE_URL,API_KEY,AUTH_TOKEN}`. The same file loads in a host `claude`, whose `env` is applied to every subprocess it spawns → `env.NODE_OPTIONS` (`--require evil.js`), `BASH_ENV`, `LD_PRELOAD`, `GIT_SSH_COMMAND`, `PATH` are host code execution at the next tool or git call. Same propagation path as H5, wider key set | `kib/shared/dangerous.py` `SETTINGS_ENV_KEYS` (three keys only) | ✅ **Fixed** (2nd pass) — added `SETTINGS_ENV_EXEC_KEYS` (interpreter/loader/command-override set) to `settings_findings`; both the launch validator and the merge-out vet refuse them; benign prefs (`EDITOR`, `PAGER`, `LANG`) stay clean |
 | **L1** | Unguarded project `.claude/settings*.json` & `.mcp.json` | 🟡 Low<br>In-container only | `guest/policy/global.kibignore` lists `.vscode`/`.envrc`/`.env*` but not `.claude/` or `.mcp.json`; a malicious repo's autoload files get in-container RCE — **already free** under skip-permissions | Not pruned or validated | ⬜ **Open** `P3` — defense-in-depth against a future non-skip-permissions use; add them to a validated guard section |
@@ -90,9 +90,9 @@ Re-run from inside a restarted sandbox through the real FUSE mount (2026-07-22),
 | **H1b** | write `b1/hooks/pre-commit` into the bare repo | permitted | Permission denied |
 | **H2** | `--separate-git-dir=gd wt` → `git -C wt config core.fsmonitor …` | accepted + **executed on `git status`** | Permission denied · resolves to nothing |
 | **H5** | `.credentials.json` / `settings.json` writability | writable | still writable **by design** — the guard is `validate_shared_settings` at launch |
-| **H6** | `touch ~/.claude-shared/{skills,agents,commands,plugins,hooks}/probe` | permitted | `Read-only file system` — all five |
-| **H6b** | `/proc/self/mountinfo` for the shared entries | one `rw` mount | six nested `ro` binds; `~/.claude-shared` itself still `rw` |
-| **H6c** | *regression* — create a skill / agent in-session | worked (into the shared dir) | works, into `$CLAUDE_CONFIG_DIR`; invisible to other projects |
+| **H6** | `touch ~/.claude-shared/{plugins,hooks}/probe` | permitted | `Read-only file system` — both. `{skills,agents,commands}` permitted **by design** since 2026-07-26 |
+| **H6b** | `/proc/self/mountinfo` for the shared entries | one `rw` mount | `plugins`/`hooks` `ro`, the three prompt trees `rw`; `~/.claude-shared` itself still `rw` |
+| **H6c** | *regression* — create a skill / agent in-session | worked (into the shared dir) | works, into canonical — shared on purpose, with a desktop alert on the first write |
 | **H6d** | *regression* — `mkdir plugins/marketplaces/<new>` | worked (shared) | works, per-project (`farm_dir` runs a level deeper) |
 | **H8** | `wl-copy 'payload'` from inside the sandbox | clipboard **set** | `wl_display_dispatch: Broken pipe` — connection closed; clipboard verified unchanged |
 | **H8b** | host desktop alert on that attempt | none | *"The sandbox tried to write your clipboard. Blocked — your next paste is safe."* |
@@ -270,6 +270,48 @@ are now fixed**; three residuals are called out below the table.
 
 ---
 
+## Reopening the prompt-asset tier — 2026-07-26
+
+H6 locked five shared trees behind one rule. Five was never one tier, and the cost of pretending
+it was fell entirely on the harmless half: authoring a skill inside a box left it trapped in that
+project, which is the opposite of what a skill is for.
+
+The split is by **what a write buys**, not by file type:
+
+| | why | mount |
+|:--|:--|:--|
+| `plugins/`, `hooks/` | carry a `command` the **host** executes — hook entries, a plugin's bundled MCP servers, a marketplace clone's `.git/hooks` (canonical is git-pulled by a host `claude`) | `:ro`, `kib unlock-shared` to opt out |
+| `skills/`, `agents/`, `commands/` | prompt text; nothing auto-runs | **rw**, symlinked at canonical so authoring shares it |
+
+`plugins/` is why locking `hooks/` alone was never the control: a plugin is a superset of a hook.
+That is the third spelling of one bug — inline `hooks[].command` in `settings.json` (H5/H9) and
+`core.hooksPath` (C1) are the other two.
+
+**What is accepted, stated plainly.** A skill is instructions an agent follows with a shell in
+*another* repo. Reopening these three accepts the prompt-injection half of H6, on the same footing
+as H3/H4: in-container execution and agent-directed action are the design. What is *not* accepted
+is auto-execution, and that is what `kib/host/asset_scan.py` refuses — any `hooks`/`mcpServers`
+`command` in a JSON file under the three trees demotes that tree to `:ro` for the launch. Without
+it, locking `plugins/` would just relocate the payload one directory sideways.
+
+**The exec-bit rule was specified and cut before shipping.** Refusing an executable bit or a `#!`
+sounds strictly safer and is not: the first real shared skill on the author's machine bundles two
+executable Python helpers, and most non-trivial skills ship one — the rule would have demoted
+`skills/` permanently on first contact and read as a bug. It also buys nothing, because a bundled
+script runs only if the agent chooses to run it, and a skill that is pure prose saying "now run
+this installer" is identical in effect and undetectable. The boundary is auto-execution.
+
+**Detection, not prevention** — the same trade as `settings.json`. `host/shared-watch.sh` raises
+one `notify_desktop` on the first write of a container's life and exits; `report_shared_asset_writes`
+names what changed since the last launch, covering the writes a mid-session watcher structurally
+cannot see (another project's box, or a host process, while nothing was attached).
+
+Regressions in `security-test.sh` now assert **both** directions: `plugins`/`hooks` refuse a write,
+and the three prompt trees accept one and are symlinks rather than farms — a re-lock would break
+skill authoring silently, which is how this arrived.
+
+---
+
 ## Changelog
 
 Security-relevant work, oldest first. Everything before the audit built the boundary; everything after closed the holes the audit found in it.
@@ -290,6 +332,7 @@ Security-relevant work, oldest first. Everything before the audit built the boun
 | 2026-07-22 | `e364e23` | **`P0` wave — six host-RCE paths closed** (C1–C4, H1, H2). Two brittle assumptions were behind every one: that hand-parsing equals git's resolution, and that path strings identify inodes. |
 | 2026-07-22 | `f3fa29b` | **`P1` wave — the two surfaces outside the FUSE guard.** Shared assets locked read-only with a per-project merge farm (H6); the clipboard mediated by `kib/guest/wayland_guard.py` (H8); `settings.json` validated host-side each launch (H5). |
 | 2026-07-25 | `483369f` | **Second audit pass — two more host-RCE paths, same classes, closed.** C5: the git-config write validator made quote-aware (`_split_header`/`_strip_inline_comment`) so a driver hidden in a quoted subsection name can no longer slip into `.git/config`. H9: the shared `settings.json` env check widened from three keys to the interpreter/loader/command-override set (`SETTINGS_ENV_EXEC_KEYS`). Regressions added to `security-test.sh` (C5/C5b, env keys) and `test_dangerous.py`. |
+| 2026-07-26 | *pending* | **H6 split into two tiers.** `plugins`/`hooks` stay `:ro` (the host executes them); `skills`/`agents`/`commands` reopen as rw and genuinely shared, because a skill trapped in one project is not a skill. `kib/host/asset_scan.py` demotes a prompt tree that configures a `hooks`/`mcpServers` command; `host/shared-watch.sh` alerts on the first write. The exec-bit variant was cut before shipping — see [Reopening the prompt-asset tier](#reopening-the-prompt-asset-tier--2026-07-26). |
 
 ---
 
