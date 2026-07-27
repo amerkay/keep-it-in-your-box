@@ -69,24 +69,46 @@ ensure_claude_home() {
     echo "🆕 kib: no ~/.claude yet — created a fresh skeleton (first login populates it)." >&2
 }
 
-# ── Sandbox policy CLAUDE.md ─────────────────────────────────────
-# Assembled fresh each launch into this session's config dir as `policy block + the user's
-# canonical CLAUDE.md`, so the policy loads ONLY in-box and a host `claude` never sees it.
-# Regenerated, not merge-preserved — the user's `#` memory lives in canonical and flows in
-# every launch, so anything written to the in-box copy is transient by design.
-assemble_sandbox_claude_md() {
-    local policy="$KIB_ROOT/guest/policy/KEEP-IT-IN-THE-BOX-INSTRUCTIONS.md"
-    [ -f "$policy" ] || return 0
+# ── Sandbox policy → managed-policy CLAUDE.md ────────────────────
+# Bound :ro at Claude's Linux managed-policy path (the box is Linux whatever the host is), so
+# it loads in EVERY in-box session ahead of user and project memory, cannot be dropped by a
+# repo's claudeMdExcludes, and is not writable by the session — unlike the config dir, where
+# it used to be concatenated into CLAUDE.md. The image pre-creates the directory; the content
+# is bound, not baked, so editing the policy needs a relaunch and not a rebuild.
+KIB_POLICY_FILE_HOST="$KIB_ROOT/guest/policy/etc-CLAUDE.md"
+KIB_POLICY_CPATH="/etc/claude-code/CLAUDE.md"
+
+add_policy_args() {
+    # Fail closed: a box whose agent never sees the sandbox rules is the one case where
+    # launching anyway is worse than not launching.
+    [ -f "$KIB_POLICY_FILE_HOST" ] \
+        || die "missing $KIB_POLICY_FILE_HOST — refusing to launch a box with no sandbox policy."
+    ARGS+=(-v "$KIB_POLICY_FILE_HOST:$KIB_POLICY_CPATH:ro")
+}
+
+# Attach-path check: the mount is fixed at creation, so a container an older kib left running
+# has no policy in it. WARN, not die — unlike redaction or the broker, nothing is unguarded
+# here (the FUSE view and the read-only mounts still hold); the session just runs without the
+# instructions, which is degraded, not open.
+verify_policy_attach() {
+    docker exec "$CNAME" test -s "$KIB_POLICY_CPATH" 2>/dev/null && return 0
+    warn "this project's container is running without the sandbox policy at" \
+        "$KIB_POLICY_CPATH, so this session will not see the sandbox rules." \
+        "The guards themselves still hold. Close all kib sessions for this project" \
+        "and relaunch to restore it."
+}
+
+# ── User memory ──────────────────────────────────────────────────
+# The user's canonical CLAUDE.md, copied in verbatim each launch (the policy is no longer
+# prepended — see above). Copied rather than bound: an in-box edit must not reach canonical,
+# which a host `claude` also loads, so `#` memory written in here is transient by design.
+place_user_claude_md() {
     local md="$SESSION_BASE/CLAUDE.md"
-    local b="<!-- >>> kib sandbox policy (auto-synced by kib — do not edit this block) >>> -->"
-    local e="<!-- <<< kib sandbox policy (auto-synced by kib) <<< -->"
-    {
-        printf '%s\n' "$b"
-        cat "$policy"
-        printf '%s\n' "$e"
-        # The user's own memory, verbatim, below the policy block. Absent on a fresh install.
-        if [ -f "$CLAUDE_HOME/CLAUDE.md" ]; then cat "$CLAUDE_HOME/CLAUDE.md"; fi
-    } >"$md.kib.tmp" && mv "$md.kib.tmp" "$md"
+    if [ -f "$CLAUDE_HOME/CLAUDE.md" ]; then
+        cp "$CLAUDE_HOME/CLAUDE.md" "$md.kib.tmp" && mv "$md.kib.tmp" "$md"
+    else
+        rm -f "$md" # absent on a fresh install, or deleted since the last launch
+    fi
 }
 
 # ── Shared settings.json: refuse host-reaching keys ──────────────
@@ -347,8 +369,9 @@ assemble_session_dir() {
         : >"$SESSION_BASE/history.jsonl"
     fi
 
-    # Sandbox policy + the user's canonical memory, placed directly (not a shared symlink).
-    assemble_sandbox_claude_md
+    # The user's canonical memory, placed directly (not a shared symlink). The sandbox policy
+    # is NOT here — it mounts at $KIB_POLICY_CPATH (add_policy_args).
+    place_user_claude_md
     # settings/keybindings as a COPY, vetted on the way back out.
     stage_shared_settings
     # Silent-log drift canary: note any top-level ~/.claude entry kib does not recognise.

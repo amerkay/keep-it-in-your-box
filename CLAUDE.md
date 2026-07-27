@@ -146,6 +146,10 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   `hooks`/`mcpServers` `command`), never the exec bit or a `#!`: most real skills ship a helper
   script, so that rule demotes `skills/` on first contact and buys nothing a prose "run this"
   wouldn't. (`redaction-config-guard.md`)
+- **Don't move the sandbox policy back into the assembled `CLAUDE.md`** — bound `:ro` at
+  `/etc/claude-code/CLAUDE.md` it outranks user memory, survives a repo's `claudeMdExcludes` and
+  cannot be edited from the box; the config-dir copy had none of the three.
+  (`container-lifecycle.md`)
 - **Don't put a hook back into the user's repos.** The checks live in `host/gitguard.sh` +
   `kib/host/gitaudit.py`, run at cold start, at teardown and on `kib audit`. Why a hook is not an
   option is in `kib/host/gitaudit.py`'s docstring. (`redaction-config-guard.md`)

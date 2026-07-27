@@ -51,7 +51,8 @@ legitimate need is a conversation, not a workaround.
 
 ## What persists
 
-`$CLAUDE_CONFIG_DIR` is this project's private state and carries across launches. The **user**
-`CLAUDE.md` you are reading does not: kib rebuilds it each launch from the user's canonical
-`~/.claude/CLAUDE.md`, so `#` memory written to it here is transient. Durable user memory has to
-be written from a host terminal; project memory and this repo's own `CLAUDE.md` persist normally.
+`$CLAUDE_CONFIG_DIR` is this project's private state and carries across launches. These rules are
+not part of it and are not the user's memory — they mount read-only from outside the box. The
+user's own `~/.claude/CLAUDE.md` is copied in fresh each launch, so `#` memory written to it in
+here is transient; durable user memory has to be written from a host terminal. Project memory and
+a repo's own `CLAUDE.md` persist normally.

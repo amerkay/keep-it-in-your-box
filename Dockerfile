@@ -160,6 +160,10 @@ RUN uv venv /opt/dev-tools \
     && chmod -R a+rX /opt/dev-tools \
     && ruff --version && mypy --version && pytest --version
 
+# Mountpoint parent for the sandbox rules: kib binds guest/policy/etc-CLAUDE.md over
+# /etc/claude-code/CLAUDE.md at run time. Above the version bump so it stays cached.
+RUN mkdir -p /etc/claude-code
+
 # Install Claude Code via official native installer
 # NOTE: everything below this line rebuilds on every Claude Code version bump.
 # Keep new apt/tooling layers ABOVE it so a routine upgrade stays a fast, cached build.

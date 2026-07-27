@@ -276,6 +276,9 @@ start_container() {
     # view over $PWD (:rslave). There is no second, unredacted path to it.
     ARGS+=(${REDACTION_ARGS[@]+"${REDACTION_ARGS[@]}"})
 
+    # The sandbox rules, read-only at Claude's managed-policy path (host/config.sh has the why).
+    add_policy_args
+
     # Clipboard mounts: the mediated Wayland socket on Linux (reads pass, writes refused), or
     # the pbpaste bridge spool on macOS. Both no-op if their sidecar/bridge didn't come up.
     if is_macos; then
@@ -478,6 +481,8 @@ kib_bring_up() {
         verify_redaction_attach
         # Same hazard: never attach as if the token were brokered when it is not.
         verify_broker_attach
+        # Same again for the sandbox policy, which is also fixed at creation (warn-only).
+        verify_policy_attach
         # And for the read-only mounts over the container's shared-assets dir, fixed at
         # creation too.
         if [ "$(running_unlocked && echo 1 || echo 0)" != "$UNLOCK_SHARED" ]; then

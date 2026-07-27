@@ -351,11 +351,13 @@ for d in skills agents commands; do
         skip "shared $d/ is writable (prompt text, shared on purpose)" "not present"
     fi
 done
-# CLAUDE.md is no longer a shared file — kib assembles it (policy + the user's canonical
-# memory) straight into the per-project config dir. Assert the policy actually loaded in-box.
-_cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude-session}"
-is "sandbox policy is assembled into the in-box CLAUDE.md" "present" \
-    "$(grep -q 'kib sandbox policy' "$_cfg/CLAUDE.md" 2>/dev/null && echo present || echo missing)"
+# The sandbox rules mount :ro at Claude's managed-policy path, not into the config dir: they
+# load ahead of user memory, no claudeMdExcludes can drop them, and the session cannot edit
+# them. A regression that moves them back into the config dir loses all three.
+_pol=/etc/claude-code/CLAUDE.md
+is "sandbox policy is mounted at the managed-policy path" "present" \
+    "$(grep -q 'kib sandbox' "$_pol" 2>/dev/null && echo present || echo missing)"
+deny "sandbox policy is read-only to the session" bash -c "echo probe >>'$_pol'"
 
 # settings.json is deliberately still writable — locking it would break /config.
 is "settings.json stays writable (/config must work)" "writable" \
