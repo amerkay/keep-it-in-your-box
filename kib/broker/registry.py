@@ -43,6 +43,13 @@ PROVIDERS: dict[str, dict[str, Any]] = {
         "inject_header": "Authorization",
         "inject_template": "Bearer {secret}",
         "strip_incoming": ["authorization", "x-api-key"],
+        # Path prefixes the box may reach with the real token attached. The origin was always
+        # pinned, so this is not about SSRF — it is about what the box can DO with an
+        # authenticated request it never sees the credential for. `/v1/` is the whole inference
+        # surface Claude Code uses; `/api/oauth/profile` is the read-only account lookup it
+        # makes at startup. Everything else on the account-management surface — key minting,
+        # organization writes — 404s here. (audit MAC-L2 / R3)
+        "allow_paths": ["/v1/", "/api/oauth/profile"],
         # Synthetic placeholder shadowing the real credential file in the container. Built
         # from this template — the broker NEVER reads the user's real .credentials.json.
         "placeholder_container_path": "/home/hostuser/.claude-shared/.credentials.json",
@@ -96,6 +103,7 @@ PROVIDERS: dict[str, dict[str, Any]] = {
         "inject_header": "Authorization",
         "inject_template": "Bearer {secret}",
         "strip_incoming": ["authorization"],
+        "allow_paths": ["/v1/"],
         "placeholder_container_path": "",
         "placeholder_template": None,
         "placeholder_fake_pointers": [],
@@ -113,6 +121,7 @@ PROVIDERS: dict[str, dict[str, Any]] = {
         "inject_header": "x-goog-api-key",
         "inject_template": "{secret}",
         "strip_incoming": ["authorization", "x-goog-api-key"],
+        "allow_paths": ["/v1beta/", "/v1/"],
         "placeholder_container_path": "",
         "placeholder_template": None,
         "placeholder_fake_pointers": [],
@@ -167,6 +176,10 @@ def _finalize_provider(pid: str, p: dict[str, Any]) -> dict[str, Any]:
     p.setdefault("mcp_server_name", pid)
     p.setdefault("mcp_path", "")
     p.setdefault("mcp_transport", "http")
+    # No allowlist = every path on the pinned upstream. The built-in LLM rows set one because
+    # their credential is the user's real account token and the path set Claude Code needs is
+    # known; a user MCP's endpoints are not, and guessing them wrong breaks the route silently.
+    p.setdefault("allow_paths", [])
     p.setdefault("placeholder_container_path", "")
     p.setdefault("placeholder_template", None)
     p.setdefault("placeholder_fake_pointers", [])

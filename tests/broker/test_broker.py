@@ -164,6 +164,60 @@ def test_a_trailing_newline_in_the_token_file_is_stripped(route: tuple[int, Any]
     assert route[1].current_secret() == REAL_SECRET
 
 
+# ── the path allowlist (audit MAC-L2 / R3) ───────────────────────
+# The origin was always pinned, so the credential could never be redirected. This is the other
+# half: what the box can DO against that origin with a token it never sees.
+@pytest.fixture
+def gated(upstream: int, token_file: Path) -> Iterator[int]:
+    provider = {
+        "upstream_origin": f"http://127.0.0.1:{upstream}",
+        "inject_header": "Authorization",
+        "inject_template": "Bearer {secret}",
+        "strip_incoming": [],
+        "listen_port": 0,
+        "allow_paths": ["/v1/", "/api/oauth/profile"],
+    }
+    cred = credential.Credential("claude", provider, str(token_file))
+    server = listen(proxy.make_handler(proxy.Route("claude", provider, cred)))
+    yield int(server.server_address[1])
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.mark.parametrize("path", ["/v1/messages", "/v1/messages?beta=true", "/api/oauth/profile"])
+def test_an_allowed_path_still_relays(gated: int, path: str) -> None:
+    """The query string is the caller's — `?beta=true` must not turn an allowed path away."""
+    assert post(gated, path=path)[0] == 200
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/oauth/claude_cli/create_api_key",  # the mint the audit reached for
+        "/api/organizations",
+        "/v1beta/models",  # a neighbouring prefix, not this route's
+        "/",
+        # The upstream normalises before it routes (RFC 3986), so an allowlist that matches the
+        # bytes we forward rather than the path they RESOLVE to is no allowlist at all.
+        "/v1/../api/oauth/claude_cli/create_api_key",
+        "/v1/./../api/organizations",
+        "/v1/..%2fapi/oauth/claude_cli/create_api_key",
+        # Prefix vs segment: `/api/oauth/profile` must not also mean everything spelled like it.
+        "/api/oauth/profileEVIL",
+    ],
+)
+def test_a_path_outside_the_allowlist_is_refused(gated: int, path: str) -> None:
+    _Upstream.seen = {}
+    assert post(gated, path=path)[0] == 404
+    assert _Upstream.seen == {}, "the request reached upstream with the real token attached"
+
+
+def test_every_llm_route_has_an_allowlist() -> None:
+    """A built-in row brokers the user's own account token; an unbounded one is the finding."""
+    for pid, p in registry.PROVIDERS.items():
+        assert p.get("allow_paths"), pid
+
+
 # ── the logout guards ────────────────────────────────────────────
 def test_placeholder_is_synthetic() -> None:
     """mint_placeholder takes (out_path, provider) only — thread a real-credential path back

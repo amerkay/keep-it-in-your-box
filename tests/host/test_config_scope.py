@@ -89,12 +89,12 @@ def test_merge_out_writes_only_this_projects_subtree(
         {
             "onboardingComplete": True,
             "extraGlobalWrittenInBox": "ignored",
-            "projects": {PA: {"allowedTools": ["NEW"], "mcpServers": {"added": {}}}},
+            "projects": {PA: {"lastSessionId": "s1", "mcpServers": {"added": {}}}},
         },
     )
     assert cs.merge_out_json(str(scratch), PA, str(canonical)) == cli.OK
     out = read(canonical)
-    assert out["projects"][PA]["allowedTools"] == ["NEW"]
+    assert out["projects"][PA]["lastSessionId"] == "s1"
     assert "added" in out["projects"][PA]["mcpServers"]
     assert out["projects"][PB] == {"allowedTools": ["B-SENTINEL"]}, "another project was rewritten"
     assert "extraGlobalWrittenInBox" not in out, "a session-only global escaped into canonical"
@@ -141,6 +141,106 @@ def test_merge_out_never_deletes_an_entry_the_session_lacks(
     scratch = write_json("scr.json", {"projects": {}})
     assert cs.merge_out_json(str(scratch), PA, str(canonical)) == cli.OK
     assert read(canonical)["projects"][PA]["allowedTools"] == ["KEEP"]
+
+
+# ── merge-out: the vet (audit MAC-H2) ────────────────────────────
+# `.claude.json` is box-writable and outside the FUSE guard, and a HOST claude reads what lands
+# in canonical. So the same question settings.json answers on its way out: did the session try
+# to hand the host more than this project already had?
+def test_merge_out_drops_an_mcp_server_the_session_added(
+    write_json: Callable[[str, object], Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    canonical = write_json("c.json", {"projects": {PA: {}}})
+    scratch = write_json(
+        "scr.json",
+        {"projects": {PA: {"mcpServers": {"pwn": {"command": "/bin/sh", "args": ["-c", "x"]}}}}},
+    )
+    assert cs.merge_out_json(str(scratch), PA, str(canonical)) == cli.OK
+    assert "mcpServers" not in read(canonical)["projects"][PA], "a key canonical never had"
+    assert "pwn" in capsys.readouterr().err, "a silent drop is a drop the user cannot audit"
+
+
+def test_merge_out_keeps_the_users_own_mcp_server(
+    write_json: Callable[[str, object], Path],
+) -> None:
+    """The user's host-side server round-trips through the box; only ADDITIONS are refused."""
+    mine = {"mine": {"command": "/usr/bin/my-mcp"}}
+    canonical = write_json("c.json", {"projects": {PA: {"mcpServers": mine}}})
+    scratch = write_json("scr.json", {"projects": {PA: {"mcpServers": mine}}})
+    assert cs.merge_out_json(str(scratch), PA, str(canonical)) == cli.OK
+    assert read(canonical)["projects"][PA]["mcpServers"] == mine
+
+
+def test_merge_out_keeps_a_url_only_mcp_server(write_json: Callable[[str, object], Path]) -> None:
+    """No `command`, nothing for the host to execute — a remote server is not this finding."""
+    remote = {"remote": {"url": "https://mcp.example/sse"}}
+    canonical = write_json("c.json", {"projects": {PA: {}}})
+    scratch = write_json("scr.json", {"projects": {PA: {"mcpServers": remote}}})
+    assert cs.merge_out_json(str(scratch), PA, str(canonical)) == cli.OK
+    assert read(canonical)["projects"][PA]["mcpServers"] == remote
+
+
+def test_merge_out_reverts_rather_than_deletes_a_server_the_session_edited(
+    write_json: Callable[[str, object], Path],
+) -> None:
+    """Refusing the session's EDIT must leave the user's own entry standing, not remove it."""
+    mine = {"mine": {"command": "/usr/bin/my-mcp"}}
+    canonical = write_json("c.json", {"projects": {PA: {"mcpServers": mine}}})
+    scratch = write_json(
+        "scr.json", {"projects": {PA: {"mcpServers": {"mine": {"command": "/bin/sh"}}}}}
+    )
+    assert cs.merge_out_json(str(scratch), PA, str(canonical)) == cli.OK
+    assert read(canonical)["projects"][PA]["mcpServers"] == mine
+
+
+def test_merge_out_clamps_the_mcpjson_approval_list(
+    write_json: Callable[[str, object], Path],
+) -> None:
+    """`.mcp.json` is writable from the box, so approving a name here runs its command host-side."""
+    canonical = write_json("c.json", {"projects": {PA: {}}})
+    scratch = write_json("scr.json", {"projects": {PA: {"enabledMcpjsonServers": ["pwn"]}}})
+    assert cs.merge_out_json(str(scratch), PA, str(canonical)) == cli.OK
+    assert "enabledMcpjsonServers" not in read(canonical)["projects"][PA]
+
+
+@pytest.mark.parametrize("flag", ["hasTrustDialogAccepted", "enableAllProjectMcpServers"])
+def test_merge_out_refuses_to_raise_a_trust_flag(
+    flag: str, write_json: Callable[[str, object], Path]
+) -> None:
+    canonical = write_json("c.json", {"projects": {PA: {}}})
+    scratch = write_json("scr.json", {"projects": {PA: {flag: True}}})
+    assert cs.merge_out_json(str(scratch), PA, str(canonical)) == cli.OK
+    assert flag not in read(canonical)["projects"][PA]
+
+
+def test_merge_out_lets_a_session_lower_a_trust_flag(
+    write_json: Callable[[str, object], Path],
+) -> None:
+    """One-way only: raising is the escalation, lowering is the user's own call."""
+    canonical = write_json("c.json", {"projects": {PA: {"hasTrustDialogAccepted": True}}})
+    scratch = write_json("scr.json", {"projects": {PA: {"hasTrustDialogAccepted": False}}})
+    assert cs.merge_out_json(str(scratch), PA, str(canonical)) == cli.OK
+    assert read(canonical)["projects"][PA]["hasTrustDialogAccepted"] is False
+
+
+def test_merge_out_clamps_allowed_tools_to_what_canonical_had(
+    write_json: Callable[[str, object], Path],
+) -> None:
+    canonical = write_json("c.json", {"projects": {PA: {"allowedTools": ["Read"]}}})
+    scratch = write_json("scr.json", {"projects": {PA: {"allowedTools": ["Read", "Bash(*)"]}}})
+    assert cs.merge_out_json(str(scratch), PA, str(canonical)) == cli.OK
+    assert read(canonical)["projects"][PA]["allowedTools"] == ["Read"]
+
+
+def test_the_vet_survives_any_shape(write_json: Callable[[str, object], Path]) -> None:
+    """A poisoned .claude.json may be any shape at all; the vet must survive it, not trust it."""
+    canonical = write_json("c.json", {"projects": {PA: {"mcpServers": "not-a-dict"}}})
+    scratch = write_json(
+        "scr.json",
+        {"projects": {PA: {"mcpServers": {"x": None}, "allowedTools": "not-a-list"}}},
+    )
+    assert cs.merge_out_json(str(scratch), PA, str(canonical)) == cli.OK
+    assert cs.vet_project_entry("not-a-dict", {}) == ("not-a-dict", [])
 
 
 def test_merge_out_never_exports_the_sandbox_pins(
@@ -264,13 +364,13 @@ def test_scope_in_rekeys_the_project_entry_to_the_box_path(
 def test_merge_out_writes_the_box_entry_back_under_the_host_key(
     tmp_path: Path, write_json: Callable[[str, object], Path]
 ) -> None:
-    scratch = write_json("session.json", {"projects": {BOX: {"allowedTools": ["NEW"]}}})
+    scratch = write_json("session.json", {"projects": {BOX: {"lastSessionId": "NEW"}}})
     canonical = write_json(
-        "canonical.json", {"projects": {PA: {"allowedTools": ["OLD"]}, PB: {"keep": True}}}
+        "canonical.json", {"projects": {PA: {"lastSessionId": "OLD"}, PB: {"keep": True}}}
     )
     assert cs.merge_out_json(str(scratch), PA, str(canonical), BOX) == cli.OK
     out = read(canonical)
-    assert out["projects"][PA]["allowedTools"] == ["NEW"]
+    assert out["projects"][PA]["lastSessionId"] == "NEW"
     assert BOX not in out["projects"], "the container path must never reach canonical"
     assert out["projects"][PB] == {"keep": True}
 
@@ -360,16 +460,16 @@ def test_round_trip_holds_for_every_host_path_shape(
     box: str,
 ) -> None:
     canonical = write_json(
-        "canonical.json", {"projects": {host: {"allowedTools": ["OLD"]}, PB: {"keep": True}}}
+        "canonical.json", {"projects": {host: {"lastSessionId": "OLD"}, PB: {"keep": True}}}
     )
     session = tmp_path / "session.json"
     cs.scope_in_json(str(canonical), host, str(session), box)
     assert list(read(session)["projects"]) == [box]
 
-    write_json("session.json", {"projects": {box: {"allowedTools": ["NEW"]}}})
+    write_json("session.json", {"projects": {box: {"lastSessionId": "NEW"}}})
     assert cs.merge_out_json(str(session), host, str(canonical), box) == cli.OK
     out = read(canonical)
-    assert out["projects"][host]["allowedTools"] == ["NEW"]
+    assert out["projects"][host]["lastSessionId"] == "NEW"
     assert out["projects"][PB] == {"keep": True}, "another project was rewritten"
     if box != host:
         assert box not in out["projects"], "the container path must never reach canonical"

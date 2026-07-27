@@ -161,28 +161,49 @@ validate_shared_settings() {
 KIB_ASSETS_LOCKED="plugins hooks"
 KIB_ASSETS_OPEN="skills agents commands"
 
-# ── Open asset trees: refuse a smuggled executable ───────────────
+# ── Open asset trees: refuse a smuggled command or an escaping symlink ───
 # Same placement and reasoning as validate_shared_settings above — vet on the host, before any
 # container reads it, on both the create and attach paths. Sets KIB_ASSETS_DEMOTED to the trees
 # that must mount :ro this launch; a clean tree stays writable. Never deletes or moves anything:
 # the file stays where you left it, and the banner names it.
+#
+# $1 = launch (default; demote the tree for this session) or teardown (nothing left to demote —
+# say it now, while the user still remembers the session that wrote it, instead of at the next
+# launch). Detection either way: these trees are plain bind mounts with nothing to interpose on.
 validate_shared_assets() {
-    KIB_ASSETS_DEMOTED=""
-    have_python || {
-        warn "python3 not found on the host — cannot vet the shared skills/agents/commands." \
-            "Mounting them read-only for this session."
-        KIB_ASSETS_DEMOTED="$KIB_ASSETS_OPEN"
+    local mode="${1:-launch}" _t bad
+    if [ "$mode" = launch ]; then KIB_ASSETS_DEMOTED=""; fi
+    if ! have_python; then
+        if [ "$mode" = launch ]; then
+            warn "python3 not found on the host — cannot vet the shared skills/agents/commands." \
+                "Mounting them read-only for this session."
+            KIB_ASSETS_DEMOTED="$KIB_ASSETS_OPEN"
+        fi
         return 0
-    }
-    local _t bad
+    fi
     for _t in $KIB_ASSETS_OPEN; do
         [ -d "$CLAUDE_HOME/$_t" ] || continue
         bad="$(kib_py host.asset_scan scan "$CLAUDE_HOME/$_t")" && continue
-        KIB_ASSETS_DEMOTED="$KIB_ASSETS_DEMOTED $_t"
         # shellcheck disable=SC2088  # the tilde is prose for the user, not a path we open
-        warn "~/.claude/$_t is read-only this session — it configures a command to RUN:" \
-            "$(printf '%s\n' "$bad" | sed 's/^/    /')" \
-            "These trees are shared BECAUSE nothing in them auto-runs. Remove it and relaunch."
+        if [ "$mode" = launch ]; then
+            KIB_ASSETS_DEMOTED="$KIB_ASSETS_DEMOTED $_t"
+            warn "~/.claude/$_t is read-only this session — it configures a command to RUN," \
+                "or links out of the tree:" \
+                "$(printf '%s\n' "$bad" | sed 's/^/    /')" \
+                "These trees are shared BECAUSE nothing in them auto-runs and nothing in them" \
+                "reads outside them. Remove it and relaunch."
+        else
+            # Already named at launch (this run's own scan, create or attach): the user has
+            # heard it, and repeating it every exit is how an alert stops being read. What is
+            # left is what THIS session added, which is the whole point of scanning here.
+            case " ${KIB_ASSETS_DEMOTED:-} " in *" $_t "*) continue ;; esac
+            warn "~/.claude/$_t now configures a command to RUN, or links out of the tree:" \
+                "$(printf '%s\n' "$bad" | sed 's/^/    /')" \
+                "It loads in EVERY project's next session and in your host claude, which is not" \
+                "sandboxed. Remove it — until you do, kib mounts this tree read-only."
+            notify critical "kib · shared $_t is no longer prompt-only" \
+                "Something in ~/.claude/$_t runs a command or links out of the tree."
+        fi
     done
     # Explicit: a loop whose last iteration ends on a false test returns 1, and under `set -e`
     # that aborts the launch with no message at all. Never end a launch-path function on a test.

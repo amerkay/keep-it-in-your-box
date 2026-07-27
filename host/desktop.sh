@@ -168,5 +168,7 @@ add_clipboard_bridge_args() {
 stop_clipboard_bridge() {
     is_macos || return 0
     kill_pgrp "${CLIP_STATE}.pid" # whole group: the bridge is its own (detach_pgrp)
-    rm -rf "$CLIP_STATE" 2>/dev/null || true
+    # .priv is the bridge's host-private staging dir (clipboard-bridge.sh). Its own EXIT trap
+    # normally clears it; this covers the SIGKILL that skips the trap.
+    rm -rf "$CLIP_STATE" "${CLIP_STATE}.priv" 2>/dev/null || true
 }

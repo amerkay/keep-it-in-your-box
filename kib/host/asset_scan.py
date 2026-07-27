@@ -1,4 +1,5 @@
-"""Scan a shared PROMPT-asset tree (`~/.claude/skills|agents|commands`) for an AUTO-run command.
+"""Scan a shared PROMPT-asset tree (`~/.claude/skills|agents|commands`) for what must not be
+shared: an AUTO-run command, or a symlink pointing out of the tree.
 
 Those three trees mount writable and shared with every project because they hold prompt text.
 With `plugins/` and `hooks/` locked, a skill directory is the obvious next parking spot for the
@@ -12,10 +13,17 @@ detected at all. Refusing the exec bit would therefore buy almost nothing while 
 ordinary skills — most non-trivial ones ship a helper script. So scripts pass, `command` does
 not.
 
-Limit worth knowing: JSON only. Hooks and MCP servers are configured in JSON (`hooks.json`,
-`.mcp.json`, `settings.json`), and the host has no YAML parser in the 3.9 stdlib.
+A symlink out of the tree is the other half, and it is a READ primitive rather than an exec
+one: these trees are host-backed and NOT behind the redaction FUSE, so `skills/x/SKILL.md ->
+~/.ssh/id_rsa` persists to host state, auto-loads into every future session and into the host's
+own unsandboxed `claude` — and the skill loader follows it and ingests the target. Content the
+box cannot read itself, delivered by the host. (audit MAC-M1)
 
-Prints one `path — command` line per finding. Exit: 0 clean · 1 findings · 4 unreadable (fail
+Two limits worth knowing: JSON only for commands (hooks and MCP servers are configured in JSON,
+and the host has no YAML parser in the 3.9 stdlib), and this is detection at launch/teardown,
+not prevention at write — these trees are plain bind mounts with no layer to interpose on.
+
+Prints one `path — finding` line per finding. Exit: 0 clean · 1 findings · 4 unreadable (fail
 closed: a file we cannot check must not pass into every project's next session).
 """
 
@@ -50,15 +58,41 @@ def commands_in(obj: Any, *, armed: bool = False) -> list[str]:
     return out
 
 
+def _escaped_target(full: str, root_real: str) -> str | None:
+    """The resolved target of *full* if it is a symlink landing outside the tree, else None.
+
+    Judged on the fully resolved target, so a chain through an in-tree link is followed to
+    where it really lands. A link that stays inside the tree is ordinary skill plumbing.
+    """
+    if not os.path.islink(full):
+        return None
+    target = os.path.realpath(full)
+    if target == root_real or target.startswith(root_real + os.sep):
+        return None
+    return target
+
+
 def scan(root: str) -> int:
     findings: list[str] = []
     root = root.rstrip(os.sep)  # else the depth below is off by one for a trailing slash
+    root_real = os.path.realpath(root)
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         if dirpath[len(root) :].count(os.sep) >= MAX_DEPTH:
             dirnames[:] = []
             continue
+        # Dirs as well as files: `skills/x -> ~/.ssh` shares a whole directory, and the walk
+        # does not descend into it (followlinks=False), so this is its only sighting.
+        escaping = set()
+        for name in dirnames + filenames:
+            full = os.path.join(dirpath, name)
+            target = _escaped_target(full, root_real)
+            if target is not None:
+                escaping.add(name)
+                findings.append(f"{full} — a symlink out of the tree, to {target}")
         for name in filenames:
-            if not name.endswith(".json"):
+            # Already a finding, and opening it would pull the out-of-tree target's contents
+            # in here — the very thing this refuses to let a skill do.
+            if not name.endswith(".json") or name in escaping:
                 continue
             full = os.path.join(dirpath, name)
             try:

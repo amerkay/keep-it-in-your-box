@@ -411,7 +411,14 @@ class Redact(Operations):  # type: ignore[misc]
         except (OSError, UnicodeDecodeError):
             old = set()
         added = new - old
-        for section, key, _ in sorted(added):
+        for entry in sorted(added):
+            if entry == dangerous.AMBIGUOUS_ENTRY:
+                log.error(
+                    "kib-fuse: refusing git config write — it holds a BOM, a lone CR or a "
+                    "Unicode line separator, so what git resolves cannot be read off it"
+                )
+                continue
+            section, key, _ = entry
             log.error(
                 "kib-fuse: refusing git config write — '%s.%s' names a command the host "
                 "would execute",

@@ -109,6 +109,44 @@ done
 is "a text write reaches pbcopy with the paste escape stripped" "kib[201~probe" \
     "$(cat "$_clip_tmp/pasteboard" 2>/dev/null)"
 
+# MAC-C1 — the transport, not the filter. The spool is bind-mounted rw into the box, so anything
+# the host REDIRECTS into it follows a symlink the box planted (host file truncated and
+# rewritten), and anything it re-opens by path is a race that lands unsanitised bytes on the real
+# pasteboard. One property covers both: the host stages in $DIR.priv and only ever `mv`s in.
+# Driven here rather than in security-test.sh because that suite's macOS section cannot run on a
+# Linux host — this harness drives the real bridge on either. (`clipboard-and-dns.md`)
+_clip_wait() { # _clip_wait <id>
+    _clip_i=0
+    while [ ! -e "$_clip_tmp/spool/done.$1" ] && [ "$_clip_i" -lt 100 ]; do
+        sleep 0.05
+        _clip_i=$((_clip_i + 1))
+    done
+}
+for _n in clean err; do
+    _id="mac-c1.$_n"
+    printf 'ORIGINAL' >"$_clip_tmp/victim.$_n"
+    ln -s "$_clip_tmp/victim.$_n" "$_clip_tmp/spool/$_n.$_id"
+    printf 'kib-mac-c1-probe' >"$_clip_tmp/spool/data.$_id"
+    rm -f "$_clip_tmp/pasteboard"
+    printf 'write\n' >"$_clip_tmp/spool/req.$_id"
+    _clip_wait "$_id"
+    is "MAC-C1 a planted $_n.<id> symlink is not followed" "ORIGINAL" \
+        "$(cat "$_clip_tmp/victim.$_n" 2>/dev/null)"
+done
+# …and the write still worked, so the fix is not "refuse everything".
+is "regression: the write still reached pbcopy" "kib-mac-c1-probe" \
+    "$(cat "$_clip_tmp/pasteboard" 2>/dev/null)"
+# Structural half: with nothing planted, the host must still leave no staging file behind in the
+# spool — that is what makes the symlink unplantable in the first place.
+printf 'plain' >"$_clip_tmp/spool/data.mac-c1.bare"
+printf 'write\n' >"$_clip_tmp/spool/req.mac-c1.bare"
+_clip_wait mac-c1.bare
+is "MAC-C1 the bridge stages nothing in the spool" "0" \
+    "$(find "$_clip_tmp/spool" -maxdepth 1 -type f \( -name 'clean.*' -o -name 'err.*' \) \
+        | wc -l | tr -d ' ')"
+rm -f "$_clip_tmp/spool"/*.mac-c1.* "$_clip_tmp/victim."* 2>/dev/null
+unset _clip_i _n _id
+
 # Text only, exactly like the Wayland side: the filter says nothing about bytes it cannot read
 # as text, so a non-text flavour is refused at the shim and leaves the marker the host alerts on.
 rm -f "$_clip_tmp/spool"/deny.* "$_clip_tmp/pasteboard" 2>/dev/null
@@ -134,3 +172,4 @@ kill "$_clip_host_pid" 2>/dev/null
 rm -rf "$_clip_tmp"
 wait "$_clip_host_pid" 2>/dev/null || true
 unset _clip_tmp _clip_host_pid _clip_budget _s _mark _req _id
+unset -f _clip_wait

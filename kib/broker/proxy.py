@@ -15,6 +15,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import posixpath
 import ssl
 import threading
 import time
@@ -66,6 +67,32 @@ class Route:
         self.inject_header: str = provider["inject_header"]
         self.inject_template: str = provider["inject_template"]
         self.listen_port: int = int(provider.get("listen_port") or MCP_PORT)
+        self.allow_paths: tuple[str, ...] = tuple(provider.get("allow_paths") or ())
+        # Trailing slash off once, here: `allows` compares segment-wise, so `/v1/` and `/v1`
+        # are the same rule and normpath never leaves a trailing slash to match against.
+        self._allow_bases: tuple[str, ...] = tuple(p.rstrip("/") or "/" for p in self.allow_paths)
+
+    def allows(self, upstream_path: str) -> bool:
+        """True if this is a path the route may reach with the real credential attached.
+
+        The upstream ORIGIN was always pinned, so the box could never redirect the credential
+        anywhere — but with no path check it could still drive any authenticated request the
+        token permits AT that origin (account reads, key minting). Judged on the path the
+        upstream will see, so the mux's `/mcp/<id>` prefix is already off, and on the path
+        component only: the query is the caller's, and `?beta=true` must not turn an allowed
+        path into a refused one. Empty allowlist = unrestricted, which is what every user MCP
+        route gets — see registry._finalize_provider. (audit MAC-L2 / R3)
+
+        Decided on the path the upstream RESOLVES, not the bytes we forward: percent-escapes
+        are decoded and `.`/`..` collapsed first, or `/v1/../api/oauth/…/create_api_key` walks
+        straight through a `/v1/` prefix and the origin's own RFC 3986 normalisation lands it
+        on the endpoint this exists to refuse. Matched on segment boundaries for the same
+        reason `/api/oauth/profile` must not also mean `/api/oauth/profileEVIL`.
+        """
+        if not self.allow_paths:
+            return True
+        path = posixpath.normpath(urllib.parse.unquote(urllib.parse.urlsplit(upstream_path).path))
+        return any(path == p or path.startswith(p + "/") for p in self._allow_bases)
 
 
 def _do_relay(h: BaseHTTPRequestHandler, route: Route, upstream_path: str, body: bytes) -> None:
@@ -159,6 +186,10 @@ class _RelayHandler(BaseHTTPRequestHandler):
                 return
             route, upstream_path = resolved
             pid = route.pid
+            if not route.allows(upstream_path):
+                stdout_line(f"BROKER-DENY-PATH {pid} {self.command} {upstream_path}")
+                self.send_error(404, "path not brokered")
+                return
             _do_relay(self, route, upstream_path, body)
         except (BrokenPipeError, ConnectionResetError) as e:
             # A peer went away mid-relay: the agent cancelled a turn, a subagent finished, or

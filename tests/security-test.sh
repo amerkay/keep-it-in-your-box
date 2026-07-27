@@ -236,6 +236,17 @@ deny "C5b # inside a quoted subsection name" \
     config_rename "$REPO" "$(printf '[core]\n\trepositoryformatversion = 0\n[filter "a#b"]clean = true')"
 resolves_to_nothing "C5  the quoted-] driver resolves to nothing" "$REPO" 'filter.e]v.clean'
 
+# MAC-C2 / MAC-H1: git NORMALISES before it parses — it drops a leading UTF-8 BOM and ends a
+# line at \n only. A parser using str.strip()/str.splitlines() does neither, so a BOM or a
+# U+2028 inside a quoted subsection breaks the header for it and not for git.
+deny "MAC-C2 leading BOM before [core]fsmonitor" \
+    config_rename "$REPO" "$(printf '\xef\xbb\xbf[core]fsmonitor = /tmp/fsm.sh')"
+deny "MAC-H1 U+2028 inside a quoted subsection name" \
+    config_rename "$REPO" "$(printf '[core]\n\trepositoryformatversion = 0\n[filter "\xe2\x80\xa8x"]clean = true')"
+deny "MAC-H1b NEL (U+0085) inside a quoted subsection name" \
+    config_rename "$REPO" "$(printf '[core]\n\trepositoryformatversion = 0\n[filter "\xc2\x85x"]clean = true')"
+resolves_to_nothing "MAC-C2 the BOM'd fsmonitor resolves to nothing" "$REPO" core.fsmonitor
+
 deny "C2  hardlink aliases the protected inode" ln "$REPO/.git/config" "$ARTIFACTS/aliased-config"
 deny "    write into .git/hooks" bash -c "mkdir -p '$REPO/.git/hooks'; echo x > '$REPO/.git/hooks/pre-commit'"
 
@@ -314,6 +325,13 @@ for p in .cursor/rules/style.md .claude/commands/deploy.md .claude/settings.json
     allow "regression: $p stays writable (detected host-side, not refused)" \
         bash -c "mkdir -p \"\$(dirname '$ARTIFACTS/$p')\" 2>/dev/null; echo '{}' > '$ARTIFACTS/$p'"
 done
+
+# Protection covers DELETION too, everywhere and without exception — a delete is half of a
+# replace, and what is removed here is what a host `git checkout` puts straight back. Probed on
+# a FIXTURE .git/config: if the guard ever regressed the only casualty is one the next run
+# rebuilds. (Consequence worth knowing: a guarded path that is also tracked cannot be checked
+# out in the box at all, so `git worktree add`/`clone` of such a repo fails — by design.)
+deny "a guarded path cannot be DELETED, only read" rm -f "$REPO/.git/config"
 
 # ═════════════════════════════════════════════════════════════════
 section "Redaction — .env and .kibignore"
@@ -562,10 +580,68 @@ if [ -f "$KIB_ROOT/host/config.sh" ] && command -v python3 >/dev/null; then
     deny "refuses env.LD_PRELOAD" validator '{"env":{"LD_PRELOAD":"/tmp/e.so"}}'
     deny "refuses env.GIT_SSH_COMMAND" validator '{"env":{"GIT_SSH_COMMAND":"/tmp/e.sh"}}'
     deny "refuses env.PATH override" validator '{"env":{"PATH":"/tmp/evil:/usr/bin"}}'
+    # MAC-H3/L1: the Vertex auth helper (4th sink of CVE-2026-35022) and the DYLD siblings of
+    # the two already listed — one missing key is a live path on a host configured for it.
+    deny "MAC-H3 refuses gcpAuthRefresh" validator '{"gcpAuthRefresh":"/tmp/x.sh"}'
+    deny "MAC-L1 refuses env.DYLD_FRAMEWORK_PATH" validator '{"env":{"DYLD_FRAMEWORK_PATH":"/tmp/e"}}'
+    deny "MAC-L1 refuses env.DYLD_FALLBACK_LIBRARY_PATH" \
+        validator '{"env":{"DYLD_FALLBACK_LIBRARY_PATH":"/tmp/e"}}'
     allow "accepts an ordinary settings file" validator '{"theme":"dark","env":{"EDITOR":"vim"}}'
     allow "regression: benign env prefs (EDITOR/PAGER) are not flagged" \
         validator '{"env":{"EDITOR":"vim","PAGER":"less","LANG":"en_US.UTF-8"}}'
     allow "malformed JSON warns, does not block" validator '{not json'
+
+    # MAC-M1: the open prompt trees are host-backed and outside the redaction FUSE, so a
+    # SKILL.md symlinked at a host file is read by every future session and by the host's own
+    # claude. The scanner is the backstop; a benign target here, never a real key.
+    # shellcheck disable=SC2317,SC2329  # invoked indirectly — `deny` runs it via "$@"
+    asset_probe() { # asset_probe <symlink target> — 0 clean, 1 findings
+        local d rc
+        d="$(mktemp -d)"
+        mkdir -p "$d/skills/x"
+        printf 'prose\n' >"$d/skills/x/real.md"
+        ln -s "$1" "$d/skills/x/SKILL.md"
+        PYTHONPATH="$KIB_ROOT" python3 -m kib.host.asset_scan scan "$d/skills" >/dev/null 2>&1
+        rc=$?
+        rm -rf "$d"
+        return "$rc"
+    }
+    deny "MAC-M1 a skill symlinked out of the tree is flagged" asset_probe /etc/hostname
+    allow "regression: an in-tree symlink is not flagged" asset_probe real.md
+
+    # MAC-H2: `.claude.json` is box-writable (it is what `claude mcp add` writes) and lives
+    # outside the FUSE-guarded tree, so the merge-out is the only thing between a session and
+    # the next HOST claude's MCP servers and trust flags. Driven against throwaway files; the
+    # real ~/.claude.json is never opened.
+    # shellcheck disable=SC2317,SC2329  # invoked indirectly — `is` runs it via "$@"
+    mergeout_probe() { # mergeout_probe <canonical json> <session json> — echoes the result
+        local d
+        d="$(mktemp -d)"
+        printf '%s' "$1" >"$d/canonical.json"
+        printf '%s' "$2" >"$d/session.json"
+        PYTHONPATH="$KIB_ROOT" python3 -m kib.host.config_scope merge-out-json \
+            "$d/session.json" /p "$d/canonical.json" /p >/dev/null 2>&1
+        python3 -c "
+import json,sys
+e = json.load(open(sys.argv[1]))['projects']['/p']
+print('%s|%s|%s' % (sorted(e.get('mcpServers') or {}),
+                    e.get('hasTrustDialogAccepted'), e.get('allowedTools')))" "$d/canonical.json"
+        rm -rf "$d"
+    }
+    # A session that adds a local MCP server + raises every trust flag hands the host nothing.
+    is "MAC-H2 an added mcpServers.command is not merged into canonical" "[]|None|None" \
+        "$(mergeout_probe '{"projects":{"/p":{}}}' \
+            '{"projects":{"/p":{"mcpServers":{"pwn":{"command":"/bin/sh"}},
+             "hasTrustDialogAccepted":true,"allowedTools":["Bash(*)"]}}}')"
+    # The user's OWN host-side server and flags must survive the round trip untouched —
+    # a vet that drops them would quietly delete the project's real config every exit.
+    is "regression: the user's own MCP server and trust flags round-trip" \
+        "['mine']|True|['Read']" \
+        "$(mergeout_probe \
+            '{"projects":{"/p":{"mcpServers":{"mine":{"command":"/usr/bin/m"}},
+              "hasTrustDialogAccepted":true,"allowedTools":["Read"]}}}' \
+            '{"projects":{"/p":{"mcpServers":{"mine":{"command":"/usr/bin/m"}},
+              "hasTrustDialogAccepted":true,"allowedTools":["Read"]}}}')"
 else
     skip "shared settings validator" "host units or python3 unavailable"
 fi
@@ -605,6 +681,50 @@ else
     deny "a non-text flavour is refused (raises a host alert)" \
         bash -c "printf x | timeout 5 wl-copy --type image/png"
     allow "regression: clipboard READ still works" timeout 5 wl-paste --list-types
+fi
+
+# ═════════════════════════════════════════════════════════════════
+section "macOS clipboard bridge transport (MAC-C1)"
+
+# The Linux guard sanitises in flight through the compositor's pipe, so it has no staging file
+# and this class cannot exist there. The macOS bridge has to spool — and the spool is bind-
+# mounted rw in here, so anything the host redirects into it follows a symlink we plant (host
+# file truncated and overwritten), and anything it re-opens by path is a TOCTOU window that
+# lands unsanitised bytes on the real pasteboard. Both are one property: the host stages in a
+# private dir and only ever `mv`s the answer in.
+#
+# Pointed at an in-spool victim, never a real host file. A real attack names ~/.zshrc.
+# shellcheck disable=SC2317,SC2329  # invoked indirectly — `allow` runs it via "$@"
+_clip_symlink_probe() { # $1 = the spool name to pre-plant as a symlink
+    _id="sectest.$$.$1"
+    printf 'ORIGINAL\n' >"/kib-clip/victim.$_id"
+    ln -s "victim.$_id" "/kib-clip/$1.$_id"
+    printf 'kib-sectest-clip-marker' >"/kib-clip/data.$_id"
+    printf 'write\n' >"/kib-clip/req.$_id"
+    _i=0
+    while [ ! -e "/kib-clip/done.$_id" ] && [ "$_i" -lt 100 ]; do
+        sleep 0.05
+        _i=$((_i + 1))
+    done
+    _got="$(cat "/kib-clip/victim.$_id" 2>/dev/null)"
+    rm -f "/kib-clip/victim.$_id" "/kib-clip/$1.$_id" "/kib-clip/data.$_id" \
+        "/kib-clip/req.$_id" "/kib-clip/resp.$_id" "/kib-clip/done.$_id" 2>/dev/null
+    [ "$_got" = ORIGINAL ] || {
+        echo "the host wrote through the symlink: $_got"
+        return 1
+    }
+}
+
+if [ ! -d /kib-clip ]; then
+    skip "the bridge never stages in the spool" "no /kib-clip (Linux hosts use the Wayland guard)"
+elif [ "$DO_CLIPBOARD" = 0 ]; then
+    skip "the bridge never stages in the spool" "--no-clipboard"
+else
+    # NOTE: like the Wayland probe above, this leaves a benign marker on the real clipboard.
+    allow "a pre-planted clean.<id> symlink is not followed" _clip_symlink_probe clean
+    allow "a pre-planted err.<id> symlink is not followed" _clip_symlink_probe err
+    allow "regression: an ordinary clipboard write still reaches the host" \
+        bash -c "printf 'kib-sectest-clip' | timeout 5 wl-copy"
 fi
 
 # ═════════════════════════════════════════════════════════════════
@@ -661,6 +781,29 @@ except Exception:
 
     # The broker's real credential + config live in the broker container only — never here.
     deny "the broker's /run/broker is absent from the agent container" test -e /run/broker
+
+    # MAC-L2: the origin was always pinned, so the credential can never be redirected — this is
+    # the other half, what the box can DO at that origin with a token it never sees. Told apart
+    # by WHO answered, not by the status: the broker's own refusal carries "path not brokered",
+    # while a forwarded request comes back with whatever upstream said. `/api/hello` is a benign
+    # GET chosen so that a regression here forwards something harmless, not a key mint.
+    broker_says() { # broker_says <path> — "refused" if the BROKER answered, else "forwarded"
+        python3 - "$ANTHROPIC_BASE_URL" "$1" <<'PY' 2>/dev/null || echo unreachable
+import sys, urllib.error, urllib.request
+req = urllib.request.Request(sys.argv[1].rstrip("/") + sys.argv[2], method="GET")
+try:
+    body = urllib.request.urlopen(req, timeout=15).read()
+except urllib.error.HTTPError as e:
+    body = e.read()
+print("refused" if b"path not brokered" in body else "forwarded")
+PY
+    }
+    is "MAC-L2 an unbrokered path is refused by the broker, not forwarded with the token" \
+        "refused" "$(broker_says /api/hello)"
+    # The regression half: the allowlist must not wall off the inference surface the agent
+    # needs. Asserted on the broker's verdict only — upstream's own status is not ours.
+    is "regression: the inference surface still reaches upstream" \
+        "forwarded" "$(broker_says /v1/models)"
 
     # Regression: brokering must not break the agent reaching the broker, nor host/LAN.
     allow "regression: the broker alias 'kib-broker' resolves" \

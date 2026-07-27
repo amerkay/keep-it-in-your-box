@@ -249,6 +249,19 @@ def test_lookalike_and_mixed_use_paths_are_not_protected(
     assert redact("")._protected("/" + path) is False
 
 
+@pytest.mark.parametrize(
+    "path", ["/.vscode/settings.json", "/.git/config", "/sub/.githooks/pre-push", "/.envrc"]
+)
+def test_a_guarded_path_cannot_be_deleted_either(redact: Callable[..., Any], path: str) -> None:
+    """Protection covers unlink/rmdir, not only the write: a delete is half of a REPLACE, and
+    what is deleted here is the file a host `git checkout` puts straight back. The cost is that
+    a guarded path which is also TRACKED cannot be checked out in the box at all — see
+    redaction-config-guard.md."""
+    with pytest.raises(OSError) as exc:
+        redact("").unlink(path)
+    assert exc.value.errno == errno.EPERM
+
+
 def test_a_project_cannot_un_protect_its_own_git_config(redact: Callable[[str], Any]) -> None:
     assert redact("!.git/config\n")._protected("/.git/config") is True
 

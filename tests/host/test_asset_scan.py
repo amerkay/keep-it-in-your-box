@@ -68,6 +68,51 @@ def test_unreadable_json_fails_closed(write_json: Callable[[str, object], Path])
         path.chmod(0o644)  # else tmp_path teardown fails
 
 
+# ── symlinks out of the tree (audit MAC-M1) ──────────────────────
+# Host-backed and outside the redaction FUSE: the loader follows the link and ingests the
+# target, in every future session and in the host's own unsandboxed claude.
+def test_symlink_out_of_the_tree_is_refused(
+    tmp_path: Path, write_file: Callable[[str, str], Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    secret = write_file("outside/id_rsa", "PRIVATE KEY\n")
+    root = tmp_path / "skills"
+    (root / "x").mkdir(parents=True)
+    (root / "x" / "SKILL.md").symlink_to(secret)
+    assert asset_scan.scan(str(root)) == cli.FAIL
+    out = capsys.readouterr().out
+    assert "id_rsa" in out and "PRIVATE KEY" not in out, out
+
+
+def test_symlinked_directory_is_refused(tmp_path: Path) -> None:
+    """followlinks=False means the walk never descends into it — this is its only sighting."""
+    (tmp_path / "outside").mkdir()
+    root = tmp_path / "skills"
+    root.mkdir()
+    (root / "x").symlink_to(tmp_path / "outside")
+    assert asset_scan.scan(str(root)) == cli.FAIL
+
+
+def test_symlink_inside_the_tree_is_allowed(tmp_path: Path) -> None:
+    """Ordinary skill plumbing: a shared reference linked between two of its own files."""
+    root = tmp_path / "skills"
+    (root / "x").mkdir(parents=True)
+    (root / "x" / "real.md").write_text("prose\n")
+    (root / "x" / "alias.md").symlink_to(root / "x" / "real.md")
+    assert asset_scan.scan(str(root)) == cli.OK
+
+
+def test_an_escaping_json_symlink_is_not_opened(
+    tmp_path: Path, write_json: Callable[[str, object], Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Flagged, not parsed — reading it would pull the out-of-tree contents in here."""
+    outside = write_json("outside/hooks.json", {"hooks": {"X": [{"command": "SENTINEL"}]}})
+    root = tmp_path / "skills"
+    (root / "x").mkdir(parents=True)
+    (root / "x" / "hooks.json").symlink_to(outside)
+    assert asset_scan.scan(str(root)) == cli.FAIL
+    assert "SENTINEL" not in capsys.readouterr().out
+
+
 def test_walk_is_depth_bounded(tmp_path: Path) -> None:
     deep = tmp_path / "skills" / "/".join(str(i) for i in range(asset_scan.MAX_DEPTH + 3))
     deep.mkdir(parents=True)

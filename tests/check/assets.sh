@@ -92,11 +92,11 @@ t_vet_open_trees() {
     mkdir -p "$CLAUDE_HOME/skills/helper/scripts"
     printf '#!/usr/bin/env python3\nprint(1)\n' >"$CLAUDE_HOME/skills/helper/scripts/go.py"
     chmod +x "$CLAUDE_HOME/skills/helper/scripts/go.py"
-    validate_shared_assets >/dev/null 2>&1
+    validate_shared_assets launch >/dev/null 2>&1
     is "vetting: a bundled helper script does not demote the tree" "" "${KIB_ASSETS_DEMOTED# }"
 
     printf '{"mcpServers":{"x":{"command":"curl evil"}}}\n' >"$CLAUDE_HOME/skills/helper/x.json"
-    validate_shared_assets >/dev/null 2>&1
+    validate_shared_assets launch >/dev/null 2>&1
     case "${KIB_ASSETS_DEMOTED:-}" in
         *skills*) pass "vetting: an mcpServers command demotes the tree to :ro" ;;
         *) fail "vetting missed an auto-running command" "DEMOTED='${KIB_ASSETS_DEMOTED:-}'" ;;

@@ -20,6 +20,13 @@
 #              never reads a half-written file); for a write, `ok` and only on success
 #   done.<id>  host → container: empty marker, written AFTER resp — the container waits on it
 #   deny.<id>  container → host: a write the SHIM itself refused (non-text); the host alerts
+#
+# NOTHING is ever written into the spool by a shell redirect, and nothing the host later
+# re-opens lives there. Every answer is built in $PRIV and `mv`d in: the spool is bind-mounted
+# rw, so a `>` there follows a symlink the box planted (arbitrary host-file overwrite) and a
+# path re-opened after it was written is a TOCTOU window (unsanitised bytes onto the real
+# pasteboard). rename(2) replaces the destination and never follows it, which closes both.
+# (audit MAC-C1)
 
 DIR="${1:?usage: clipboard-bridge.sh <spool-dir> <project-name>}"
 NAME="${2:-project}"
@@ -27,6 +34,22 @@ LAST_ALERT=0
 # Exec'd, never sourced, so `kib_py` from host/core.sh is out of reach — this mirrors it
 # exactly (PYTHONPATH per-invocation, never exported; parameters in argv).
 KIB_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Staging, host-private. A SIBLING of the spool, not a mktemp: same filesystem, so `mv` into
+# the spool is an atomic rename rather than a copy the container could read half of. 0700 and
+# never bind-mounted, so the box cannot reach it at all. Also removed by stop_clipboard_bridge,
+# for the SIGKILL that skips this trap.
+PRIV="$DIR.priv"
+rm -rf "$PRIV" 2>/dev/null
+(umask 077 && mkdir -p "$PRIV") || exit 1
+trap 'rm -rf "$PRIV" 2>/dev/null' EXIT
+trap 'rm -rf "$PRIV" 2>/dev/null; exit 0' INT TERM
+
+# The only way anything reaches the spool. Staging names are fixed, not per-id: the request
+# loop below is strictly serial, so exactly one request is in flight at a time.
+publish() { # $1 = file in $PRIV, $2 = name in the spool
+    mv -f "$PRIV/$1" "$DIR/$2" 2>/dev/null
+}
 
 # Write one pasteboard flavour to a file; non-zero (and no file) if it cannot be coerced.
 # The only place that speaks AppleScript, so `list` and `png` cannot disagree about what
@@ -60,12 +83,8 @@ grab_png() { # $1 = destination
 serve_read() { # $1 = request id, $2 = type
     id="$1"
     type="$2"
-    tmp="$DIR/resp.$id.tmp"
-    out="$DIR/resp.$id"
-    # The spool is bind-mounted rw, so the container could pre-plant these paths as symlinks to
-    # host files, and `: >` would follow one and truncate the target. rm removes the symlink
-    # itself, so the writes below always land on fresh regular files inside the spool.
-    rm -f "$tmp" "$out" "$DIR/done.$id" 2>/dev/null
+    tmp="$PRIV/resp" # host-private: see the $PRIV comment — never a path in the spool
+    rm -f "$tmp" "$DIR/resp.$id" "$DIR/done.$id" 2>/dev/null
     case "$type" in
         # Liveness probe (start_clipboard_bridge). Deliberately never touches the pasteboard:
         # a launch-time clipboard read would be a TCC prompt and a needless copy of the user's
@@ -77,14 +96,14 @@ serve_read() { # $1 = request id, $2 = type
         list)
             # Answered by the same extraction `png` uses, so "offered" always means "readable".
             : >"$tmp"
-            if grab_png "$DIR/probe.$id"; then printf 'image/png\n' >"$tmp"; fi
-            rm -f "$DIR/probe.$id" 2>/dev/null
+            if grab_png "$PRIV/probe"; then printf 'image/png\n' >"$tmp"; fi
+            rm -f "$PRIV/probe" 2>/dev/null
             printf 'text/plain\n' >>"$tmp"
             ;;
         png) grab_png "$tmp" || : >"$tmp" ;;
         *) pbpaste >"$tmp" 2>/dev/null || : >"$tmp" ;;
     esac
-    mv -f "$tmp" "$out" 2>/dev/null
+    publish resp "resp.$id"
 }
 
 # One alert per 30s, so a wl-copy loop cannot spam the desktop. terminal-notifier first when
@@ -104,26 +123,34 @@ notify_clip() { # $1 = title suffix, $2 = body
 
 # The ONLY path to pbcopy, and it never gets the container's bytes unfiltered. `resp` is
 # written only on success — the shim reads its presence as the exit code.
+#
+# The sanitised bytes are staged in $PRIV and pbcopy re-opens them THERE. Staged in the spool
+# they were writable by the box between the filter and pbcopy — a race that put an unfiltered
+# paste-escape on the real pasteboard — and `>clean.$id` followed a symlink planted at that
+# path, writing the clipboard into any host file the user can write. (audit MAC-C1)
 serve_write() { # $1 = request id
     id="$1"
-    rm -f "$DIR/resp.$id" "$DIR/done.$id" 2>/dev/null
+    rm -f "$DIR/resp.$id" "$DIR/done.$id" "$PRIV/clean" "$PRIV/err" 2>/dev/null
     if ! command -v python3 >/dev/null 2>&1; then
         notify_clip "clipboard write blocked" "No python3 on the host, so the sandbox's write could not be sanitised. Blocked."
         return
     fi
     # The count of stripped characters comes back on STDERR, because stdout carries the bytes.
     if ! PYTHONPATH="$KIB_ROOT" python3 -m kib.shared.clipboard "$DIR/data.$id" \
-        >"$DIR/clean.$id" 2>"$DIR/err.$id"; then
+        >"$PRIV/clean" 2>"$PRIV/err"; then
         notify_clip "clipboard write blocked" \
             "A clipboard write from the sandbox was refused — unreadable, a symlink, or over 1 MiB. Your clipboard is unchanged."
-        rm -f "$DIR/clean.$id" "$DIR/err.$id" 2>/dev/null
+        rm -f "$PRIV/clean" "$PRIV/err" 2>/dev/null
         return
     fi
-    stripped="$(cat "$DIR/err.$id" 2>/dev/null)"
-    pbcopy <"$DIR/clean.$id" 2>/dev/null && printf 'ok\n' >"$DIR/resp.$id"
+    stripped="$(cat "$PRIV/err" 2>/dev/null)"
+    if pbcopy <"$PRIV/clean" 2>/dev/null; then
+        printf 'ok\n' >"$PRIV/resp"
+        publish resp "resp.$id"
+    fi
     [ "$stripped" = 0 ] || notify_clip "clipboard write cleaned" \
         "Control characters were stripped from a write by the sandbox — your next paste is safe."
-    rm -f "$DIR/clean.$id" "$DIR/err.$id" 2>/dev/null
+    rm -f "$PRIV/clean" "$PRIV/err" 2>/dev/null
 }
 
 # The dir vanishing (teardown removed it) ends the loop; the process group is killed anyway.
@@ -145,7 +172,7 @@ while [ -d "$DIR" ]; do
             write) serve_write "$id" ;;
             *) serve_read "$id" "$type" ;;
         esac
-        : >"$DIR/done.$id"
+        : >"$PRIV/done" && publish 'done' "done.$id" # quoted: `done` is a shell keyword
         rm -f "$req" "$DIR/data.$id" 2>/dev/null
     done
     for d in "$DIR"/deny.*; do

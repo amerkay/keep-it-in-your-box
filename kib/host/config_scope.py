@@ -15,8 +15,8 @@ below). Canonical is always keyed by the host path; the session by the box path.
 
     merge-out-json <scratch .claude.json> <project-path> <canonical .claude.json> <box-path>
         Read-modify-write ONLY the `projects[box]` subtree back into `projects[path]`, leaving
-        every global key and every other project untouched. Fail-closed: an unparseable file
-        writes nothing.
+        every global key and every other project untouched, and only after the subtree passes
+        `vet_project_entry`. Fail-closed: an unparseable file writes nothing.
 
     seed-history   <src history.jsonl> <project-path> <dst> <box-path>
         Filter canonical prompt history to this project's lines (↑ shows only this project),
@@ -106,6 +106,89 @@ PINNED_GLOBALS = ("leftArrowOpensAgents",)
 def _globals_only(cfg: dict[str, Any]) -> dict[str, Any]:
     """Every key except the project-scoped ones."""
     return {k: v for k, v in cfg.items() if k not in GLOBAL_ONLY_DROP}
+
+
+# ── The merge-out vet ───────────────────────────────────────────────────────
+# `projects[path]` carries approved tools, MCP servers and trust flags, and a HOST `claude`
+# reads it unsandboxed. `.claude.json` is box-writable (it is what `claude mcp add` writes) and
+# lives OUTSIDE the FUSE-guarded project tree, so nothing else vets it — settings.json gets
+# exactly this treatment on its way back (`merge_out_shared_settings`), and the asymmetry was
+# the finding. Reduce, never refuse: a whole-entry rejection would drop the session's ordinary
+# state (history, mode, onboarding) along with the payload.
+
+#: Flags that widen what the next session may do without being asked. A session may lower one,
+#: never raise it. Prefix-matched as well, so a future `hasTrustDialog*` sibling is covered the
+#: day Claude adds it rather than the day someone notices.
+TRUST_FLAGS = ("hasTrustDialogAccepted", "enableAllProjectMcpServers")
+TRUST_FLAG_PREFIX = "hasTrustDialog"
+
+#: List-valued keys that name what the next session may run without asking, clamped to what
+#: canonical already held. `enabledMcpjsonServers` belongs with them, not with the booleans:
+#: `.mcp.json` is writable from the box (mixed-use, watched), so approving a name here is how a
+#: session hands a host `claude` a server whose `command` mcpServers-vetting never sees.
+#: `disabledMcpjsonServers` is deliberately absent — adding to it only ever removes reach.
+CLAMPED_LISTS = ("allowedTools", "enabledMcpjsonServers")
+
+
+def _is_trust_flag(key: str) -> bool:
+    return key in TRUST_FLAGS or key.startswith(TRUST_FLAG_PREFIX)
+
+
+def vet_project_entry(entry: Any, prior: Any) -> tuple[Any, list[str]]:
+    """`projects[path]` reduced to what a sandboxed session may hand a host `claude`.
+
+    Returns `(entry, notes)`; `notes` names everything dropped, for the user's teardown
+    warning. Judged against `prior` (canonical's current entry) rather than absolutely, like
+    the git-config validator: the user's own host-side MCP servers and trust flags round-trip
+    through the box untouched, and only what this session ADDED is refused.
+    """
+    if not isinstance(entry, dict):
+        return entry, []
+    prior = prior if isinstance(prior, dict) else {}
+    out = dict(entry)
+    notes: list[str] = []
+
+    servers = out.get("mcpServers")
+    if isinstance(servers, dict):
+        was = prior.get("mcpServers")
+        was = was if isinstance(was, dict) else {}
+        kept = {}
+        for name, spec in servers.items():
+            cmd = spec.get("command") if isinstance(spec, dict) else None
+            if cmd and spec != was.get(name):
+                notes.append(f"mcpServers.{name}.command = {cmd}")
+                # Revert, never delete: the session may have EDITED a server the user set up
+                # host-side, and refusing that edit must leave canonical's own entry standing —
+                # dropping it would silently destroy the user's real config on exit.
+                if name in was:
+                    kept[name] = was[name]
+                continue
+            kept[name] = spec
+        # Never invent a key canonical did not have: if everything the session listed was
+        # refused and there was no entry before, the merge must leave no trace at all.
+        if kept or "mcpServers" in prior:
+            out["mcpServers"] = kept
+        else:
+            del out["mcpServers"]
+
+    for key, value in list(out.items()):
+        if key in CLAMPED_LISTS and isinstance(value, list):
+            old = prior.get(key)
+            old = old if isinstance(old, list) else []
+            added = [t for t in value if t not in old]
+            if added:
+                notes.append(f"{key} += {added}")
+                if key in prior:
+                    out[key] = old
+                else:
+                    del out[key]
+        elif _is_trust_flag(key) and value and not prior.get(key):
+            notes.append(f"{key} = {value}")
+            if key in prior:
+                out[key] = prior[key]
+            else:
+                del out[key]
+    return out, notes
 
 
 # ── Host key vs box key ─────────────────────────────────────────────────────
@@ -213,6 +296,13 @@ def merge_out_json(scratch: str, path: str, canonical: str, box: str = "") -> in
     # canonical's entry there would silently drop the project's approved tools, MCP servers
     # and trust flags. A merge loses at most this session's edit.
     if entry is not None:
+        entry, notes = vet_project_entry(entry, projects.get(path))
+        if notes:
+            sys.stderr.write(
+                "kib: this session's .claude.json asked to give the next HOST claude more than\n"
+                "     it had in this project — NOT merged back:\n"
+                + "".join(f"       {n}\n" for n in notes)
+            )
         projects[path] = entry
     base["projects"] = projects
     jsonio.write_atomic(canonical, base)

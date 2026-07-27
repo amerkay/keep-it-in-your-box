@@ -7,12 +7,18 @@ Mac, by live exploitation, with a compile-then-test multi-agent sweep. Companion
 its findings `MAC-*` independently.
 
 > [!CAUTION]
-> **Six new findings, none fixed yet — 2 Critical, 3 High, 1 Medium (+ 2 Low).** Every one reaches
-> the host or reads out of the working directory; every one is confirmed live or at code/unit level.
-> Two are **macOS-only** (the clipboard transport, the DYLD env set); the rest are
-> **platform-agnostic gaps the Linux passes did not reach**, found because this pass fuzzed the
-> parsers and exercised the host-side merge paths directly. The container boundary itself did **not**
-> regress: every escape class re-tested holds on macOS.
+> **Six new findings — 2 Critical, 3 High, 1 Medium (+ 2 Low).** Every one reaches the host or reads
+> out of the working directory; every one is confirmed live or at code/unit level. Two are
+> **macOS-only** (the clipboard transport, the DYLD env set); the rest are **platform-agnostic gaps
+> the Linux passes did not reach**, found because this pass fuzzed the parsers and exercised the
+> host-side merge paths directly. The container boundary itself did **not** regress: every escape
+> class re-tested holds on macOS.
+
+> [!NOTE]
+> **All eight are closed as of 2026-07-27** — seven fixed, MAC-M1 mitigated (detection at launch
+> *and* teardown; a plain bind mount has no layer to interpose on, so prevention is not available
+> there). See [Fixes](#fixes--2026-07-27). Each finding's row carries its own status; the detail
+> sections below describe the vulnerability as found, and are kept in the past tense of the audit.
 
 ## The question
 
@@ -61,14 +67,14 @@ platform-agnostic gap surfaced by this pass.
 
 | # | Finding | Severity | Platform | How it reaches the host | Root cause (`file` · symbol) | Status |
 |:--|:--|:--|:--|:--|:--|:--|
-| **MAC-C1** | Clipboard bridge stages the sanitised write in a sandbox-writable file | 🔴 Critical<br>Host RCE | **macOS-only** | The macOS bridge writes the cleaned bytes to `clean.$id` in the box-writable spool, then a *separate* `pbcopy` re-opens that path. (a) A pre-planted `clean.$id`/`err.$id` **symlink is followed** → arbitrary host-file overwrite (`~/.zshrc` → RCE), deterministic; (b) a **TOCTOU race** on `clean.$id` puts unsanitised bytes (a paste-escape) on the real pasteboard → RCE at the next terminal paste | `host/clipboard-bridge.sh` · `serve_write` (no `rm`/`O_NOFOLLOW` before `>clean.$id 2>err.$id`; separate `pbcopy <clean.$id`) | ⛔ **Open** — confirmed live (both variants) |
-| **MAC-C2** | git-config **leading-BOM** parser bypass | 🔴 Critical<br>Host RCE | agnostic | A body beginning with a UTF-8 BOM + `[core]fsmonitor=…` is admitted by the FUSE write validator (parser sees a non-`[` line, flags nothing) but git strips the BOM and resolves `core.fsmonitor` → fires on the host's next bare `git status` | `kib/shared/dangerous.py` · `git_ini_entries` (`str.strip()` does not remove `U+FEFF`) | ⛔ **Open** — confirmed live end-to-end |
-| **MAC-H1** | git-config **Unicode/control line-separator** parser bypass | 🟠 High<br>Host RCE | agnostic | A driver hidden in a quoted subsection whose name contains `U+2028/2029/0085`, VT/FF/FS (0x0B/0x0C/0x1C…) — `git_ini_entries` splits on `str.splitlines()` (full Unicode set), git splits on `\n` only, so the header breaks for the parser but not for git → `filter.<sep>x.clean` admitted | `kib/shared/dangerous.py` · `git_ini_entries` (`text.splitlines()`) | ⛔ **Open** — confirmed (multi-step: needs `.gitattributes` + `git add`/checkout) |
-| **MAC-H2** | `~/.claude.json` merge-out folds back unvalidated | 🟠 High<br>Host RCE + trust bypass | agnostic | On last-terminal exit the sandbox-written `projects[box]` subtree is folded **verbatim** into canonical `~/.claude.json` with no dangerous-key scan (while `settings.json` **is** scanned). A local-scoped `mcpServers.*.command` + `hasTrustDialogAccepted`/`allowedTools`/`enableAllProjectMcpServers` reach the next host `claude` in that project | `kib/host/config_scope.py` · `merge_out_json` (imports no `dangerous`; `projects[path]=entry`) | ⛔ **Open** — fold-back confirmed at code+unit level; host-exec needs the host repro |
-| **MAC-H3** | `gcpAuthRefresh` missing from the settings command-key denylist | 🟠 High<br>Host RCE | agnostic | The shared-settings validator refuses `apiKeyHelper`/`awsAuthRefresh`/`awsCredentialExport`/`otelHeadersHelper` but **passes `gcpAuthRefresh`**, a real Claude auth-helper command (the 4th sink of CVE-2026-35022). It folds into canonical and a Vertex-configured host `claude` runs it | `kib/shared/dangerous.py` · `SETTINGS_COMMAND_KEYS` (4-key tuple) | ⛔ **Open** — confirmed (`settings_findings` returns clean) |
-| **MAC-M1** | Open-asset **symlink** exfil evades `asset_scan` | 🟡 Medium<br>Out-of-workdir read | agnostic | `skills/agents/commands` are rw, host-backed, and **not** behind the redaction FUSE; a `SKILL.md` symlink to any host path (`~/.ssh/id_rsa`) persists to host state, auto-loads into every session and a host `claude`, and the **skill loader follows it and ingests the target**. `asset_scan.py` only opens `*.json` and only flags `hooks`/`mcpServers.command`, so the symlink passes clean | `kib/host/asset_scan.py` (JSON-command-only; `followlinks=False` walk never inspects targets) | ⛔ **Open** — confirmed live (`/etc/hostname` ingested); adjacent to the accepted H6 tier |
-| **MAC-L1** | DYLD framework/fallback/versioned env keys not flagged | 🟢 Low<br>Host RCE (macOS) | **macOS-only** | `SETTINGS_ENV_EXEC_KEYS` covers `DYLD_INSERT_LIBRARIES`/`DYLD_LIBRARY_PATH` but not `DYLD_FRAMEWORK_PATH` / `DYLD_FALLBACK_LIBRARY_PATH` / `DYLD_VERSIONED_LIBRARY_PATH` — same dylib-hijack class against non-hardened host binaries (nvm/brew `node`) | `kib/shared/dangerous.py` · `SETTINGS_ENV_EXEC_KEYS` | ⛔ **Open** — confirmed; narrow (SIP strips these for hardened binaries) |
-| **MAC-L2** | Broker forwards arbitrary authenticated paths (R3) | 🟢 Low | agnostic | The broker pins the upstream origin but has no **path/method** allowlist, so the box can drive any authenticated request the token permits to the pinned host (`GET /v1/models` → 200). Not credential theft (token never in the box) | `kib/broker/proxy.py` · `_do_relay` | 🟨 **Known** — matches the prior audit's residual R3 |
+| **MAC-C1** | Clipboard bridge stages the sanitised write in a sandbox-writable file | 🔴 Critical<br>Host RCE | **macOS-only** | The macOS bridge writes the cleaned bytes to `clean.$id` in the box-writable spool, then a *separate* `pbcopy` re-opens that path. (a) A pre-planted `clean.$id`/`err.$id` **symlink is followed** → arbitrary host-file overwrite (`~/.zshrc` → RCE), deterministic; (b) a **TOCTOU race** on `clean.$id` puts unsanitised bytes (a paste-escape) on the real pasteboard → RCE at the next terminal paste | `host/clipboard-bridge.sh` · `serve_write` (no `rm`/`O_NOFOLLOW` before `>clean.$id 2>err.$id`; separate `pbcopy <clean.$id`) | ✅ **Fixed** — every answer is staged in a host-private `$DIR.priv` and `mv`'d in; `rename(2)` replaces the destination and never follows it, so neither the symlink nor the re-open window exists. macOS regression added to `security-test.sh` |
+| **MAC-C2** | git-config **leading-BOM** parser bypass | 🔴 Critical<br>Host RCE | agnostic | A body beginning with a UTF-8 BOM + `[core]fsmonitor=…` is admitted by the FUSE write validator (parser sees a non-`[` line, flags nothing) but git strips the BOM and resolves `core.fsmonitor` → fires on the host's next bare `git status` | `kib/shared/dangerous.py` · `git_ini_entries` (`str.strip()` does not remove `U+FEFF`) | ✅ **Fixed** — `git_ini_entries` now normalises the way git does (leading BOM dropped, CRLF folded, `\n`-only split) |
+| **MAC-H1** | git-config **Unicode/control line-separator** parser bypass | 🟠 High<br>Host RCE | agnostic | A driver hidden in a quoted subsection whose name contains `U+2028/2029/0085`, VT/FF/FS (0x0B/0x0C/0x1C…) — `git_ini_entries` splits on `str.splitlines()` (full Unicode set), git splits on `\n` only, so the header breaks for the parser but not for git → `filter.<sep>x.clean` admitted | `kib/shared/dangerous.py` · `git_ini_entries` (`text.splitlines()`) | ✅ **Fixed** — any surviving divergent character makes the parser read the body BOTH ways, union the findings, and refuse outright (`AMBIGUOUS_ENTRY`) |
+| **MAC-H2** | `~/.claude.json` merge-out folds back unvalidated | 🟠 High<br>Host RCE + trust bypass | agnostic | On last-terminal exit the sandbox-written `projects[box]` subtree is folded **verbatim** into canonical `~/.claude.json` with no dangerous-key scan (while `settings.json` **is** scanned). A local-scoped `mcpServers.*.command` + `hasTrustDialogAccepted`/`allowedTools`/`enableAllProjectMcpServers` reach the next host `claude` in that project | `kib/host/config_scope.py` · `merge_out_json` (imports no `dangerous`; `projects[path]=entry`) | ✅ **Fixed** — `vet_project_entry` drops an `mcpServers.*.command` the session added, refuses to raise the trust flags and clamps `allowedTools`, naming each on stderr |
+| **MAC-H3** | `gcpAuthRefresh` missing from the settings command-key denylist | 🟠 High<br>Host RCE | agnostic | The shared-settings validator refuses `apiKeyHelper`/`awsAuthRefresh`/`awsCredentialExport`/`otelHeadersHelper` but **passes `gcpAuthRefresh`**, a real Claude auth-helper command (the 4th sink of CVE-2026-35022). It folds into canonical and a Vertex-configured host `claude` runs it | `kib/shared/dangerous.py` · `SETTINGS_COMMAND_KEYS` (4-key tuple) | ✅ **Fixed** — added to `SETTINGS_COMMAND_KEYS`; flows to the FUSE validator, the audit gate and the settings merge-out |
+| **MAC-M1** | Open-asset **symlink** exfil evades `asset_scan` | 🟡 Medium<br>Out-of-workdir read | agnostic | `skills/agents/commands` are rw, host-backed, and **not** behind the redaction FUSE; a `SKILL.md` symlink to any host path (`~/.ssh/id_rsa`) persists to host state, auto-loads into every session and a host `claude`, and the **skill loader follows it and ingests the target**. `asset_scan.py` only opens `*.json` and only flags `hooks`/`mcpServers.command`, so the symlink passes clean | `kib/host/asset_scan.py` (JSON-command-only; `followlinks=False` walk never inspects targets) | 🟡 **Mitigated** — `asset_scan` flags any symlink (file or dir) resolving out of the tree and never opens one; reported at teardown as well as launch. Detection, not prevention: a plain bind mount has no layer to interpose on |
+| **MAC-L1** | DYLD framework/fallback/versioned env keys not flagged | 🟢 Low<br>Host RCE (macOS) | **macOS-only** | `SETTINGS_ENV_EXEC_KEYS` covers `DYLD_INSERT_LIBRARIES`/`DYLD_LIBRARY_PATH` but not `DYLD_FRAMEWORK_PATH` / `DYLD_FALLBACK_LIBRARY_PATH` / `DYLD_VERSIONED_LIBRARY_PATH` — same dylib-hijack class against non-hardened host binaries (nvm/brew `node`) | `kib/shared/dangerous.py` · `SETTINGS_ENV_EXEC_KEYS` | ✅ **Fixed** — the whole DYLD family is in `SETTINGS_ENV_EXEC_KEYS` |
+| **MAC-L2** | Broker forwards arbitrary authenticated paths (R3) | 🟢 Low | agnostic | The broker pins the upstream origin but has no **path/method** allowlist, so the box can drive any authenticated request the token permits to the pinned host (`GET /v1/models` → 200). Not credential theft (token never in the box) | `kib/broker/proxy.py` · `_do_relay` | ✅ **Fixed** — per-route `allow_paths`: the LLM rows allow `/v1/` (+ `/api/oauth/profile` for claude) and 404 the rest |
 
 ---
 
@@ -112,9 +118,12 @@ holds for the **filter** and is false for the **macOS transport**. The bug is en
 **Fix:** never round-trip through a box-writable file. Pipe the sanitiser straight to `pbcopy`
 (`python3 -m kib.shared.clipboard "$DIR/data.$id" | pbcopy`, strip-count on a separate fd), or write
 `clean`/`err` into a host-private `mktemp -d` **outside** the spool; and `rm -f` before any redirect
-that must stay in the spool. Add a macOS `security-test.sh` regression that (1) plants a `clean.$id`
-symlink and (2) races `clean.$id` — the suite currently **skips** the clipboard section on macOS
-("no Wayland socket"), so this whole transport is unexercised in-sandbox today.
+that must stay in the spool. Add a regression that (1) plants a `clean.$id` symlink and (2) races
+`clean.$id` — the suite currently **skips** the clipboard section on macOS ("no Wayland socket"), so
+this whole transport is unexercised today. *(Fixed: the staging moved to a host-private sibling dir,
+and the symlink probe went into `tests/check/clipboard.sh`, which drives the real bridge against
+stubbed macOS tools and therefore runs on Linux too — a macOS-only test would have inherited exactly
+the skip that let this ship.)*
 
 ## MAC-C2 — git-config leading-BOM parser bypass  🔴 Critical
 
@@ -302,7 +311,10 @@ rm -f "$SPOOL"/clean.$ID "$SPOOL"/data.$ID "$SPOOL"/req.$ID "$SPOOL"/resp.$ID "$
 ```
 
 `/tmp/kib-clip-audit-victim` printing `PWNED-VIA-CLEAN-SYMLINK` confirms out-of-spool host-file
-overwrite (a real attack would name `~/.zshrc`).
+overwrite (a real attack would name `~/.zshrc`). **On the fixed bridge it prints `BENIGN ORIGINAL`**
+— the host never writes `clean.$id` at all — so this doubles as the fix's host-side proof. The
+in-sandbox half is now automated: `tests/security-test.sh`, section *macOS clipboard bridge
+transport*.
 
 **MAC-H2 — merge-out fold-back** (uses a throwaway project path):
 
@@ -328,7 +340,49 @@ rm -rf /Users/veronica/keep-it-in-your-box/tests/.state/sectest
 
 ---
 
+## Fixes — 2026-07-27
+
+Every recommendation below is implemented. Ranked as the recommendations were.
+
+| # | What changed | Where |
+|:--|:--|:--|
+| **MAC-C1** | The bridge no longer writes or re-opens **anything** in the box-writable spool. Every answer is built in `$DIR.priv` — 0700, a *sibling* of the spool so `mv` is a same-filesystem rename, never bind-mounted — and `publish`ed in. `rename(2)` replaces the destination rather than following it, so the symlink-follow and the `pbcopy` re-open window both stop existing; the `rm`-then-`>` shape that made them possible is gone from the file. Cleanup is an `EXIT`/`TERM` trap plus `stop_clipboard_bridge` (for the SIGKILL that skips the trap) | `host/clipboard-bridge.sh`, `host/desktop.sh` |
+| **MAC-C2 / MAC-H1** | `git_ini_entries` now does git's **input normalisation** first — drop one leading BOM, fold CRLF, split on `\n` only — and then falls closed: if any character Python and git split differently survives (`U+2028/2029/0085`, VT, FF, FS/GS/RS, a lone CR, a stray BOM) it parses the body **both** ways, unions the findings and adds `AMBIGUOUS_ENTRY`, so the write is refused whichever reader is right. The class is closed rather than the two spellings | `kib/shared/dangerous.py`, `kib/guest/fuse.py` |
+| **MAC-H2** | `merge-out-json` routes the subtree through `vet_project_entry` before it touches canonical: an `mcpServers.*.command` the session **added** is dropped (the user's own round-trips, matched against canonical), trust flags are one-way (lowering allowed, raising reverted — `hasTrustDialog*` prefix-matched so a future sibling is covered), `allowedTools` clamps to what canonical had. Reduces rather than refuses, so ordinary session state still merges; everything dropped is named on stderr | `kib/host/config_scope.py` |
+| **MAC-H3** | `gcpAuthRefresh` added to `SETTINGS_COMMAND_KEYS` | `kib/shared/dangerous.py` |
+| **MAC-M1** | `asset_scan` flags any symlink — file **or** directory, since `followlinks=False` means a symlinked dir is only ever seen once — whose target resolves outside the tree, and never opens one it has flagged. `validate_shared_assets` gained a `teardown` mode so the tree is re-scanned right after the session that wrote it (desktop alert included), not only at the next launch. Mitigation, not prevention: these are plain bind mounts with nothing to interpose on | `kib/host/asset_scan.py`, `host/config.sh`, `host/lifecycle.sh` |
+| **MAC-L1** | The framework / fallback / versioned `DYLD_*` keys added to `SETTINGS_ENV_EXEC_KEYS` | `kib/shared/dangerous.py` |
+| **MAC-L2** | Per-route `allow_paths`: the LLM rows allow `/v1/` (claude also `/api/oauth/profile`, the read-only account lookup), and every other path is a 404 with a `BROKER-DENY-PATH` breadcrumb — the key-mint and organization surface included. Matched on the path component, so `?beta=true` cannot turn an allowed path away. User MCP routes stay unrestricted by default: their endpoints are not knowable here | `kib/broker/registry.py`, `kib/broker/proxy.py` |
+
+Regressions added, one per finding, and every one of them fails against the pre-fix code:
+
+- **Unit** — `tests/shared/test_dangerous.py` (BOM, seven separators, lone CR vs CRLF, the two
+  key-table gaps), `tests/host/test_config_scope.py` (vet cases, including the user's own server
+  and a URL-only server surviving untouched), `tests/host/test_asset_scan.py` (4 symlink cases),
+  `tests/broker/test_broker.py` (allowed/refused paths; every LLM row must carry an allowlist).
+- **In-sandbox** (`tests/security-test.sh`) — the BOM/`U+2028`/NEL bodies through the **live** FUSE
+  mount; the `gcpAuthRefresh`/DYLD validator cases; the asset-symlink scan; the `.claude.json`
+  merge-out vet driven through the real `merge-out-json`, with a round-trip regression proving the
+  user's own MCP server and trust flags survive; and the broker allowlist driven against the
+  **running sidecar**, told apart by who answered (`path not brokered` is the broker's own body,
+  anything else came from upstream).
+- **Host-side** (`tests/check/clipboard.sh`) — MAC-C1 is exercised where the harness already drives
+  the real `clipboard-bridge.sh` against stubbed macOS leaf tools, so it runs on **Linux CI too**:
+  a planted `clean.$id`/`err.$id` symlink must be left untouched, the write must still reach
+  pbcopy, and a bare write must leave no staging file in the spool at all. `security-test.sh` also
+  carries the macOS-only version of the symlink probe, which skips on a Linux host — that skip was
+  the whole reason this transport shipped uncovered, so the load-bearing check is the one that
+  runs everywhere.
+
+**Not done, deliberately:** the standing #1 recommendation to stop hand-parsing git config and diff
+`git config --file <candidate> --list --includes` instead. The write validator runs *inside the FUSE
+handler*, on a path the same sidecar serves — shelling out to `git` there invites the deadlock class
+this repo has been bitten by before. The normalise-then-fall-closed rule closes the category without
+it, and the teardown/cold-start audit gate still resolves the real config through git.
+
 ## Recommendations, ranked
+
+As written at audit time; all are now implemented — see [Fixes](#fixes--2026-07-27).
 
 1. **MAC-C1 — pipe the sanitiser straight to `pbcopy`** (or stage `clean`/`err` in a host-private
    `mktemp -d` outside the spool; `rm` before any in-spool redirect). Add a macOS clipboard

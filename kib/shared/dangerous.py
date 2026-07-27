@@ -31,11 +31,24 @@ GIT_KEYS = frozenset(
 # indirection is the bypass and a newly added include is refused outright.
 GIT_SECTIONS = frozenset({"alias", "pager", "include", "includeif"})
 
-# settings.json keys whose value Claude runs as a command.
+# Characters on which Python's line splitting and git's disagree, checked AFTER git's own
+# normalisation (leading BOM dropped, CRLF folded). Each one lets a header break for
+# `str.splitlines()` while git reads a single line — or the reverse — which hides a live key
+# from the validator. No real config needs any of them, so their presence is itself the verdict.
+_AMBIGUOUS = frozenset("\ufeff\r\v\f\x1c\x1d\x1e\x85\u2028\u2029")
+#: Stands in for "this file cannot be parsed unambiguously". Callers refuse any non-empty
+#: result, so falling closed needs no second verdict — only a triple they can name in a log.
+AMBIGUOUS_ENTRY = ("<file>", "<ambiguous line separator>", "")
+
+# settings.json keys whose value Claude runs as a command. The auth helpers are one per
+# backend and four of them are the injection sinks of CVE-2026-35022, so a denylist missing
+# any single one is a live path on a host configured for that backend (gcpAuthRefresh ↔
+# Vertex AI). Add them as a family, never one spelling at a time.
 SETTINGS_COMMAND_KEYS = (
     "apiKeyHelper",
     "awsAuthRefresh",
     "awsCredentialExport",
+    "gcpAuthRefresh",
     "otelHeadersHelper",
 )
 # settings.json env keys that redirect the agent's auth traffic or hand over its credential.
@@ -59,8 +72,16 @@ SETTINGS_ENV_EXEC_KEYS = (
     "LD_PRELOAD",
     "LD_AUDIT",
     "LD_LIBRARY_PATH",
+    # The whole DYLD family, not just the two obvious ones: framework/fallback/versioned are
+    # the same dylib hijack against any non-hardened host binary (a brew/nvm `node`), and dyld
+    # only strips them for SIP-protected ones.
     "DYLD_INSERT_LIBRARIES",
     "DYLD_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "DYLD_FALLBACK_FRAMEWORK_PATH",
+    "DYLD_VERSIONED_LIBRARY_PATH",
+    "DYLD_VERSIONED_FRAMEWORK_PATH",
     "GIT_SSH",
     "GIT_SSH_COMMAND",
     "GIT_EXTERNAL_DIFF",
@@ -123,22 +144,11 @@ def _split_header(line: str) -> tuple[str, str]:
     return (line[1:].split() or [""])[0].strip('"').lower(), ""
 
 
-def git_ini_entries(text: str) -> set[tuple[str, str, str]]:
-    """The `(section, key, value)` triples in git-INI *text* that name a command.
-
-    Used by the FUSE guard, which sees the candidate file before the rename that installs it,
-    so it must read the file the way GIT will — not a naive approximation. Two grammar points
-    a header-only parser misses, each a live bypass until fixed:
-
-    * git resumes scanning after `]`, so `[core]hooksPath = x` on one line is a real setting;
-    * a subsection name is double-quoted and may itself contain `]`, `#` or `;`, which do NOT
-      end the header or start a comment (`[filter "e]v"]clean = payload` sets a clean driver).
-
-    Quote-aware header and comment handling covers both.
-    """
+def _entries_in(lines: list[str]) -> set[tuple[str, str, str]]:
+    """The dangerous triples in an already-split, already-normalised line list."""
     found: set[tuple[str, str, str]] = set()
     section = ""
-    for raw in text.splitlines():
+    for raw in lines:
         line = _strip_inline_comment(raw).strip()
         if not line:
             continue
@@ -152,6 +162,35 @@ def git_ini_entries(text: str) -> set[tuple[str, str, str]]:
         key = key.strip().lower()
         if section in GIT_SECTIONS or key.split(".")[-1] in GIT_KEYS:
             found.add((section, key, value.strip()))
+    return found
+
+
+def git_ini_entries(text: str) -> set[tuple[str, str, str]]:
+    """The `(section, key, value)` triples in git-INI *text* that name a command.
+
+    Used by the FUSE guard, which sees the candidate file before the rename that installs it,
+    so it must read the file the way GIT will — not a naive approximation. Three points a
+    naive parser misses, each a live bypass until fixed:
+
+    * git resumes scanning after `]`, so `[core]hooksPath = x` on one line is a real setting;
+    * a subsection name is double-quoted and may itself contain `]`, `#` or `;`, which do NOT
+      end the header or start a comment (`[filter "e]v"]clean = payload` sets a clean driver);
+    * git NORMALISES its input first — it drops a leading UTF-8 BOM and ends a line at `\\n`
+      only. `str.strip()` leaves a BOM in place (it is not whitespace) and `str.splitlines()`
+      also breaks on `U+2028/2029/0085`, VT, FF and FS/GS/RS. Either divergence hides a key
+      from this parser that git still resolves — a BOM before `[core]fsmonitor=x`, or a
+      separator inside a quoted subsection name.
+
+    Normalisation matches git; anything still ambiguous after it is parsed BOTH ways and
+    refused outright, so the *class* is closed rather than the two known spellings.
+    """
+    if text.startswith("\ufeff"):
+        text = text[1:]  # git drops exactly one leading BOM, and only at the start of the file
+    text = text.replace("\r\n", "\n")  # git folds CRLF; a LONE \r stays ambiguous below
+    found = _entries_in(text.split("\n"))  # how git reads it
+    if _AMBIGUOUS.intersection(text):
+        found |= _entries_in(text.splitlines())  # ...and how a Unicode reader would
+        found.add(AMBIGUOUS_ENTRY)  # either way, refuse: no legitimate config needs these
     return found
 
 

@@ -442,7 +442,7 @@ kib_prepare_session() {
     mkdir -p "$LOCK_DIR" && chmod 700 "$LOCK_DIR"
     mkdir -p "$STATE_DIR" && chmod 700 "$STATE_DIR"
     validate_shared_settings
-    validate_shared_assets
+    validate_shared_assets launch
     report_shared_asset_writes
 
     if [ "$UNLOCK_SHARED" = 1 ]; then
@@ -515,7 +515,7 @@ kib_bring_up() {
         # either tree. Only a fold-out that MOVED something needs the re-vet, which is what
         # start_container mounts by — and skipping it otherwise keeps one payload to one warning.
         fold_out_project_assets
-        [ "${KIB_ASSETS_FOLDED:-0}" = 1 ] && validate_shared_assets
+        [ "${KIB_ASSETS_FOLDED:-0}" = 1 ] && validate_shared_assets launch
         # Rebuild this project's config from canonical ~/.claude, then pin. Only here — never
         # while a container is attached to these bind-mounted files.
         assemble_session_dir
@@ -554,6 +554,9 @@ kib_cleanup() {
             # report mode returns the finding class, and this is the EXIT trap: a non-zero
             # here would overwrite the session's own exit status.
             kib_audit_gate teardown || true
+            # Same question for the trees that load in every OTHER project: a skill this
+            # session wrote reaches them, and the host claude, before the next kib launch.
+            validate_shared_assets teardown
             lock_fd -u 202
         fi
         exec 202>&-

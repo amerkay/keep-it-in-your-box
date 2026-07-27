@@ -116,6 +116,10 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   and LAN must stay reachable alongside the broker net. (`credential-broker.md`)
 - **Don't hide clipboard interfaces from the Wayland registry** — it broke `wl-paste`; sanitise
   the write *content* at the `send` event instead. (`clipboard-and-dns.md`)
+- **Never stage the clipboard bridge's output in the spool** — it is bind-mounted rw, so a `>`
+  there follows a symlink the box planted (any host file truncated and overwritten) and a re-open
+  is a TOCTOU that lands unsanitised bytes on the real pasteboard. Build every answer in
+  `$DIR.priv` and `mv` it in. (`clipboard-and-dns.md`)
 - **Don't refuse clipboard writes outright, and don't gate them on who is asking** — refusal
   broke the fullscreen TUI's select-to-copy, and the sidecar's own PID namespace makes
   `SO_PEERCRED` useless (pid 0). The content is the boundary. (`clipboard-and-dns.md`)
