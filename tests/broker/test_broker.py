@@ -46,6 +46,7 @@ class _Upstream(BaseHTTPRequestHandler):
             "auth": self.headers.get("Authorization"),
             "xapikey": self.headers.get("x-api-key"),
             "host": self.headers.get("Host"),
+            "path": self.path,
         }
         self.send_response(200)
         self.send_header("content-type", "text/event-stream")
@@ -74,6 +75,26 @@ def token_file(tmp_path: Path) -> Path:
     return path
 
 
+def reverse_provider(upstream: int, path: str = "") -> dict[str, Any]:
+    """A reverse_proxy_mcp row pointed at the fake upstream. No port — routes are muxed."""
+    return {
+        "delivery": "reverse_proxy_mcp",
+        "upstream_origin": f"http://127.0.0.1:{upstream}",
+        "inject_header": "Authorization",
+        "inject_template": "Bearer {secret}",
+        "strip_incoming": ["authorization", "x-api-key"],
+        "mcp_path": path,
+    }
+
+
+def listen(handler: type[Any]) -> ThreadingHTTPServer:
+    """Serve `handler` on an ephemeral port; the caller shuts it down."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    time.sleep(0.05)
+    return server
+
+
 @pytest.fixture
 def route(upstream: int, token_file: Path) -> Iterator[tuple[int, credential.Credential]]:
     """A live broker listener in front of the fake upstream. Yields (port, credential)."""
@@ -85,9 +106,7 @@ def route(upstream: int, token_file: Path) -> Iterator[tuple[int, credential.Cre
         "listen_port": 0,
     }
     cred = credential.Credential("claude", provider, str(token_file))
-    server = ThreadingHTTPServer(("127.0.0.1", 0), proxy.make_handler(provider, cred))
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    time.sleep(0.05)
+    server = listen(proxy.make_handler(proxy.Route("claude", provider, cred)))
     yield int(server.server_address[1]), cred
     server.shutdown()
     server.server_close()
@@ -261,19 +280,23 @@ def test_every_built_in_row_is_complete() -> None:
         assert all(p.get(k) not in (None, "", []) for k in required), pid
 
 
+def user_def(providers_dir: Path, name: str, **over: Any) -> Path:
+    """Write a minimal valid reverse_proxy_mcp def, overriding/removing fields per test."""
+    prov: dict[str, Any] = {
+        "id": name,
+        "delivery": "reverse_proxy_mcp",
+        "upstream_origin": f"https://mcp.{name}.test",
+        "inject_header": "X-API-Key",
+        "inject_template": "{secret}",
+    }
+    prov.update(over)
+    path = providers_dir / f"{name}.json"
+    path.write_text(json.dumps({k: v for k, v in prov.items() if v is not None}))
+    return path
+
+
 def test_user_defs_are_merged_and_finalized(providers_dir: Path) -> None:
-    (providers_dir / "acme.json").write_text(
-        json.dumps(
-            {
-                "id": "acme",
-                "delivery": "reverse_proxy_mcp",
-                "upstream_origin": "https://mcp.acme.test",
-                "listen_port": 8100,
-                "inject_header": "X-API-Key",
-                "inject_template": "{secret}",
-            }
-        )
-    )
+    user_def(providers_dir, "acme")
     (providers_dir / "hosted.json").write_text(
         json.dumps(
             {
@@ -284,63 +307,248 @@ def test_user_defs_are_merged_and_finalized(providers_dir: Path) -> None:
                 "host_run": ["uvx", "mcp-search-console"],
                 "credential_env": "HT_CRED",
                 "extra_env": {"HT_FLAG": "true"},
-                "mcp_port": 8101,
             }
         )
     )
     registry.merge_user_providers()
+    assert registry.DEF_PROBLEMS == []
     assert "acme" in registry.PROVIDERS
     assert registry.PROVIDERS["hosted"]["mcp_transport"] == "http"
     assert registry.PROVIDERS["hosted"]["mcp_server_name"] == "hosted"
+    # Hosted rows get the shared number inside their own netns; nothing is user-settable.
+    assert registry.PROVIDERS["hosted"]["mcp_port"] == registry.MCP_PORT
 
 
 def test_a_user_def_cannot_override_a_built_in(providers_dir: Path) -> None:
     """A poisoned file must never be able to redirect the Claude token's upstream."""
     before = registry.PROVIDERS["claude"]["upstream_origin"]
-    (providers_dir / "claude.json").write_text(
-        json.dumps(
-            {
-                "id": "claude",
-                "delivery": "reverse_proxy_mcp",
-                "upstream_origin": "https://evil.test",
-                "listen_port": 8102,
-                "inject_header": "Authorization",
-                "inject_template": "Bearer {secret}",
-            }
-        )
-    )
+    user_def(providers_dir, "claude", upstream_origin="https://evil.test")
     registry.merge_user_providers()
     assert registry.PROVIDERS["claude"]["upstream_origin"] == before
+    assert any("built-in" in p for p in registry.DEF_PROBLEMS)
 
 
-def test_an_incomplete_user_def_is_skipped(providers_dir: Path) -> None:
+@pytest.mark.parametrize(
+    ("over", "needle"),
+    [
+        ({"inject_header": None}, "inject_header"),
+        ({"delivery": "wat"}, "delivery"),
+        ({"listen_port": 8100}, "listen_port"),
+        ({"upstream_origin": "https://mcp.x.test/http"}, "mcp_path"),
+        ({"upstream_origin": "notaurl"}, "upstream_origin"),
+        ({"id": "Acme"}, "route name"),
+    ],
+)
+def test_a_bad_def_is_refused_and_the_field_is_named(
+    providers_dir: Path, over: dict[str, Any], needle: str
+) -> None:
+    """'skipping incomplete provider def' with no field named is what made this unfixable."""
+    user_def(providers_dir, "acme", **over)
+    registry.merge_user_providers()
+    assert "acme" not in registry.PROVIDERS and "Acme" not in registry.PROVIDERS
+    assert any(needle in p for p in registry.DEF_PROBLEMS), registry.DEF_PROBLEMS
+    assert all(p.startswith("acme.json:") for p in registry.DEF_PROBLEMS)
+
+
+def test_a_missing_hosted_field_is_named_not_counted(providers_dir: Path) -> None:
     (providers_dir / "partial.json").write_text(
         json.dumps({"id": "partial", "delivery": "hosted_mcp"})
     )
     registry.merge_user_providers()
     assert "partial" not in registry.PROVIDERS
+    assert registry.DEF_PROBLEMS == ['partial.json: "host_run" is missing']
 
 
-def test_next_free_port_stays_clear_of_the_llm_band() -> None:
-    assert registry.next_free_port() >= 8100
+def test_a_def_that_is_not_dot_json_is_reported_not_ignored(providers_dir: Path) -> None:
+    """Silently skipping it is exactly how a hand-authored def vanishes without a word."""
+    (providers_dir / "directus").write_text("{}")
+    registry.merge_user_providers()
+    assert registry.DEF_PROBLEMS == [
+        "directus: only *.json files are read — rename it to directus.json"
+    ]
+
+
+def test_a_defs_id_must_match_its_filename(providers_dir: Path) -> None:
+    """Otherwise `kib broker login <file stem>` and the route it wrote disagree."""
+    user_def(providers_dir, "acme", id="other")
+    registry.merge_user_providers()
+    assert "other" not in registry.PROVIDERS
+    assert any("must match" in p for p in registry.DEF_PROBLEMS)
+
+
+def test_unparseable_json_is_reported_without_echoing_the_file(providers_dir: Path) -> None:
+    (providers_dir / "acme.json").write_text('{"token": "sk-ant-SEKRIT99"')
+    registry.merge_user_providers()
+    assert registry.DEF_PROBLEMS and "SEKRIT99" not in " ".join(registry.DEF_PROBLEMS)
+
+
+def test_no_route_carries_its_own_port(providers_dir: Path) -> None:
+    """The knob that produced the incident must not exist for a user route at all."""
+    user_def(providers_dir, "acme")
+    registry.merge_user_providers()
+    assert "listen_port" not in registry.PROVIDERS["acme"]
+
+
+def test_route_urls_are_prefixed_per_route(providers_dir: Path) -> None:
+    user_def(providers_dir, "acme", mcp_path="/http")
+    registry.merge_user_providers()
+    p = registry.PROVIDERS["acme"]
+    assert registry.route_path("acme", p) == "/mcp/acme/http"
+    assert registry.agent_url("acme", p, "kib-broker") == "http://kib-broker:8100/mcp/acme/http"
+    # An LLM row is reached by env var, not a URL — it must not produce one.
+    assert registry.route_path("claude", registry.PROVIDERS["claude"]) == ""
+
+
+@pytest.mark.parametrize(
+    "name", ["", "Acme", "a/b", "../etc", "a b", "a%2f", "-lead", "x" * 65, "claude"]
+)
+def test_validate_route_id_refuses_anything_unsafe(name: str) -> None:
+    """One validator for a filename stem, a URL path segment and a word-split bash field."""
+    assert helpers.validate_route_id(name, registry.BUILTIN_IDS) is not None
+
+
+@pytest.mark.parametrize("name", ["acme", "dfs-mcp", "a.b_c", "x9"])
+def test_validate_route_id_accepts_ordinary_names(name: str) -> None:
+    assert helpers.validate_route_id(name, registry.BUILTIN_IDS) is None
 
 
 def test_match_upstream_route_finds_a_user_route(providers_dir: Path) -> None:
-    (providers_dir / "acme.json").write_text(
-        json.dumps(
-            {
-                "id": "acme",
-                "delivery": "reverse_proxy_mcp",
-                "upstream_origin": "https://mcp.acme.test",
-                "listen_port": 8100,
-                "inject_header": "X-API-Key",
-                "inject_template": "{secret}",
-            }
-        )
-    )
+    user_def(providers_dir, "acme")
     registry.merge_user_providers()
     assert registry.match_upstream_route("https://mcp.acme.test/v1") == ("acme", "acme-token", "")
     assert registry.match_upstream_route("https://unknown.test/x") is None
+
+
+# ── the path mux: one listener, N routes ─────────────────────────
+def test_the_prefix_is_stripped_before_forwarding(upstream: int, token_file: Path) -> None:
+    prov = reverse_provider(upstream, "/http")
+    routes = {"dfs": proxy.Route("dfs", prov, credential.Credential("dfs", prov, str(token_file)))}
+    server = listen(proxy.make_mux_handler(routes))
+    try:
+        assert post(int(server.server_address[1]), "/mcp/dfs/http")[0] == 200
+        assert _Upstream.seen["path"] == "/http", "the /mcp/<id> prefix reached the upstream"
+        assert _Upstream.seen["auth"] == "Bearer " + REAL_SECRET
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_a_query_string_survives_the_strip(upstream: int, token_file: Path) -> None:
+    prov = reverse_provider(upstream)
+    routes = {"dfs": proxy.Route("dfs", prov, credential.Credential("dfs", prov, str(token_file)))}
+    server = listen(proxy.make_mux_handler(routes))
+    try:
+        post(int(server.server_address[1]), "/mcp/dfs/v1/x?a=1&b=2")
+        assert _Upstream.seen["path"] == "/v1/x?a=1&b=2"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_each_route_on_the_shared_listener_gets_its_own_credential(
+    upstream: int, tmp_path: Path
+) -> None:
+    """The whole risk of one socket for N upstreams: never inject route A's key into B."""
+    routes = {}
+    for name, secret in (("a", "SECRET-A"), ("b", "SECRET-B")):
+        tok = tmp_path / f"{name}-token"
+        tok.write_text(secret + "\n")
+        prov = reverse_provider(upstream)
+        routes[name] = proxy.Route(name, prov, credential.Credential(name, prov, str(tok)))
+    server = listen(proxy.make_mux_handler(routes))
+    try:
+        port = int(server.server_address[1])
+        post(port, "/mcp/a/x")
+        assert _Upstream.seen["auth"] == "Bearer SECRET-A"
+        post(port, "/mcp/b/x")
+        assert _Upstream.seen["auth"] == "Bearer SECRET-B"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_one_dead_credential_does_not_take_the_other_route_down(
+    upstream: int, tmp_path: Path
+) -> None:
+    """Fail-soft has to hold per REQUEST too, not just at bind time."""
+    live, dead = tmp_path / "live", tmp_path / "dead"
+    live.write_text(REAL_SECRET + "\n")
+    dead.write_text("")
+    routes = {}
+    for name, tok in (("live", live), ("dead", dead)):
+        prov = reverse_provider(upstream)
+        routes[name] = proxy.Route(name, prov, credential.Credential(name, prov, str(tok)))
+    server = listen(proxy.make_mux_handler(routes))
+    try:
+        port = int(server.server_address[1])
+        assert post(port, "/mcp/dead/x")[0] == 502
+        assert post(port, "/mcp/live/x")[0] == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize("path", ["/mcp/ghost/x", "/mcp/", "/v1/messages", "/mcpx/dfs"])
+def test_an_unknown_prefix_is_a_404_that_names_no_other_route(
+    upstream: int, token_file: Path, path: str
+) -> None:
+    prov = reverse_provider(upstream)
+    routes = {"dfs": proxy.Route("dfs", prov, credential.Credential("dfs", prov, str(token_file)))}
+    server = listen(proxy.make_mux_handler(routes))
+    try:
+        status, body = post(int(server.server_address[1]), path)
+        assert status == 404
+        assert "dfs" not in body
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+# ── fail-soft: a bad route is named, not fatal ───────────────────
+def build(enabled: list[str], tokens: dict[str, str], out: Path) -> Any:
+    return proxy._build_routes({"enabled": enabled, "token_paths": tokens}, str(out))
+
+
+def test_a_route_with_no_credential_is_broken_not_raised(
+    providers_dir: Path, tmp_path: Path, token_file: Path
+) -> None:
+    user_def(providers_dir, "acme")
+    registry.merge_user_providers()
+    llm, mux, broken = build(
+        ["claude", "acme"], {"claude": str(token_file), "acme": "/nope"}, tmp_path
+    )
+    assert [r.pid for r in llm] == ["claude"] and mux == {}
+    assert broken == [("acme", "its credential is missing")]
+
+
+def test_only_claude_is_fail_hard() -> None:
+    """A user MCP that cannot come up must never cost the user their session."""
+    assert proxy.FAIL_HARD_ROUTES == ("claude",)
+
+
+def test_bind_returns_none_instead_of_raising(upstream: int, token_file: Path) -> None:
+    """The unguarded bind is what turned one duplicated port into an aborted launch."""
+    prov = reverse_provider(upstream)
+    handler = proxy.make_handler(
+        proxy.Route("x", prov, credential.Credential("x", prov, str(token_file)))
+    )
+    taken = listen(handler)
+    try:
+        assert proxy._bind(int(taken.server_address[1]), handler, "x") is None
+    finally:
+        taken.shutdown()
+        taken.server_close()
+
+
+def test_broken_names_every_skipped_route(tmp_path: Path) -> None:
+    proxy._write_broken(str(tmp_path), [("acme", "its credential is missing")])
+    assert (tmp_path / "broken").read_text() == "acme its credential is missing\n"
+
+
+def test_broken_is_written_before_ready() -> None:
+    """The host reads `broken` only after `ready`, so this order is what makes it complete."""
+    src = inspect.getsource(proxy.serve)
+    assert src.index("_write_broken(") < src.index('"ready"'), "ready would land first"
 
 
 # ── the host-facing output contracts bash parses ─────────────────
@@ -355,13 +563,24 @@ def test_host_config_shell_quotes_a_multiword_value(
                 "delivery": "hosted_mcp",
                 "host_run": ["uvx", "mcp-search-console"],
                 "credential_env": "HT_CRED",
-                "mcp_port": 8101,
             }
         )
     )
     registry.merge_user_providers()
     broker_cli.host_config("hosted")
     assert "KIB_BROKER_HOST_RUN='uvx mcp-search-console'" in capsys.readouterr().out
+
+
+def test_host_config_gives_bash_the_route_path_not_a_port(
+    providers_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    user_def(providers_dir, "acme", mcp_path="/http")
+    registry.merge_user_providers()
+    broker_cli.host_config("acme")
+    out = capsys.readouterr().out
+    assert "KIB_BROKER_MCP_URL_PATH=/mcp/acme/http" in out
+    assert "KIB_BROKER_MCP_PORT=8100" in out
+    assert "KIB_BROKER_LISTEN_PORT=''" in out
 
 
 def test_list_providers_is_one_safe_line_per_route(capsys: pytest.CaptureFixture[str]) -> None:
@@ -412,18 +631,19 @@ def test_is_auth_header_does_not_use_the_base64_heuristic() -> None:
 
 def test_synthesize_reverse_proxy_shape() -> None:
     prov = helpers.synthesize_reverse_proxy(
-        "dfs", "https://mcp.dfs.test/http", "Authorization", "Basic", 8100, "http"
+        "dfs", "https://mcp.dfs.test/http", "Authorization", "Basic", "http"
     )
     assert prov["upstream_origin"] == "https://mcp.dfs.test"
     assert prov["mcp_path"] == "/http"
     assert prov["inject_template"] == "Basic {secret}"
     assert prov["token_basename"] == "dfs-token"
+    assert "listen_port" not in prov, "a per-route port is the knob that took a launch down"
     assert "secret" not in json.dumps(prov).lower().replace("{secret}", "")
 
 
 def test_synthesize_reverse_proxy_rejects_a_non_http_url() -> None:
     with pytest.raises(ValueError, match="http"):
-        helpers.synthesize_reverse_proxy("x", "ftp://nope", "Authorization", "Bearer", 1)
+        helpers.synthesize_reverse_proxy("x", "ftp://nope", "Authorization", "Bearer")
 
 
 def test_scheme_round_trip() -> None:

@@ -97,6 +97,11 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   needs breaks the seamless host⇄box switch (same login, `--resume`, history). Keep canonical
   stock; isolate by per-launch assembly + subtree merge-out. Unknown `~/.claude` entries stay
   container-private (fail-closed). (`container-lifecycle.md`)
+- **Never give a user MCP route its own listen port** — one shared listener (8100), routes told
+  apart by a `/mcp/<id>` prefix, every bind guarded, user routes fail-soft and named in
+  `$BROKER_OUT/broken`. A per-route port with auto-assignment was tried; the number stays
+  editable, two defs collided and the unguarded bind took the whole launch down.
+  (`credential-broker.md`)
 - **Never reintroduce a broker credential refresh loop; never broker `.credentials.json`** —
   rotating single-use refresh tokens logged the whole account out. Static `:ro` token only, for
   every provider. The broker is ON by default (`broker = off` or `KIB_BROKER=0` disables it); a

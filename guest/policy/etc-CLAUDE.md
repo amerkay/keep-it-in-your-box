@@ -21,6 +21,25 @@
   work is structurally non-carryable — and mints a duplicate `--resume` entry. The agent view is
   still reachable: `claude agents`, `/background`, `--bg`.
 
+## The credential broker
+
+- **The credentials you can see here are placeholders, deliberately.** `CLAUDE_CODE_OAUTH_TOKEN`
+  is a `fake_value_…` sentinel, `.credentials.json` is synthetic and read-only, and
+  `ANTHROPIC_BASE_URL` points at `kib-broker`. A host-side sidecar holds the real token and
+  injects it on the way out. Nothing here is broken and nothing needs repairing — never try to
+  re-authenticate, refresh a token, or "fix" a base URL.
+- **A brokered MCP is a header-free URL** — `http://kib-broker:8100/mcp/<name>…`, or its own
+  sidecar alias for a locally-run one. Entries marked `_kibBroker` are kib's and are rewritten
+  every launch; never add a header or token to one, and never point one at a real upstream.
+- **`~/.keep-it-in-your-box/` is not mounted here.** It holds those credentials and the route
+  definitions that govern them, so a session cannot rewrite its own brokering. There is no
+  provider file for you to edit and no port for you to choose.
+- **To add a service's MCP, hand the user one command — never author a definition, never ask
+  for a secret value.** In a **host terminal**: `kib broker add` asks the questions, or
+  `kib broker add <name> --url <https-url> --header "Authorization: Bearer"` for a remote one
+  (`--run "<cmd>" --cred-env <ENV>` for a local one). It prompts for the credential itself,
+  hidden, and prints the URL the next session will get. `kib broker status` lists every route.
+
 ## 🔴 Guarded paths — deliberate policy, not bugs. Not yours to bypass.
 
 - **Redacted** — `.env`, `.env.*`, anything in `.kibignore`: writes are refused, and a read gives

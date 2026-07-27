@@ -12,7 +12,6 @@
     "GSC_SKIP_OAUTH": "true"
   },
   "mcp_server_name": "gscServer",
-  "mcp_port": 8101,
   "mcp_path": "/mcp",
   "mcp_transport": "http"
 }

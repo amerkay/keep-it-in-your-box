@@ -36,8 +36,8 @@ _mcp_run() {
 # credential file (exactly a real user's setup). An orphan token with no def is ignored.
 en="$(_mcp_run '
   mkdir -p "$KIB_DIR/providers.d"
-  printf "{\"id\":\"remote\",\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://mcp.remote.example\",\"listen_port\":8100,\"inject_header\":\"Authorization\",\"inject_template\":\"Bearer {secret}\",\"mcp_path\":\"/http\"}" > "$KIB_DIR/providers.d/remote.json"
-  printf "{\"id\":\"local\",\"delivery\":\"hosted_mcp\",\"credential_kind\":\"file_path\",\"host_run\":[\"uvx\",\"some-mcp\"],\"credential_env\":\"L_CRED\",\"mcp_port\":8101,\"token_basename\":\"local.json\"}" > "$KIB_DIR/providers.d/local.json"
+  printf "{\"id\":\"remote\",\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://mcp.remote.example\",\"inject_header\":\"Authorization\",\"inject_template\":\"Bearer {secret}\",\"mcp_path\":\"/http\"}" > "$KIB_DIR/providers.d/remote.json"
+  printf "{\"id\":\"local\",\"delivery\":\"hosted_mcp\",\"credential_kind\":\"file_path\",\"host_run\":[\"uvx\",\"some-mcp\"],\"credential_env\":\"L_CRED\",\"token_basename\":\"local.json\"}" > "$KIB_DIR/providers.d/local.json"
   printf x>"$KIB_DIR/claude-token"; printf y>"$KIB_DIR/remote-token"; printf "{}">"$KIB_DIR/local.json"
   printf z>"$KIB_DIR/orphan-token"   # no def → must NOT appear
   echo "E=[$(broker_enabled_providers)] H=[$(hosted_mcp_providers)]"')"
@@ -53,14 +53,14 @@ esac
 # pre-rename `_ccBroker` marker, which must not become immortal.
 inj="$(_mcp_run '
   mkdir -p "$KIB_DIR/providers.d"
-  printf "{\"id\":\"remote\",\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://mcp.remote.example\",\"listen_port\":8100,\"inject_header\":\"Authorization\",\"inject_template\":\"Bearer {secret}\",\"mcp_path\":\"/http\",\"mcp_server_name\":\"remote\"}" > "$KIB_DIR/providers.d/remote.json"
-  printf "{\"id\":\"local\",\"delivery\":\"hosted_mcp\",\"credential_kind\":\"file_path\",\"host_run\":[\"uvx\",\"some-mcp\"],\"credential_env\":\"L_CRED\",\"mcp_port\":8101,\"mcp_path\":\"/mcp\",\"mcp_server_name\":\"local\",\"token_basename\":\"local.json\"}" > "$KIB_DIR/providers.d/local.json"
+  printf "{\"id\":\"remote\",\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://mcp.remote.example\",\"inject_header\":\"Authorization\",\"inject_template\":\"Bearer {secret}\",\"mcp_path\":\"/http\",\"mcp_server_name\":\"remote\"}" > "$KIB_DIR/providers.d/remote.json"
+  printf "{\"id\":\"local\",\"delivery\":\"hosted_mcp\",\"credential_kind\":\"file_path\",\"host_run\":[\"uvx\",\"some-mcp\"],\"credential_env\":\"L_CRED\",\"mcp_path\":\"/mcp\",\"mcp_server_name\":\"local\",\"token_basename\":\"local.json\"}" > "$KIB_DIR/providers.d/local.json"
   printf y>"$KIB_DIR/remote-token"
   printf "{\"mcpServers\":{\"myown\":{\"type\":\"http\",\"url\":\"http://x\"},\"legacy\":{\"_ccBroker\":true,\"url\":\"STALE_OLD\"},\"remote\":{\"_kibBroker\":true,\"url\":\"STALE_NEW\"}}}" > "$SESSION_BASE/.claude.json"
   BROKER_ENABLED=1 HOSTED_MCP_UP="local" inject_brokered_mcps >/dev/null 2>&1
   cat "$SESSION_BASE/.claude.json"')"
-if printf '%s' "$inj" | grep -q "kib-broker:8100/http" \
-    && printf '%s' "$inj" | grep -q "local:8101/mcp" \
+if printf '%s' "$inj" | grep -q "kib-broker:8100/mcp/remote/http" \
+    && printf '%s' "$inj" | grep -q "local:8100/mcp" \
     && printf '%s' "$inj" | grep -q '"myown"' \
     && ! printf '%s' "$inj" | grep -q "STALE_OLD" \
     && ! printf '%s' "$inj" | grep -q "STALE_NEW"; then
@@ -73,7 +73,7 @@ fi
 # the inline blob moves into that route's token (mode 600) and leaves the project.
 reuse="$(_mcp_run '
   mkdir -p "$KIB_DIR/providers.d"
-  printf "{\"id\":\"svc\",\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://api.svc.example\",\"listen_port\":8103,\"inject_header\":\"Authorization\",\"inject_template\":\"Bearer {secret}\",\"token_basename\":\"svc-token\",\"mcp_path\":\"/mcp\"}" > "$KIB_DIR/providers.d/svc.json"
+  printf "{\"id\":\"svc\",\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://api.svc.example\",\"inject_header\":\"Authorization\",\"inject_template\":\"Bearer {secret}\",\"token_basename\":\"svc-token\",\"mcp_path\":\"/mcp\"}" > "$KIB_DIR/providers.d/svc.json"
   printf "{\"mcpServers\":{\"svc2\":{\"type\":\"http\",\"url\":\"https://api.svc.example/mcp\",\"headers\":{\"Authorization\":\"Bearer TOK123\"}}}}" > ".mcp.json"
   mcp_adopt svc2 >/dev/null 2>&1
   echo "dup=$([ -f "$KIB_DIR/providers.d/svc2.json" ] && echo yes || echo no)"
@@ -101,21 +101,26 @@ else
 fi
 
 # GENERIC path: adopting an MCP with NO preset synthesizes a user provider def, which the
-# broker then lists — proving "any MCP, no code change". Also checks the auto-assigned port.
+# broker then lists — proving "any MCP, no code change". The synthesized route carries NO port
+# of its own; bash gets its share of the mux as a URL PATH.
 gen="$(_mcp_run '
   printf "{\"mcpServers\":{\"acme\":{\"type\":\"http\",\"url\":\"https://mcp.acme.example/v1/sse\",\"headers\":{\"X-API-Key\":\"AK_LIVE_9\"}}}}" > ".mcp.json"
   mcp_adopt acme >/dev/null 2>&1
   echo "def=$([ -f "$KIB_DIR/providers.d/acme.json" ] && echo yes)"
   echo "listed=$(_broker_list_providers | grep -c "^acme|")"
-  echo "port=$(kib_py broker.cli host-config acme | sed -n "s/KIB_BROKER_LISTEN_PORT=//p" | tr -d "'"'"'")"
+  grep -q listen_port "$KIB_DIR/providers.d/acme.json" && echo "hasport=yes" || echo "hasport=no"
+  echo "path=$(kib_py broker.cli host-config acme | sed -n "s/KIB_BROKER_MCP_URL_PATH=//p" | tr -d "'"'"'")"
+  echo "url=$(kib_py broker.cli route-url acme)"
   echo "blob=$(cat "$KIB_DIR/acme-token" 2>/dev/null)"
   grep -q X-API-Key ".mcp.json" && echo leak=yes || echo leak=no')"
 if printf '%s' "$gen" | grep -q "def=yes" \
     && printf '%s' "$gen" | grep -q "listed=1" \
-    && printf '%s' "$gen" | grep -q "port=810" \
+    && printf '%s' "$gen" | grep -q "hasport=no" \
+    && printf '%s' "$gen" | grep -q "path=/mcp/acme/v1/sse" \
+    && printf '%s' "$gen" | grep -q "url=http://kib-broker:8100/mcp/acme/v1/sse" \
     && printf '%s' "$gen" | grep -q "blob=AK_LIVE_9" \
     && printf '%s' "$gen" | grep -q "leak=no"; then
-    pass "kib mcp adopt (no preset): synthesizes a user provider def the broker then serves"
+    pass "kib mcp adopt (no preset): synthesizes a portless user def the broker then serves"
 else
     fail "generic adopt-synthesis wrong" "$gen"
 fi
@@ -123,7 +128,7 @@ fi
 # The Claude token's upstream cannot be hijacked by a user provider file named after a preset.
 ovr="$(_mcp_run '
   mkdir -p "$KIB_DIR/providers.d"
-  printf "{\"id\":\"claude\",\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://evil.example\",\"listen_port\":8100,\"inject_header\":\"a\",\"inject_template\":\"b\"}" > "$KIB_DIR/providers.d/claude.json"
+  printf "{\"id\":\"claude\",\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://evil.example\",\"inject_header\":\"a\",\"inject_template\":\"b\"}" > "$KIB_DIR/providers.d/claude.json"
   kib_py broker.cli host-config claude 2>/dev/null | sed -n "s/KIB_BROKER_BASE_URL_ENV=//p" | tr -d "'"'"'"')"
 if [ "$ovr" = "ANTHROPIC_BASE_URL" ]; then
     pass "a user provider def cannot override a built-in preset (claude upstream unchanged)"
@@ -191,6 +196,79 @@ if printf '%s' "$icC" | grep -q "nosecret_rc=1" && printf '%s' "$icC" | grep -q 
     pass "intercept: passthrough for no-secret add, mcp-list, a plain session, and no args"
 else
     fail "intercept passthrough wrong" "$icC"
+fi
+
+# `kib broker add`, non-interactive: writes the def, proves it LOADS, and reports the URL.
+# The load check is the end-to-end guarantee — a def that fails validation used to be written
+# happily and only surface as a broken launch days later.
+add="$(_mcp_run '
+  provider_add linear --url https://mcp.linear.app/sse --header "Authorization: Bearer" 2>&1
+  echo "listed=$(_broker_list_providers | grep -c "^linear|")"
+  grep -q "listen_port\|mcp_port" "$KIB_DIR/providers.d/linear.json" && echo port=yes || echo port=no')"
+if printf '%s' "$add" | grep -q "listed=1" \
+    && printf '%s' "$add" | grep -q "port=no" \
+    && printf '%s' "$add" | grep -q "http://kib-broker:8100/mcp/linear/sse"; then
+    pass "kib broker add: writes a portless def, confirms it loads, prints the agent URL"
+else
+    fail "kib broker add wrong" "$add"
+fi
+
+# A name that is not a safe route (a path segment, a filename stem AND a word-split field) is
+# refused BEFORE anything is written — a half-written providers.d is worse than a clean no.
+nm="$(_mcp_run '
+  before="$(ls "$KIB_DIR/providers.d" 2>/dev/null | wc -l | tr -d " ")"
+  provider_add ../evil --url https://x.example >/dev/null 2>&1; echo "esc_rc=$?"
+  provider_add claude  --url https://x.example >/dev/null 2>&1; echo "builtin_rc=$?"
+  provider_add UPPER   --url https://x.example >/dev/null 2>&1; echo "case_rc=$?"
+  after="$(ls "$KIB_DIR/providers.d" 2>/dev/null | wc -l | tr -d " ")"
+  echo "unchanged=$([ "$before" = "$after" ] && echo yes || echo no)"
+  provider_add dup --url https://a.example >/dev/null 2>&1
+  provider_add dup --url https://b.example >/dev/null 2>&1; echo "dup_rc=$?"
+  grep -q "a.example" "$KIB_DIR/providers.d/dup.json" && echo kept=yes || echo kept=no
+  provider_add dup --url https://b.example --force >/dev/null 2>&1; echo "force_rc=$?"
+  grep -q "b.example" "$KIB_DIR/providers.d/dup.json" && echo replaced=yes || echo replaced=no')"
+if printf '%s' "$nm" | grep -q "esc_rc=5" && printf '%s' "$nm" | grep -q "builtin_rc=5" \
+    && printf '%s' "$nm" | grep -q "case_rc=5" && printf '%s' "$nm" | grep -q "unchanged=yes" \
+    && printf '%s' "$nm" | grep -q "dup_rc=5" && printf '%s' "$nm" | grep -q "kept=yes" \
+    && printf '%s' "$nm" | grep -q "force_rc=0" && printf '%s' "$nm" | grep -q "replaced=yes"; then
+    pass "kib broker add: refuses an unsafe/built-in/duplicate name, --force replaces"
+else
+    fail "kib broker add name validation wrong" "$nm"
+fi
+
+# Every unusable def is NAMED, host-side, with the field at fault. This is the whole fix for
+# the incident: the old code said "skipping incomplete provider def" and a non-.json file said
+# nothing at all, so a hand-authored route vanished without a word.
+chk="$(_mcp_run '
+  mkdir -p "$KIB_DIR/providers.d"
+  printf "{\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://x.example\",\"listen_port\":8100,\"inject_header\":\"a\",\"inject_template\":\"b\"}" > "$KIB_DIR/providers.d/oldport.json"
+  printf "{\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://x.example\"}" > "$KIB_DIR/providers.d/nofields.json"
+  printf "{}" > "$KIB_DIR/providers.d/directus"
+  _broker_check_providers 2>&1')"
+if printf '%s' "$chk" | grep -q "oldport.json.*listen_port.*obsolete" \
+    && printf '%s' "$chk" | grep -q "nofields.json.*inject_header.*missing" \
+    && printf '%s' "$chk" | grep -q "directus: only \*.json"; then
+    pass "check-providers: names every bad def and the field at fault, incl. a non-.json file"
+else
+    fail "check-providers did not name all three bad defs" "$chk"
+fi
+
+# A def the registry refused must never take the LAUNCH down — it is a warning, and the rest
+# of the table still resolves. (The bind itself is proved fail-soft in tests/broker/.)
+soft="$(_mcp_run '
+  mkdir -p "$KIB_DIR/providers.d"
+  printf "{\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://x.example\",\"listen_port\":8100}" > "$KIB_DIR/providers.d/bad.json"
+  printf "{\"id\":\"good\",\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://ok.example\",\"inject_header\":\"Authorization\",\"inject_template\":\"Bearer {secret}\"}" > "$KIB_DIR/providers.d/good.json"
+  printf x>"$KIB_DIR/claude-token"; printf y>"$KIB_DIR/good-token"
+  echo "enabled=[$(broker_enabled_providers)]"; echo "rc=$?"')"
+# The dir is shared with the sections above, so match on membership, not on the whole set.
+if printf '%s' "$soft" | grep -q "rc=0" \
+    && printf '%s' "$soft" | grep -qE "enabled=\[.*\bclaude\b" \
+    && printf '%s' "$soft" | grep -qE "enabled=\[.*\bgood\b" \
+    && ! printf '%s' "$soft" | grep -qE "enabled=\[.*\bbad\b"; then
+    pass "a refused def is skipped, not fatal: every other route still resolves"
+else
+    fail "a bad provider def broke the good ones" "$soft"
 fi
 
 rm -rf "$_mcp_tmp"

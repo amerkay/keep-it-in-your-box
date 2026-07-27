@@ -20,8 +20,8 @@ kib — run Claude Code in a Docker sandbox, one container per project.
 
   kib [claude] [args…]        start (or attach to) this project's session
   kib exec <cmd> [args…]      run a command inside the box  (kib exec bash)
+  kib broker add [name …]     put an MCP behind the broker (bare = ask the questions)
   kib broker <verb> [name]    login | logout | status | probe   (host-only credentials)
-  kib mcp add <name> …        declare a brokered MCP
   kib mcp adopt <name>        move an inline-credential MCP into the broker
   kib audit                   report host-executed git config + tracked hidden paths
   kib unlock-shared [verb…]   this session may write ~/.claude's plugins + hooks

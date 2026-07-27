@@ -100,6 +100,20 @@ fi
 # natural place to manage a host-global credential). Run one from a blocked dir with a
 # throwaway KIB_CONFIG (no token → prints status, exits 1, touches no docker) and assert it
 # reached broker status rather than the launch refusal.
+# The verb table is what an agent in another workspace is told to hand the user. If `add`
+# stops being listed, the discoverable path back to "how do I broker this MCP?" is gone.
+help_out="$(KIB_CONFIG="$(mktemp -u)" bash "$KIB_ROOT/bin/kib" broker help 2>&1)"
+if printf '%s' "$help_out" | grep -q "kib broker add" \
+    && printf '%s' "$help_out" | grep -q "share one listener"; then
+    pass "kib broker help lists add, and says routes need no port"
+else
+    fail "kib broker help does not document add" "$(printf '%s' "$help_out" | head -3)"
+fi
+
+# An unknown verb must print the table and exit 2, never silently do nothing.
+KIB_CONFIG="$(mktemp -u)" bash "$KIB_ROOT/bin/kib" broker nosuchverb >/dev/null 2>&1
+is "an unknown broker verb exits 2 with the table" 2 "$?"
+
 guard_out="$(cd "$HOME" 2>/dev/null && KIB_CONFIG="$(mktemp -u)" bash "$KIB_ROOT/bin/kib" broker status 2>&1)"
 case "$guard_out" in
     *"refuses to launch"*) fail "kib broker status blocked from \$HOME by the dir guard" ;;

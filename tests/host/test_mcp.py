@@ -24,13 +24,12 @@ def kib_dir(tmp_path: Path) -> Path:
     return d
 
 
-def remote_def(name: str, port: int, host: str = "mcp.example.test", path: str = "/http") -> str:
+def remote_def(name: str, host: str = "mcp.example.test", path: str = "/http") -> str:
     return json.dumps(
         {
             "id": name,
             "delivery": "reverse_proxy_mcp",
             "upstream_origin": f"https://{host}",
-            "listen_port": port,
             "inject_header": "Authorization",
             "inject_template": "Bearer {secret}",
             "mcp_path": path,
@@ -43,7 +42,7 @@ def remote_def(name: str, port: int, host: str = "mcp.example.test", path: str =
 def test_inject_writes_a_header_free_broker_url(
     tmp_path: Path, providers_dir: Path, write_json: Callable[[str, object], Path]
 ) -> None:
-    (providers_dir / "remote.json").write_text(remote_def("remote", 8100))
+    (providers_dir / "remote.json").write_text(remote_def("remote"))
     (kib_dir(tmp_path) / "remote-token").write_text("tok\n")
     cfg = write_json("session/.claude.json", {})
 
@@ -62,7 +61,7 @@ def test_inject_writes_a_header_free_broker_url(
         == cli.OK
     )
     entry = json.loads(cfg.read_text())["mcpServers"]["remote"]
-    assert entry["url"] == "http://kib-broker:8100/http"
+    assert entry["url"] == "http://kib-broker:8100/mcp/remote/http"
     assert entry[mcp.MARKER] is True
     assert "headers" not in entry
 
@@ -70,7 +69,7 @@ def test_inject_writes_a_header_free_broker_url(
 def test_inject_skips_a_route_with_no_credential(
     tmp_path: Path, providers_dir: Path, write_json: Callable[[str, object], Path]
 ) -> None:
-    (providers_dir / "remote.json").write_text(remote_def("remote", 8100))
+    (providers_dir / "remote.json").write_text(remote_def("remote"))
     cfg = write_json("session/.claude.json", {})
     mcp.main(
         ["inject", "--config", str(cfg), "--kib-dir", str(kib_dir(tmp_path)), "--broker-host", "b"]
@@ -88,7 +87,6 @@ def test_inject_points_a_hosted_mcp_at_its_own_sidecar_only_if_it_came_up(
                 "delivery": "hosted_mcp",
                 "host_run": ["uvx", "some-mcp"],
                 "credential_env": "L_CRED",
-                "mcp_port": 8101,
                 "mcp_path": "/mcp",
             }
         )
@@ -108,7 +106,7 @@ def test_inject_points_a_hosted_mcp_at_its_own_sidecar_only_if_it_came_up(
     assert json.loads(cfg.read_text())["mcpServers"] == {}
 
     mcp.main([*base, "--hosted-up", "local"])
-    assert json.loads(cfg.read_text())["mcpServers"]["local"]["url"] == "http://local:8101/mcp"
+    assert json.loads(cfg.read_text())["mcpServers"]["local"]["url"] == "http://local:8100/mcp"
 
 
 def test_inject_prunes_only_entries_we_own(
@@ -202,7 +200,7 @@ def adopt_argv(tmp_path: Path, providers_dir: Path, name: str, cfg: Path) -> lis
 def test_adopt_reuses_an_existing_route_for_the_same_host(
     tmp_path: Path, providers_dir: Path, write_json: Callable[[str, object], Path]
 ) -> None:
-    (providers_dir / "svc.json").write_text(remote_def("svc", 8103, host="api.svc.test"))
+    (providers_dir / "svc.json").write_text(remote_def("svc", host="api.svc.test"))
     cfg = write_json(
         ".mcp.json",
         {
@@ -243,7 +241,7 @@ def test_adopt_synthesizes_a_route_for_an_unknown_host(
     assert mcp.main(adopt_argv(tmp_path, providers_dir, "acme", cfg)) == cli.OK
     prov = json.loads((providers_dir / "acme.json").read_text())
     assert prov["upstream_origin"] == "https://mcp.acme.test"
-    assert prov["listen_port"] >= 8100, "a user route must stay clear of the built-in LLM band"
+    assert "listen_port" not in prov, "a user route must not carry a port of its own"
     assert (kib_dir(tmp_path) / "acme-token").read_text() == "AK_LIVE_9\n"
 
 
@@ -359,6 +357,39 @@ def test_add_rejects_bad_argument_combinations(
     with pytest.raises(cli.AbortError, match=match) as exc:
         mcp.main(["add", "x", "--providers-dir", str(providers_dir), *argv])
     assert exc.value.code == cli.USAGE
+
+
+@pytest.mark.parametrize(
+    ("name", "match"),
+    [
+        ("../escape", "usable route name"),
+        ("Acme", "usable route name"),
+        ("has space", "usable route name"),
+        ("claude", "built-in"),
+    ],
+)
+def test_add_refuses_a_name_that_is_not_a_safe_route(
+    providers_dir: Path, name: str, match: str
+) -> None:
+    """The name is a filename stem, a URL path segment AND a word-split bash field."""
+    with pytest.raises(cli.AbortError, match=match) as exc:
+        mcp.main(["add", name, "--providers-dir", str(providers_dir), "--url", "https://x.test"])
+    assert exc.value.code == cli.REFUSED
+    assert list(providers_dir.iterdir()) == [], "a refused name still touched providers.d"
+
+
+def test_add_refuses_to_silently_replace_an_existing_route(providers_dir: Path) -> None:
+    argv = ["add", "svc", "--providers-dir", str(providers_dir), "--url", "https://a.test"]
+    assert mcp.main(argv) == cli.OK
+    with pytest.raises(cli.AbortError, match="already exists"):
+        mcp.main([*argv[:-1], "https://b.test"])
+    assert (
+        json.loads((providers_dir / "svc.json").read_text())["upstream_origin"] == "https://a.test"
+    )
+    assert mcp.main([*argv[:-1], "https://b.test", "--force"]) == cli.OK
+    assert (
+        json.loads((providers_dir / "svc.json").read_text())["upstream_origin"] == "https://b.test"
+    )
 
 
 # ── intercept ────────────────────────────────────────────────────
@@ -513,6 +544,49 @@ def test_intercept_handles_the_add_json_form(
     intercept(tmp_path, providers_dir, "mcp", "add-json", "js", blob)
     assert capsys.readouterr().out.strip() == "brokered"
     assert (kib_dir(tmp_path) / "js-token").read_text() == "sk-json\n"
+
+
+def test_intercept_updates_the_route_when_a_vendor_line_is_re_pasted(
+    tmp_path: Path, providers_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Unlike `add`, re-pasting a rotated vendor line SHOULD replace what it wrote before."""
+    for secret in ("Bearer sk-old", "Bearer sk-new"):
+        intercept(
+            tmp_path,
+            providers_dir,
+            "mcp",
+            "add",
+            "--header",
+            f"Authorization: {secret}",
+            "--transport",
+            "http",
+            "dfs",
+            "https://mcp.dfs.test/http",
+        )
+        assert capsys.readouterr().out.strip() == "brokered"
+    assert (kib_dir(tmp_path) / "dfs-token").read_text() == "sk-new\n"
+
+
+def test_intercept_will_not_broker_a_name_that_is_not_a_safe_route(
+    tmp_path: Path, providers_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """It falls through to the block arm — never passthrough, which would leak the secret."""
+    intercept(
+        tmp_path,
+        providers_dir,
+        "mcp",
+        "add",
+        "--header",
+        "Authorization: Bearer sk-x",
+        "--transport",
+        "http",
+        "../evil",
+        "https://mcp.dfs.test/http",
+    )
+    out = capsys.readouterr()
+    assert out.out.strip() == "blocked"
+    assert "sk-x" not in out.err
+    assert list(providers_dir.iterdir()) == []
 
 
 def test_intercept_passes_through_malformed_add_json(

@@ -282,18 +282,21 @@ failed too.
   (The local/stdio form that ships secrets as `--env` can't be brokered that way, so kib **refuses** it rather than leak — `KIB_ALLOW_INLINE_MCP_SECRET=1` is the deliberate override. And if a secret got into a config some *other* way, kib still **warns** on the next launch and offers `kib mcp adopt <name>` to migrate it.) You can also declare one directly:
 
   ```bash
-  # remote MCP, static auth header (broker injects it):
-  kib mcp add linear --url https://mcp.linear.app/sse --header "Authorization: Bearer"
-  kib broker login linear    # paste the token; stored host-only, never in the box
+  kib broker add             # asks the questions, then prompts for the credential (hidden)
+  # …or the same thing from flags. Remote MCP, static auth header (broker injects it):
+  kib broker add linear --url https://mcp.linear.app/sse --header "Authorization: Bearer"
   # local/hosted MCP whose secret can't be header-injected (runs in its own sidecar):
-  kib mcp add gsc --run "uvx mcp-search-console" --cred-env GSC_CREDENTIALS_PATH \
+  kib broker add gsc --run "uvx mcp-search-console" --cred-env GSC_CREDENTIALS_PATH \
      --cred-kind file --env GSC_SKIP_OAUTH=true
-  kib broker login gsc       # give the path to a service-account JSON key
   kib broker login codex     # an OpenAI API key → OPENAI_BASE_URL points at the broker
-  kib broker status          # list every credential (size/mode only, never contents)
+  kib broker status          # every route: credential (size/mode only), URL, refused defs
   ```
 
-  **No MCP is built in — only the LLMs are.** DataForSEO (remote, Basic auth) and mcp-gsc (a Google service-account JSON, run in its own sidecar) ship as worked **examples** in [`examples/providers/`](examples/providers/) — copy one into `~/.keep-it-in-your-box/providers.d/` and `kib broker login` it; your own MCP works exactly the same way. With the broker on, kib writes a **header-free** broker URL into the session config, so the agent reaches the MCP without ever holding its credential. Brokering an MCP needs the broker running, which it is unless you turned it off. See [`docs/design-notes/credential-broker.md`](docs/design-notes/credential-broker.md) and CLAUDE.md "Credential broker".
+  There is **no port to pick**: every brokered MCP shares one listener and is told apart by
+  name (`http://kib-broker:8100/mcp/<name>`). A route that can't come up is named and skipped —
+  it never costs you the session.
+
+  **No MCP is built in — only the LLMs are.** DataForSEO (remote, Basic auth) and mcp-gsc (a Google service-account JSON, run in its own sidecar) ship as worked **examples** in [`examples/providers/`](examples/providers/) — copy one into `~/.keep-it-in-your-box/providers.d/` and `kib broker login` it; your own MCP works exactly the same way. With the broker on, kib writes a **header-free** broker URL into the session config, so the agent reaches the MCP without ever holding its credential. Brokering an MCP needs the broker running, which it is unless you turned it off. Full design in [`docs/design-notes/credential-broker.md`](docs/design-notes/credential-broker.md).
 
   **An egress firewall is a "delayed-or-never" task, on purpose.** The two channels that matter cannot be closed: `api.anthropic.com` is itself a bidirectional exfil path, and `github.com` plus the package registries must stay open for the agent to work at all. So the real fix is the **broker** — remove the thing worth stealing — not a firewall. Full reasoning in [`docs/FUTURE_TASKS.md`](docs/FUTURE_TASKS.md) § E1.
 - **`host.docker.internal` is routable** to the host network stack.

@@ -12,11 +12,19 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 import urllib.parse
 from typing import Any
 
 from kib.broker.credential import FAR_FUTURE_MS
+from kib.broker.helpers import validate_route_id
+
+#: The ONE port every user MCP route shares, dispatched by a `/mcp/<id>` path prefix. A
+#: per-route port knob is what took a launch down (two defs, one port, an unguarded bind), and
+#: no amount of auto-assignment fixes a number the user can still edit. Clear of the LLM band
+#: (8080–8082), which keeps its dedicated listeners. Each hosted_mcp sidecar reuses the number
+#: inside its OWN netns, so there is nothing to collide with.
+MCP_PORT = 8100
+MCP_PREFIX = "/mcp"
 
 PROVIDERS: dict[str, dict[str, Any]] = {
     "claude": {
@@ -116,6 +124,9 @@ PROVIDERS: dict[str, dict[str, Any]] = {
     # without touching this file. Two worked examples ship in examples/providers/.
 }
 
+#: The ids a user def may never take, snapshotted before any merge folds user rows in.
+BUILTIN_IDS = tuple(PROVIDERS)
+
 # ── User-defined providers: broker ANY MCP, no code change ───────────────────
 # Any MCP is brokered by dropping a partial provider dict in ~/.keep-it-in-your-box/providers.d/
 # — written by `kib mcp add`, synthesized by `kib mcp adopt`, or copied from examples/providers/.
@@ -125,16 +136,28 @@ PROVIDERS: dict[str, dict[str, Any]] = {
 #
 # Two delivery modes cover every MCP:
 #   reverse_proxy_mcp — REMOTE, with a STATIC auth header to a fixed upstream. Brokered like an
-#     LLM: .claude.json gets `url: http://kib-broker:<port><mcp_path>` and NO header.
+#     LLM: .claude.json gets `url: http://kib-broker:8100/mcp/<id><mcp_path>` and NO header.
 #   hosted_mcp — LOCAL / client-signed (e.g. a service-account JSON), so it CANNOT be
 #     header-brokered. The MCP server runs in its own sidecar holding the credential file.
 _REQUIRED = {
-    "reverse_proxy_mcp": ("upstream_origin", "listen_port", "inject_header", "inject_template"),
-    "hosted_mcp": ("host_run", "mcp_port"),
+    "reverse_proxy_mcp": ("upstream_origin", "inject_header", "inject_template"),
+    "hosted_mcp": ("host_run",),
+}
+
+#: Keys a def must NOT carry. Each was a per-route port a user could hand-pick; two defs with
+#: the same number took a whole launch down. Named on sight rather than ignored, because a def
+#: written against the old shape is exactly the thing someone will paste from an old note.
+_OBSOLETE = {
+    "listen_port": "user MCP routes no longer have their own port",
+    "mcp_port": "the hosted-MCP port is fixed",
 }
 
 #: Delivery modes the broker sidecar itself serves (the rest run in their own sidecar).
 SIDECAR_SERVED = ("base_url_env", "reverse_proxy_mcp")
+
+#: One human-readable line per rejected/ignored def, refilled by every merge_user_providers().
+#: Never contains file CONTENT — a def sits next to credentials and may hold a pasted one.
+DEF_PROBLEMS: list[str] = []
 
 
 def _finalize_provider(pid: str, p: dict[str, Any]) -> dict[str, Any]:
@@ -154,56 +177,89 @@ def _finalize_provider(pid: str, p: dict[str, Any]) -> dict[str, Any]:
         p.setdefault("strip_incoming", [p["inject_header"].lower()])
     elif p.get("delivery") == "hosted_mcp":
         p.setdefault("extra_env", {})
+        # Its own sidecar, its own netns: the shared number cannot collide with anything.
+        p["mcp_port"] = MCP_PORT
     return p
+
+
+def _validate(fn: str, pid: str, p: dict[str, Any]) -> list[str]:
+    """Every reason this def cannot become a route. Empty means it is usable."""
+    bad = validate_route_id(pid, BUILTIN_IDS)
+    if bad:
+        return [bad]
+    if p.get("id") and p["id"] != fn[:-5]:
+        return [f"its \"id\" is '{p['id']}' but the file is named {fn} — they must match"]
+    delivery = p.get("delivery")
+    need = _REQUIRED.get(delivery) if isinstance(delivery, str) else None
+    if need is None:
+        return [
+            f'"delivery" is {delivery!r} — expected "reverse_proxy_mcp" (a remote MCP behind a '
+            'static auth header) or "hosted_mcp" (a local server in its own sidecar)'
+        ]
+    problems = [f'"{k}" is missing' for k in need if p.get(k) in (None, "", [])]
+    problems += [f'"{k}" is obsolete — {why}' for k, why in _OBSOLETE.items() if k in p]
+    if delivery == "reverse_proxy_mcp":
+        # The path belongs in mcp_path: the relay joins origin + forwarded path, so a path
+        # here would silently vanish rather than fail.
+        origin = urllib.parse.urlsplit(str(p.get("upstream_origin", "")))
+        if origin.scheme not in ("http", "https") or not origin.hostname:
+            problems.append('"upstream_origin" must be an http(s) origin, e.g. https://mcp.x.com')
+        elif origin.path:
+            problems.append(
+                f'"upstream_origin" carries the path {origin.path!r} — put it in "mcp_path"'
+            )
+    return problems
 
 
 def merge_user_providers() -> None:
     """Fold `$KIB_PROVIDERS_DIR/*.json` onto the built-in table. Idempotent."""
+    DEF_PROBLEMS.clear()
     d = os.environ.get("KIB_PROVIDERS_DIR")
     if not d or not os.path.isdir(d):
         return
     for fn in sorted(os.listdir(d)):
+        path = os.path.join(d, fn)
+        if not os.path.isfile(path):
+            continue
         if not fn.endswith(".json"):
+            # Silence here is what made the original incident unreadable: the file existed,
+            # was never loaded, and nothing anywhere said so.
+            DEF_PROBLEMS.append(f"{fn}: only *.json files are read — rename it to {fn}.json")
             continue
         try:
-            with open(os.path.join(d, fn)) as fh:
+            with open(path) as fh:
                 p = json.load(fh)
         except (OSError, ValueError) as e:
-            sys.stderr.write(f"kib-broker: skipping bad provider def {fn} ({type(e).__name__})\n")
+            DEF_PROBLEMS.append(f"{fn}: unreadable or not valid JSON ({type(e).__name__})")
+            continue
+        if not isinstance(p, dict):
+            DEF_PROBLEMS.append(f"{fn}: the top level must be a JSON object")
             continue
         pid = p.get("id") or fn[:-5]
-        if pid in PROVIDERS:  # never override a built-in preset
-            sys.stderr.write(f"kib-broker: ignoring user def {fn} — '{pid}' is a built-in\n")
+        problems = _validate(fn, str(pid), p)
+        if problems:
+            DEF_PROBLEMS.extend(f"{fn}: {why}" for why in problems)
             continue
-        need = _REQUIRED.get(p.get("delivery"))
-        if not need or not all(p.get(k) not in (None, "", []) for k in need):
-            sys.stderr.write(f"kib-broker: skipping incomplete provider def {fn}\n")
-            continue
-        PROVIDERS[pid] = _finalize_provider(pid, p)
+        PROVIDERS[str(pid)] = _finalize_provider(str(pid), p)
 
 
-def next_free_port() -> int:
-    """The next free listen port for a NEW user route.
+def route_path(pid: str, p: dict[str, Any]) -> str:
+    """The URL path the AGENT requests for an MCP route ('' for a non-MCP row).
 
-    At or above 8100, clear of the built-in LLM band (8080–8082), so user MCP routes never
-    collide with a built-in. Read after merge_user_providers() so it also counts ports
-    already claimed by existing user defs.
+    reverse_proxy_mcp rows are multiplexed behind `/mcp/<id>`; a hosted_mcp row has a whole
+    sidecar to itself and keeps its bare `mcp_path`. One definition so `inject`, `host-config`
+    and `kib broker status` cannot print three different URLs.
     """
-    used = [
-        v
-        for p in PROVIDERS.values()
-        for v in (p.get("listen_port"), p.get("mcp_port"))
-        if isinstance(v, int)
-    ]
-    return max(used + [8099]) + 1
+    tail = p.get("mcp_path") or ""
+    delivery = p.get("delivery")
+    if delivery == "reverse_proxy_mcp":
+        return f"{MCP_PREFIX}/{pid}{tail}"
+    return tail if delivery == "hosted_mcp" else ""
 
 
-def provider_id_of(provider: dict[str, Any]) -> str:
-    """Reverse-lookup an id from a row object (the proxy holds the row, not the id)."""
-    for pid, p in PROVIDERS.items():
-        if p is provider:
-            return pid
-    return "?"
+def agent_url(pid: str, p: dict[str, Any], host: str) -> str:
+    """The full `http://<host>:8100/…` URL the agent's .claude.json gets for an MCP route."""
+    return f"http://{host}:{MCP_PORT}{route_path(pid, p)}"
 
 
 def match_upstream_route(url: str) -> tuple[str, str, str] | None:

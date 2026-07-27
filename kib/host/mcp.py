@@ -70,11 +70,9 @@ def inject(args: argparse.Namespace) -> int:
         else:
             continue
         name = p.get("mcp_server_name") or ""
-        port = p.get("mcp_port") or p.get("listen_port")
-        if not name or not port:
+        if not name:
             continue
-        url = f"http://{host}:{port}{p.get('mcp_path', '')}"
-        specs.append((name, p.get("mcp_transport") or "http", url))
+        specs.append((name, p.get("mcp_transport") or "http", registry.agent_url(pid, p, host)))
 
     data, servers = _servers(args.config)
     servers = {k: v for k, v in servers.items() if not _is_ours(v)}
@@ -164,17 +162,18 @@ def adopt(args: argparse.Namespace) -> int:
         pid, basename, scheme = matched
         where = f"existing route '{pid}'"
     else:
+        bad = helpers.validate_route_id(name, registry.BUILTIN_IDS)
+        if bad:
+            raise cli.AbortError(f"cannot broker {name!r}: {bad}", cli.REFUSED)
         scheme = helpers.scheme_of(authval)
         transport = entry.get("type") if entry.get("type") in ("http", "sse") else "http"
         try:
-            prov = helpers.synthesize_reverse_proxy(
-                name, url, hdrname or "", scheme, registry.next_free_port(), transport
-            )
+            prov = helpers.synthesize_reverse_proxy(name, url, hdrname or "", scheme, transport)
         except ValueError as e:
             raise cli.AbortError(str(e)) from e
         basename = prov["token_basename"]
         helpers.write_provider_def(args.providers_dir, name, prov)
-        where = f"new provider def {name}.json (port {prov['listen_port']})"
+        where = f"new provider def {name}.json"
 
     helpers.store_secret(args.kib_dir, basename, helpers.recover_secret(authval, scheme))
 
@@ -195,6 +194,16 @@ def adopt(args: argparse.Namespace) -> int:
 # ── add: declare a brokered MCP directly ─────────────────────────────────────────
 def add(args: argparse.Namespace) -> int:
     """Write a provider def for a remote (header-brokered) or hosted (local) MCP."""
+    bad = helpers.validate_route_id(args.name, registry.BUILTIN_IDS)
+    if bad:
+        raise cli.AbortError(bad, cli.REFUSED)
+    dest = os.path.join(args.providers_dir, f"{args.name}.json")
+    if os.path.exists(dest) and not args.force:
+        raise cli.AbortError(
+            f"a route named {args.name!r} already exists ({dest}). Re-run with --force to "
+            "replace it, or pick another name.",
+            cli.REFUSED,
+        )
     extra_env: dict[str, str] = {}
     for item in args.env:
         k, sep, v = item.partition("=")
@@ -211,14 +220,13 @@ def add(args: argparse.Namespace) -> int:
             cli.USAGE,
         )
 
-    port = args.port
     if args.url:
         hdrname, scheme = "Authorization", "Bearer"
         if args.header:
             hdrname, _, sc = args.header.partition(":")
             hdrname, scheme = hdrname.strip(), sc.strip()
         try:
-            prov = helpers.synthesize_reverse_proxy(args.name, args.url, hdrname, scheme, port)
+            prov = helpers.synthesize_reverse_proxy(args.name, args.url, hdrname, scheme)
         except ValueError as e:
             raise cli.AbortError("--url must be an http(s) URL", cli.USAGE) from e
     elif args.run:
@@ -235,7 +243,6 @@ def add(args: argparse.Namespace) -> int:
             "token_basename": base,
             "host_run": args.run.split(),
             "credential_env": args.cred_env,
-            "mcp_port": port,
             "mcp_path": "/mcp",
             "mcp_transport": "http",
             "mcp_server_name": args.name,
@@ -249,7 +256,7 @@ def add(args: argparse.Namespace) -> int:
 
     helpers.write_provider_def(args.providers_dir, args.name, prov)
     sys.stderr.write(
-        f"🔐 wrote provider def {args.name}.json ({prov['delivery']}, port {port}).\n"
+        f"🔐 wrote provider def {args.name}.json ({prov['delivery']}).\n"
         f"   Now add its credential:  kib broker login {args.name}\n"
     )
     return cli.OK
@@ -362,13 +369,13 @@ def intercept(args: argparse.Namespace) -> int:
     w = sys.stderr.write
 
     # Remote + auth header → AUTO-BROKER (the secret never enters the box).
-    if is_remote and hval and name:
+    if is_remote and hval and name and not helpers.validate_route_id(name, registry.BUILTIN_IDS):
         scheme = helpers.scheme_of(hval)
         secret = helpers.recover_secret(hval, scheme)
         if secret:
             try:
                 prov = helpers.synthesize_reverse_proxy(
-                    name, url, hname or "", scheme, args.port, parsed["transport"]
+                    name, url, hname or "", scheme, parsed["transport"]
                 )
             except ValueError:
                 prov = None
@@ -381,7 +388,7 @@ def intercept(args: argparse.Namespace) -> int:
                 )
                 w(
                     f"   • '{name}' → {prov['upstream_origin']}{prov['mcp_path']} "
-                    f"(reverse-proxy route, port {args.port})\n"
+                    f"(reverse-proxy route {registry.MCP_PREFIX}/{name})\n"
                 )
                 w(f"   • credential stored host-only: {os.path.basename(dest)} (mode 600)\n")
                 w(f"   • provider def: providers.d/{name}.json\n")
@@ -473,7 +480,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--run", default="", help="hosted MCP: the stdio command to run")
     p.add_argument("--cred-env", default="", help="hosted MCP: env var holding the credential")
     p.add_argument("--cred-kind", default="token", choices=("token", "file"))
-    p.add_argument("--port", type=int, default=0)
+    p.add_argument("--force", action="store_true", help="replace an existing route of this name")
     p.add_argument("--env", action="append", default=[], metavar="KEY=VAL")
     p.set_defaults(fn=add)
 
@@ -482,7 +489,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--providers-dir", required=True)
     p.add_argument("--allow", action="store_true", help="knowingly carry the secret into the box")
     p.add_argument("--broker-on", action="store_true")
-    p.add_argument("--port", type=int, default=0)
     p.add_argument("argv", nargs=argparse.REMAINDER)
     p.set_defaults(fn=intercept)
     return ap
@@ -491,8 +497,6 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str]) -> int:
     registry.merge_user_providers()
     args = _build_parser().parse_args(argv)
-    if getattr(args, "port", None) == 0:
-        args.port = registry.next_free_port()
     result: int = args.fn(args)
     return result
 

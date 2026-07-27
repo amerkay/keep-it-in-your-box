@@ -710,6 +710,26 @@ if [ -n "$_brokered" ]; then
             *) fail "brokered MCP '$name' has an unexpected url" "url=$url" ;;
         esac
         is "brokered MCP '$name' carries no inline auth header (broker injects it)" "nohdr" "$hdr"
+
+        # An MCP aimed at the LLM band would get the ANTHROPIC token injected into whatever
+        # upstream that route serves. Every MCP lives behind the shared listener's /mcp/ prefix
+        # instead, so the two can never be confused.
+        case "$url" in
+            http://kib-broker:808[0-9]* | http://kib-broker:809[0-9]*)
+                fail "brokered MCP '$name' points at the LLM listener band" \
+                    "url=$url — that route injects an LLM credential, not this MCP's"
+                ;;
+            http://kib-broker:*)
+                case "$url" in
+                    http://kib-broker:*/mcp/*)
+                        pass "brokered MCP '$name' sits behind the shared /mcp/<id> prefix"
+                        ;;
+                    *) fail "brokered MCP '$name' is not behind the /mcp/ prefix" "url=$url" ;;
+                esac
+                ;;
+            # A hosted_mcp answers on its OWN sidecar alias, so it has no prefix to carry.
+            *) pass "brokered MCP '$name' runs in its own sidecar ($url)" ;;
+        esac
     done <<EOF
 $_brokered
 EOF

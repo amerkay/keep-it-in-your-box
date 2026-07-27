@@ -3,7 +3,6 @@
   "delivery": "reverse_proxy_mcp",
   "credential_kind": "paste_token",
   "upstream_origin": "https://mcp.dataforseo.com",
-  "listen_port": 8100,
   "inject_header": "Authorization",
   "inject_template": "Basic {secret}",
   "token_basename": "dataforseo-token",

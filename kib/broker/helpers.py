@@ -24,6 +24,27 @@ _AUTH_SCHEME_RE = re.compile(r"(sk-|Bearer |Basic )")  # a credential-scheme pre
 _B64_VAL_RE = re.compile(r"[A-Za-z0-9+/]{16,}={0,2}$")
 _HEX_VAL_RE = re.compile(r"[0-9a-fA-F]{24,}$")
 
+#: A route id is three things at once: a filename stem, a URL path segment on the shared MCP
+#: listener, and a `list-providers` field bash word-splits on. This is the narrowest spelling
+#: all three accept, so one validator covers the writer and the reader.
+_ROUTE_ID_RE = re.compile(r"[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$")
+
+
+def validate_route_id(name: str, builtins: Sequence[str] = ()) -> str | None:
+    """The reason `name` is unusable as a route id, or None if it is fine."""
+    if not name:
+        return "the name is empty"
+    if len(name) > 64:
+        return "the name is longer than 64 characters"
+    if name in builtins:
+        return f"'{name}' is a built-in LLM route and cannot be redefined"
+    if not _ROUTE_ID_RE.match(name):
+        return (
+            f"'{name}' is not a usable route name — use lowercase letters, digits, '.', '_' "
+            "and '-' only, starting and ending with a letter or digit"
+        )
+    return None
+
 
 def key_is_secret(k: str) -> bool:
     """A header/env NAME that names a credential (Authorization, *_TOKEN, API_KEY, …)."""
@@ -101,12 +122,13 @@ def recover_secret(header_value: str, scheme: str) -> str:
 
 
 def synthesize_reverse_proxy(
-    name: str, url: str, header_name: str, scheme: str, port: int, transport: str = "http"
+    name: str, url: str, header_name: str, scheme: str, transport: str = "http"
 ) -> dict[str, Any]:
     """Build a reverse_proxy_mcp provider def (NO secret in it) from an inline MCP entry.
 
     The one place this dict shape is defined for adopt/add/intercept. Raises ValueError on
-    a non-http(s) url.
+    a non-http(s) url. No port: every reverse route shares the one MCP listener and is
+    reached by its `/mcp/<id>` prefix.
     """
     u = urllib.parse.urlsplit(url)
     if u.scheme not in ("http", "https") or not u.hostname:
@@ -120,7 +142,6 @@ def synthesize_reverse_proxy(
         "mcp_transport": transport if transport in ("http", "sse") else "http",
         "inject_header": header_name or "Authorization",
         "inject_template": (scheme + " {secret}") if scheme else "{secret}",
-        "listen_port": port,
         "token_basename": f"{name}-token",
         "mcp_server_name": name,
     }

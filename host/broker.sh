@@ -58,6 +58,27 @@ _broker_list_providers() {
     kib_py broker.cli list-providers 2>/dev/null
 }
 
+# Why the registry refused a providers.d file, one `warn` per reason. Runs HOST-side, before
+# anything starts: without it these diagnostics reach only the sidecar's stderr — a different
+# container, whose log you have to already suspect to go looking at.
+_broker_check_providers() {
+    have_python || return 0
+    local line
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        warn "broker: $line"
+    done <<EOF
+$(kib_py broker.cli check-providers 2>/dev/null)
+EOF
+}
+
+# The agent-facing URL for one MCP route, from the registry. Empty for an LLM row (reached by
+# env var) and for an unknown id. Never hardcode the port here — registry.py owns it.
+_broker_route_url() {
+    have_python || return 0
+    kib_py broker.cli route-url "$1" 2>/dev/null || true
+}
+
 # Active ids (host credential file non-empty) whose delivery is in the space-separated set $1,
 # in registry order.
 _active_providers() {
@@ -81,8 +102,14 @@ hosted_mcp_providers() { _active_providers "hosted_mcp"; }
 # Fixed at container creation, like the redaction rules: a second terminal must never attach
 # under a broker config that changed since the container started. Covers sidecar routes and
 # hosted MCPs, so adding or removing either forces a relaunch.
+#
+# The fingerprint (id|path|upstream per route) is what makes EDITING a def count too: hashing
+# ids alone let a changed upstream leave the running sidecar serving the old one while a
+# second terminal attached happily. More attach refusals after an edit — that is the point.
 broker_config_hash() {
-    hash8 "$(broker_enabled_providers)|$(hosted_mcp_providers)|$KIB_BROKER_ENDPOINT_MODE"
+    local fp=""
+    have_python && fp="$(kib_py broker.cli route-fingerprint 2>/dev/null)"
+    hash8 "$(broker_enabled_providers)|$(hosted_mcp_providers)|$KIB_BROKER_ENDPOINT_MODE|$fp"
 }
 
 # Host-facing facts for one provider, from the registry. Sets KIB_BROKER_* in the CALLER's
@@ -158,6 +185,7 @@ _broker_ready_or_dead() { [ -f "$BROKER_OUT/ready" ] || ! broker_running; }
 # the boot lock, before the main container's docker run. No-op when the broker is not wanted.
 start_broker() {
     broker_wanted || return 0
+    _broker_check_providers # say what the registry refused, before it matters
     if ! broker_has_token; then
         # A first launch with no token is normal, not an error: run the one-time login here.
         # The subshell isolates provider_login's `exit` on empty input, so a declined login
@@ -229,7 +257,20 @@ EOF
     if [ ! -f "$BROKER_OUT/ready" ]; then
         echo "❌ broker: sidecar never became ready; logs:" >&2
         docker logs "$BROKER_CNAME" 2>&1 | tail -10 | sed 's/^/   /' >&2 || true
-        _broker_abort "the credential broker did not come up."
+        # Only the claude route can get here: a user MCP that cannot come up is skipped by
+        # name (see the `broken` file below), never fatal.
+        _broker_abort "the credential broker could not serve the Claude route."
+    fi
+
+    # Routes that were skipped. The sidecar writes this BEFORE `ready`, so by now it is
+    # complete — warn per route and carry on, which is the whole fail-soft split.
+    if [ -s "$BROKER_OUT/broken" ]; then
+        local bid breason
+        while read -r bid breason; do
+            [ -n "$bid" ] || continue
+            warn "broker route '$bid' did not come up: $breason." \
+                "The session continues without it; every other route is up."
+        done <"$BROKER_OUT/broken"
     fi
 
     broker_config_hash >"$BROKER_HASH"
@@ -615,11 +656,12 @@ provider_probe() {
     kib_py broker.cli probe "$_P_FILE" "$id"
 }
 
-# Status of EVERY registry provider (never prints contents — size/mode only).
+# Status of EVERY registry provider (never prints contents — size/mode only), plus the defs
+# the registry REFUSED — which otherwise have no row anywhere and are invisible until a launch.
 provider_status() {
     echo "🔐 credential broker"
     echo "   enabled:  $(broker_wanted && echo yes || echo "no  (turned off by 'broker = off' in $KIB_CONFIG, or KIB_BROKER=0)")"
-    local id delivery kind basename file mode size
+    local id delivery kind basename file mode size url
     while IFS='|' read -r id delivery kind basename; do
         file="$KIB_DIR/$basename"
         if [ -s "$file" ]; then
@@ -631,9 +673,20 @@ provider_status() {
         else
             printf '   %-11s —       add: kib broker login %s   [%s]\n' "$id" "$id" "$delivery"
         fi
+        # MCP rows only: an LLM row is reached by env var, and asking would be three python
+        # spawns per status to be told "no URL".
+        case "$delivery" in
+            base_url_env) ;;
+            *)
+                url="$(_broker_route_url "$id")"
+                [ -n "$url" ] && printf '   %-11s   → %s\n' "" "$url"
+                ;;
+        esac
     done <<EOF
 $(_broker_list_providers)
 EOF
+    echo
+    _broker_check_providers
     if broker_has_token; then
         echo
         provider_probe claude # propagate its tri-state: 0 accepted / 1 rejected / 2 unknown
@@ -642,15 +695,148 @@ EOF
     return 1 # no claude token stored → the required credential is absent
 }
 
+# ── kib broker add: one command from "I want this MCP" to a live route ──
+# `kib mcp add` stays the non-interactive machinery (adopt and intercept share it); this closes
+# its one real gap — it wrote a def and then told you to run a SECOND command. Bash only ever
+# detects "no args and a tty → ask the questions"; every flag goes to argparse, because a
+# hand-rolled flag parser is a bug this repo has already paid for once (kib/shared/cli.py).
+
+_ADD_ARGV=() # set by the wizard, consumed by provider_add
+
+# Ask the four or five things a route needs. Never touches a credential: provider_login does
+# that, with a hidden read, once the def is proven loadable.
+_broker_add_wizard() {
+    local kind="" name="" why="" url="" header="" runcmd="" cred_env="" cred_kind=""
+    echo "🔐 kib broker add — put a service's MCP behind the credential broker."
+    echo "   The credential is stored HOST-ONLY; the sandbox gets a header-free URL and"
+    echo "   never sees the secret. No port to pick — every route shares one, by name."
+    echo
+    echo "   1) remote — the service hosts the MCP; one static header authenticates you"
+    echo "   2) local  — a server you run (npx/uvx) that reads a key file or env var"
+    printf '   Which? [1] '
+    read -r kind || true
+
+    while :; do
+        printf '   Short name for the route (lowercase, e.g. directus): '
+        read -r name || true
+        [ -n "$name" ] || die "nothing entered — nothing was written."
+        # One validator for bash and python: the name is a filename stem, a URL path segment
+        # and a word-split field all at once.
+        why="$(kib_py broker.cli check-name "$name" 2>/dev/null)" && break
+        echo "   ⚠️  $why" >&2
+    done
+
+    if [ "$kind" = 2 ]; then
+        printf '   Command that runs the server (e.g. uvx mcp-search-console): '
+        read -r runcmd || true
+        [ -n "$runcmd" ] || die "no command entered — nothing was written."
+        printf '   Env var the server reads its credential from (e.g. GSC_CREDENTIALS_PATH): '
+        read -r cred_env || true
+        [ -n "$cred_env" ] || die "no env var entered — nothing was written."
+        printf '   Is that credential a pasted token or a file path? [token/file] '
+        read -r cred_kind || true
+        case "$cred_kind" in f | file) cred_kind="file" ;; *) cred_kind="token" ;; esac
+        _ADD_ARGV=("$name" --run "$runcmd" --cred-env "$cred_env" --cred-kind "$cred_kind")
+    else
+        printf '   The MCP endpoint URL (https://…): '
+        read -r url || true
+        [ -n "$url" ] || die "no URL entered — nothing was written."
+        printf '   Auth header the service wants [Authorization: Bearer]: '
+        read -r header || true
+        [ -n "$header" ] || header="Authorization: Bearer"
+        _ADD_ARGV=("$name" --url "$url" --header "$header")
+    fi
+    echo
+}
+
+# Prove the def we just wrote is a ROUTE, then chain the credential and say where it lands.
+_broker_add_finish() {
+    local id="$1" url=""
+    # The end-to-end guarantee, and the reason `add` is not just `mcp add`: re-read the
+    # registry. If the id is absent, the file was written but refused, and the user hears it
+    # now rather than at a launch three days later.
+    if ! _provider_lookup "$id"; then
+        echo "❌ the definition was written, but the broker will not load it:" >&2
+        _broker_check_providers
+        die "'$id' is not a usable route — fix or remove $PROVIDERS_DIR/$id.json"
+    fi
+    if [ -t 0 ]; then
+        echo "   Now its credential — stored host-only, mode 600, never in the sandbox."
+        echo
+        # A subshell: provider_login exits on empty input, which must not read as "add failed"
+        # after the def landed successfully.
+        (provider_login "$id") \
+            || warn "no credential stored yet — add it with: kib broker login $id"
+    fi # non-interactive: `mcp add` already printed the `kib broker login` line
+    url="$(_broker_route_url "$id")"
+    echo
+    echo "🔐 route '$id' is defined."
+    [ -n "$url" ] && echo "   The agent will reach it at $url — no header, no token in the box."
+    if broker_wanted; then
+        echo "   It appears in the NEXT container: close every kib session for the project,"
+        echo "   then relaunch."
+    else
+        echo "   ⚠️  The broker is off, so this route is not active yet. Enable it:"
+        echo "        echo 'broker = on' >> $KIB_CONFIG"
+    fi
+}
+
+# `kib broker add [<name> --url … | <name> --run … --cred-env …]`. Bare + a tty asks instead.
+provider_add() {
+    need_python
+    mkdir -p "$PROVIDERS_DIR" && chmod 700 "$PROVIDERS_DIR"
+    local -a argv=("$@")
+    if [ $# -eq 0 ]; then
+        [ -t 0 ] || die "kib broker add needs a terminal, or the flags:" \
+            "kib broker add <name> --url <https-url> [--header \"Name: Scheme\"]" \
+            "kib broker add <name> --run \"<cmd>\" --cred-env <ENV> [--cred-kind file]"
+        _broker_add_wizard
+        argv=(${_ADD_ARGV[@]+"${_ADD_ARGV[@]}"})
+    fi
+    # :- because an empty array under `set -u` aborts the launch silently, which is a failure
+    # mode this repo has already been bitten by.
+    case "${argv[0]:-}" in
+        "" | -*) die "kib broker add: the route name comes first" \
+            "e.g. kib broker add linear --url https://mcp.linear.app/sse" ;;
+    esac
+    kib_py host.mcp add --providers-dir "$PROVIDERS_DIR" "${argv[@]}" || return $?
+    _broker_add_finish "${argv[0]}"
+}
+
+_broker_usage() {
+    cat <<'USAGE'
+kib broker — the credential broker's host-only credentials and routes.
+
+  kib broker add [name …]      define a brokered MCP  (bare = ask the questions)
+  kib broker login [name]      store a credential, host-only, mode 600
+  kib broker logout [name]     remove one
+  kib broker status            every route: credential, URL, and any refused definition
+  kib broker probe [name]      does the stored credential still work upstream?
+
+  kib broker add linear --url https://mcp.linear.app/sse --header "Authorization: Bearer"
+  kib broker add gsc --run "uvx mcp-search-console" --cred-env GSC_CREDENTIALS_PATH \
+      --cred-kind file --env GSC_SKIP_OAUTH=true
+
+Routes need no port: they share one listener and are told apart by name. Every verb runs
+host-side and never starts a container, so they work while the sandbox is broken or unbuilt.
+USAGE
+}
+
 # `kib broker <verb> [provider]`. Every verb is registry-driven and defaults to claude.
 broker_cli() {
     local verb="${1:-status}"
     shift 2>/dev/null || true
     case "$verb" in
+        add) provider_add "$@" ;;
         login) provider_login "${1:-claude}" ;;
         logout) provider_logout "${1:-claude}" ;;
         probe) provider_probe "${1:-claude}" ;;
         status) provider_status ;;
-        *) die "unknown broker verb: $verb" "usage: kib broker login|logout|status|probe [provider]" ;;
+        help | -h | --help) _broker_usage ;;
+        *)
+            printf '❌ kib: unknown broker verb %s\n\n' "$verb" >&2
+            _broker_usage >&2
+            exit 2
+            ;;
     esac
 }
