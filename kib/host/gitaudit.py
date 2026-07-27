@@ -7,8 +7,11 @@ Two severities, and the asymmetry is deliberate:
 * **Refuse** on a host-executed git config key, or an executable hook in a nested git dir.
   `core.fsmonitor` fires on a bare `git status`, before the user reads a single diff, so
   launching a session into it is the wrong default.
-* **Warn** on a tracked path that matches `.kibignore`. That is the user's own hygiene;
-  blocking a session over it would be hostile.
+* **Warn** on a tracked path that matches `.kibignore` (the user's own hygiene; blocking a
+  session over it would be hostile), and on uncommitted project config — `.claude/settings*.json`,
+  `.mcp.json`, `mise.toml`, … — naming a command the host runs. That second class is *mixed-use*:
+  the same files carry ordinary settings, so the FUSE guard deliberately leaves them writable
+  and this is the only place they are seen at all.
 
 Accepted loss versus the hook: commit-time *blocking* is gone, so a commit made between
 sessions is unchecked. The FUSE guard remains the preventer — this is the detector.
@@ -19,7 +22,9 @@ Exit: 0 clean · 1 warn-class findings only · 5 refuse-class findings.
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -42,6 +47,7 @@ class Findings:
     config: list[str] = field(default_factory=list)  # refuse
     hooks: list[str] = field(default_factory=list)  # refuse
     tracked: list[str] = field(default_factory=list)  # warn
+    project: list[str] = field(default_factory=list)  # warn
 
     @property
     def refuse(self) -> bool:
@@ -49,7 +55,7 @@ class Findings:
 
     @property
     def any(self) -> bool:
-        return bool(self.config or self.hooks or self.tracked)
+        return bool(self.config or self.hooks or self.tracked or self.project)
 
 
 def _git(args: Sequence[str], cwd: str) -> str:
@@ -142,12 +148,131 @@ def audit_tracked(top: str) -> list[str]:
     return [p for p in out.split("\0") if p and rules.matches(rule_list, p)]
 
 
+# ── mixed-use project config ─────────────────────────────────────
+# Files that name a command the HOST runs, but that ordinary work also edits. A `[protect]`
+# rule would refuse an everyday write, and the sandbox policy tells the agent to STOP on that
+# error — so an editable file in the guard ends a session over routine work. These are
+# detected instead: warn-class, never refuse.
+#
+# Reported only when git shows the path dirty or untracked. The audit sees state, not change,
+# and a committed config is the user's own; that filter is the cheap proxy for "touched during
+# a session" and takes false positives on a clean checkout to zero.
+
+#: JSON keys whose string value is a command. Walked generically rather than per-schema, so
+#: one function covers `.mcp.json`'s `mcpServers.*.command`, zed's `formatter.external.command`
+#: and `terminal.shell.program`, plus whatever key a future version of either adds.
+JSON_EXEC_KEYS = ("command", "program")
+
+#: Tail-matched, like the FUSE guard's rules — a `.claude/settings.json` in a subdirectory is
+#: the one that loads when the user works there. Value picks the scanner.
+PROJECT_CONFIGS = (
+    (".claude/settings.json", "claude"),
+    (".claude/settings.local.json", "claude"),
+    (".mcp.json", "json"),
+    (".zed/settings.json", "json"),
+)
+
+#: Regex tier — python 3.9 has no `tomllib` and neither side has a YAML parser. Acceptable
+#: here and nowhere else, because this tier only warns: a false positive costs one line.
+#: Matched on the *pivot* keys only. A mise `[tasks]` entry or a cargo alias runs when the
+#: user invokes it by name, which is the same "someone chose to" line the shared-assets tier
+#: draws — `[hooks]` and `_.source` fire on a bare `cd`, with no such decision.
+_MISE_PIVOTS = re.compile(r"^\s*(\[hooks\]|_\.source\s*=)", re.M)
+TEXT_CONFIGS = (
+    (".cargo/config.toml", re.compile(r"^\s*(rustc-wrapper|runner|linker)\s*=", re.M)),
+    ("mise.toml", _MISE_PIVOTS),
+    (".mise.toml", _MISE_PIVOTS),
+    # `- ` because the key is usually the first in a list item. `entry:` in a *consumer*
+    # config is the local-hook signal: a remote hook names only repo/rev/id.
+    (".pre-commit-config.yaml", re.compile(r"^\s*(?:-\s*)?entry\s*:.*", re.M)),
+)
+
+
+def _tail_match(rel: str, name: str) -> bool:
+    return rel == name or rel.endswith("/" + name)
+
+
+def _dirty(top: str) -> list[str]:
+    """Paths git reports modified, staged or untracked — the proxy for "changed since commit".
+
+    A rename or copy carries a second NUL-separated path; consume it, or the origin reads as
+    the next entry's status field and every later path shifts by three characters.
+    """
+    entries = iter(_git(["status", "--porcelain", "-z", "--untracked-files=all"], top).split("\0"))
+    dirty: list[str] = []
+    for entry in entries:
+        if len(entry) < 4:
+            continue
+        dirty.append(entry[3:])
+        if entry[0] in "RC":
+            next(entries, None)
+    return dirty
+
+
+def _json_commands(node: object, trail: str = "") -> list[str]:
+    """Every nested `command`/`program` string in a JSON tree, as `where = value` lines."""
+    found: list[str] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            where = f"{trail}.{key}" if trail else str(key)
+            if key in JSON_EXEC_KEYS and isinstance(value, str) and value:
+                found.append(f"{where} = {value}")
+            else:
+                found += _json_commands(value, where)
+    elif isinstance(node, list):
+        for i, value in enumerate(node):
+            found += _json_commands(value, f"{trail}[{i}]")
+    return found
+
+
+def _scan_json(path: str, kind: str) -> list[str]:
+    """`settings_findings` for a Claude settings file, the generic walk for anything else.
+
+    Unreadable or malformed is silence, not a finding: this tier warns about what it can
+    prove, and Claude ignores an unparseable settings file anyway.
+
+    `RecursionError` is caught with them, and it is not hypothetical: `[`×30000 is 60 KB of
+    valid JSON that overflows the decoder, and both the walk above and `settings_findings`
+    recurse as well. Uncaught, a repo could crash the audit at every cold start by committing
+    one file — a denial of launch from repo content, in the one check meant to survive it.
+    """
+    try:
+        with open(path) as fh:
+            cfg = json.load(fh)
+        if not isinstance(cfg, dict):
+            return []
+        return dangerous.settings_findings(cfg) if kind == "claude" else _json_commands(cfg)
+    except (OSError, ValueError, RecursionError):
+        return []
+
+
+def audit_project_configs(top: str) -> list[str]:
+    """Uncommitted project config naming a command the host runs. Warn-class."""
+    found: list[str] = []
+    for rel in _dirty(top):
+        path = os.path.join(top, rel)
+        for name, kind in PROJECT_CONFIGS:
+            if _tail_match(rel, name):
+                found += [f"{rel}: {line}" for line in _scan_json(path, kind)]
+        for name, pattern in TEXT_CONFIGS:
+            if not _tail_match(rel, name):
+                continue
+            try:
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+            except OSError:
+                continue
+            found += [f"{rel}: {m.group(0).strip()}" for m in pattern.finditer(text)]
+    return found
+
+
 def audit(top: str) -> Findings:
     """Every check, against one repository root."""
     return Findings(
         config=audit_git_config(top) + audit_nested_gitdirs(top),
         hooks=audit_nested_hooks(top),
         tracked=audit_tracked(top),
+        project=audit_project_configs(top),
     )
 
 
@@ -182,6 +307,14 @@ def report(findings: Findings, refusing: bool) -> None:
         w(
             "\nThey are hidden from the sandbox, but git still has their real contents.\n"
             "Untrack with:  git rm --cached <path>\n"
+        )
+    if findings.project:
+        w("\n⚠️  kib: uncommitted project config naming a command the HOST runs:\n")
+        for line in findings.project:
+            w(f"    {line}\n")
+        w(
+            "\nThese files are editable on purpose, so the sandbox is not blocked from\n"
+            "writing them — read the diff before the host runs the tool that loads them.\n"
         )
 
 

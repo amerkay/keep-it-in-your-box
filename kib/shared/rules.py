@@ -32,7 +32,8 @@ from kib.shared import cli
 #: The per-project rule file. Named once here; bash and the audit gate both read it back.
 RULE_FILE = ".kibignore"
 
-#: Verdicts, weakest first. 'redact' serves a stub on read and EACCES on write; 'protect'
+#: Verdicts, weakest first. 'redact' serves keys-without-values or a stub on read, and refuses
+#: writes (EPERM — see `REFUSED` in kib/guest/fuse.py); 'protect'
 #: reads through and refuses writes (masking `.git/config` would break in-container git,
 #: which reads it on virtually every command).
 REDACT = "redact"

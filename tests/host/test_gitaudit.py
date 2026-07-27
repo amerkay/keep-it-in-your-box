@@ -126,6 +126,104 @@ def test_no_rule_file_means_no_tracked_findings(git_repo: Callable[..., Path]) -
     assert gitaudit.audit_tracked(str(repo)) == []
 
 
+# ── mixed-use project config: warn on change, never refuse ───────
+def write(repo: Path, rel: str, body: str) -> None:
+    (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+    (repo / rel).write_text(body)
+
+
+@pytest.mark.parametrize(
+    ("rel", "body", "needle"),
+    [
+        (".claude/settings.json", '{"apiKeyHelper": "/tmp/x.sh"}', "apiKeyHelper"),
+        (
+            ".claude/settings.local.json",
+            '{"hooks":{"PreToolUse":[{"hooks":[{"command":"/tmp/x.sh"}]}]}}',
+            "command",
+        ),
+        (".mcp.json", '{"mcpServers":{"e":{"command":"/tmp/x.sh"}}}', "mcpServers.e.command"),
+        (".zed/settings.json", '{"terminal":{"shell":{"program":"/tmp/x.sh"}}}', "program"),
+        (".cargo/config.toml", "[build]\nrustc-wrapper = /tmp/x.sh\n", "rustc-wrapper"),
+        ("mise.toml", "[hooks]\nenter = /tmp/x.sh\n", "hooks"),
+        (".pre-commit-config.yaml", "repos:\n- repo: local\n  hooks:\n  - entry: x\n", "entry"),
+        ("sub/.claude/settings.json", '{"apiKeyHelper": "/tmp/x.sh"}', "apiKeyHelper"),
+    ],
+)
+def test_uncommitted_project_config_is_warn_class(
+    git_repo: Callable[..., Path], rel: str, body: str, needle: str
+) -> None:
+    """These files are mixed-use — the FUSE guard leaves them writable on purpose, so this
+    is the only place they are seen at all. Warn, because refusing would fire on repos that
+    legitimately ship one."""
+    repo = git_repo("proj")
+    write(repo, rel, body)
+    findings = gitaudit.audit(str(repo))
+    assert not findings.refuse
+    assert any(rel in line and needle in line for line in findings.project)
+
+
+def test_a_committed_project_config_is_not_reported(git_repo: Callable[..., Path]) -> None:
+    """The audit sees state, not change. Dirty-or-untracked is the proxy for "this session
+    touched it" — a committed config is the user's own and warning about it every launch
+    would train them to ignore the warning."""
+    repo = git_repo("committed")
+    write(repo, ".mcp.json", '{"mcpServers":{"e":{"command":"/tmp/x.sh"}}}')
+    git(repo, "add", "-A")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "add mcp")
+    assert gitaudit.audit_project_configs(str(repo)) == []
+
+
+def test_a_benign_project_config_is_not_reported(git_repo: Callable[..., Path]) -> None:
+    repo = git_repo("benign")
+    write(repo, ".claude/settings.json", '{"model": "opus", "theme": "dark"}')
+    write(repo, "mise.toml", '[tools]\nnode = "22"\n')
+    assert gitaudit.audit_project_configs(str(repo)) == []
+
+
+def test_a_mise_task_is_not_reported(git_repo: Callable[..., Path]) -> None:
+    """A task runs when the user invokes it by name — the same "someone chose to" line the
+    shared-assets tier draws. [hooks] fires on a bare `cd`, with no such decision."""
+    repo = git_repo("tasks")
+    write(repo, "mise.toml", '[tasks.build]\nrun = "cargo build"\n')
+    assert gitaudit.audit_project_configs(str(repo)) == []
+
+
+def test_project_findings_exit_fail_not_refused(git_repo: Callable[..., Path]) -> None:
+    repo = git_repo("projexit")
+    write(repo, ".mcp.json", '{"mcpServers":{"e":{"command":"/tmp/x.sh"}}}')
+    assert gitaudit.main(["--top", str(repo), "--mode", "launch"]) == cli.FAIL
+
+
+def test_a_malformed_project_config_is_silent(git_repo: Callable[..., Path]) -> None:
+    """Claude ignores an unparseable settings file anyway; this tier warns about what it can
+    prove, and a parse error proves nothing."""
+    repo = git_repo("malformed")
+    write(repo, ".claude/settings.json", "{not json")
+    assert gitaudit.audit_project_configs(str(repo)) == []
+
+
+def test_deeply_nested_json_does_not_crash_the_audit(git_repo: Callable[..., Path]) -> None:
+    """`[`×30000 is 60 KB of VALID json that overflows the decoder. Uncaught, a repo could
+    deny its own launch by committing one file — in the check meant to survive repo content."""
+    repo = git_repo("deep")
+    write(repo, ".mcp.json", "[" * 30_000 + "]" * 30_000)
+    assert gitaudit.audit_project_configs(str(repo)) == []
+    assert gitaudit.main(["--top", str(repo), "--mode", "launch"]) == cli.OK
+
+
+def test_a_renamed_path_does_not_shift_the_rest(git_repo: Callable[..., Path]) -> None:
+    """A rename entry carries a second NUL-separated path; unconsumed, the origin reads as
+    the next entry's status field and every later path loses three characters."""
+    repo = git_repo("renamed")
+    write(repo, "a.txt", "x\n")
+    git(repo, "add", "-A")
+    git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "a")
+    git(repo, "mv", "a.txt", "b.txt")
+    write(repo, ".mcp.json", '{"mcpServers":{"e":{"command":"/tmp/x.sh"}}}')
+    git(repo, "add", "-A")
+    assert any(".mcp.json" in line for line in gitaudit.audit_project_configs(str(repo)))
+
+
 def test_prune_dirs_are_not_walked(git_repo: Callable[..., Path]) -> None:
     """node_modules is thousands of directories and can hold nothing we care about."""
     top = git_repo("pruned")

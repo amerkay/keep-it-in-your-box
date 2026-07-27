@@ -23,14 +23,25 @@
 
 ## 🔴 Guarded paths — deliberate policy, not bugs. Not yours to bypass.
 
-- **Redacted** — `.env`, `.env.*`, anything in `.kibignore`: reads return a stub, writes fail
-  EACCES. Need a value? Ask. Placeholders (`.env.example`, `.sample`, `.template`, `.defaults`,
-  `.dist`) are exempt and work normally — they hold no secrets.
-- **Protected** — `.git/config`, `.git/hooks`, `.vscode/`, `.devcontainer/`, `.idea/`, `.envrc`,
-  and submodule/worktree equivalents: reads work, writes fail EACCES. The **host** executes these
-  later, so writing one is host code execution from in here. `git config` is content-checked:
+- **Redacted** — `.env`, `.env.*`, anything in `.kibignore`: writes are refused, and a read gives
+  you the **key names with every value replaced** (`KEY=<redacted>`) for JSON and `.env*` files, a
+  flat stub for anything else. So you can see which settings exist — you can add a key, or tell
+  the user which one is missing — but never a value. Need one? Ask. Exactly three placeholder
+  spellings are exempt and work normally: `.env.example`, `.env.sample`, `.env.template`. Any
+  other `.env.*` is redacted, including `.env.defaults` and `.env.dist` — they hold real values
+  often enough that the exemption was withdrawn.
+- **Protected** — `.git/config`, `.git/hooks` (+ submodule/worktree equivalents), `.githooks/`,
+  `.gitmodules`, `.vscode/`, `.devcontainer/`, `.idea/`, `.envrc`, `.claude/hooks/`,
+  `.cursor/mcp.json`, `.zed/tasks.json`, `.zed/debug.json`, `.run/`, `.mvn/jvm.config`, `.exrc`,
+  `.nvim.lua`, `.ripgreprc`, `.yarnrc.yml`: reads work, writes are refused. The **host** executes
+  these later, so writing one is host code execution from in here. `git config` is content-checked:
   ordinary keys pass; `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`, `core.pager`,
   `alias.*`, `filter.*.clean` are refused.
+- **Editable, but watched** — `.claude/settings*.json`, `.mcp.json`, `.zed/settings.json`,
+  `.cargo/config.toml`, `mise.toml`, `.pre-commit-config.yaml`. These carry ordinary settings too,
+  so you may write them. If you add a key naming a **command** (a hook, an MCP `command`, a
+  `rustc-wrapper`, a mise `[hooks]` entry), say so plainly in your reply — the host's audit gate
+  reports it at teardown, and the user should hear it from you first, not from a warning.
 - **`~/.claude-shared/` — two tiers.** Everything under it auto-loads in every project's next
   session *and* in a host `claude`, so a write from one repo pivots into all of them.
   - **Locked — `plugins/`, `hooks/`** (read-only): these carry a `command` the **host** runs, so
@@ -44,10 +55,16 @@
     someone chooses to. A `hooks` or `mcpServers` **`command`** is not — parking one there
     demotes the whole tree to read-only from the next launch.
 
-**On any EACCES/EROFS above, or a launch refused by the host's audit gate: stop and report it
+**On any refusal above, or a launch refused by the host's audit gate: stop and report it
 verbatim, including what you were attempting.** Do not retry via another path, another tool,
 another config scope (`--global`, `--system`), or by asking the user to disable the guard. A
 legitimate need is a conversation, not a workaround.
+
+**`EPERM` inside the project is kib refusing, and the path is the whole message** — the reason is
+logged where you cannot see it (the FUSE sidecar's stderr, a different container), so do not
+speculate about the cause beyond the rules above. `EACCES` is an ordinary permission problem:
+check the mode and owner, and treat it as a normal error. `EROFS` is a read-only mount, which
+under `~/.claude-shared/` means the locked tier.
 
 ## What persists
 

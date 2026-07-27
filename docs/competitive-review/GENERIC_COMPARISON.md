@@ -98,10 +98,16 @@ writes a file the host later executes — `kib`'s founding thesis, independently
 | Pillar attack chain | Product | Status | `kib` control |
 |---|---|---|---|
 | "Git directories do not have to be called `.git`" — fsmonitor indirection | Cursor | patched 3.0.0 | `_is_git_config()` detects a git dir by **layout** (`HEAD`+`objects`+`refs`), never by name |
-| "The hook was already in the workspace" — `.claude` hook config | Cursor | CVE-2026-48124 | `validate_shared_settings` refuses inline `hooks[].command` |
+| "The hook was already in the workspace" — `.claude` hook config | Cursor | CVE-2026-48124 | `validate_shared_settings` refuses inline `hooks[].command` in **canonical** `~/.claude`; `.claude/hooks/` is `[protect]`; **project** `.claude/settings*.json` is warn-only (`audit_project_configs`) |
 | "A time bomb in `.vscode`" — `tasks.json` | Antigravity | **unpatched** | `guest/policy/global.kibignore` `[protect]` — writes refused |
 | "One Docker socket to rule them all" | Codex, Cursor, Gemini CLI | GHSA-v4xv-rqh3-w9mc | no socket mounted |
 | "GitPwned: allowlist to RCE" | Codex CLI | patched v0.95.0 | n/a — `kib` has no command allowlist to bypass |
+
+The `.claude` row is the honest one: the control was written for the **shared** config surface,
+where a write pivots into every project, and the project-scope half stayed open until the
+sandbox-runtime diff surfaced it. It closes only partway on purpose — `.claude/settings.json` is
+mixed-use, so refusing writes to it would break Claude Code's own "always allow" persistence.
+Prevention where the file is pure-exec, detection where it is not.
 
 Only **4 of 30** projects guard host-executed config at all:
 [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) (the most complete
@@ -114,11 +120,21 @@ because it breaks `git remote add`. `kib` appears alone in validating at the *re
 against the current file, following `include`/`includeIf`, and handling `.git/modules/` and
 `.git/worktrees/` structurally.
 
+**The list-length comparison is misleading, and it cuts toward `kib`.** sandbox-runtime's
+`DANGEROUS_FILES` is longer largely because five of its nine entries are shell rc files
+(`.bashrc`, `.zshrc`, `.profile`, …) — they matter there because `$HOME` stays writable. `kib`
+puts the project outside `$HOME` and gives the box its own, so those five are N/A by
+construction rather than missed. The diff (2026-07-27) did surface real gaps and they are now
+closed: `.githooks/`, `.gitmodules`, `.claude/hooks/`, `.cursor/mcp.json`, `.zed/tasks.json`,
+`.zed/debug.json`, `.run/`, `.mvn/jvm.config`, `.exrc`, `.nvim.lua`, `.ripgreprc`, `.yarnrc.yml`
+in `[protect]`, and a warn-class detection tier for mixed-use config. `kib` still holds two
+paths they do not (`.devcontainer/`, `.envrc`).
+
 ### 2. In-project secret redaction that survives mid-session file creation
 
 | Project | Mechanism | Enforced below the agent? | On by default? |
 |---|---|---|---|
-| **`kib`** | FUSE passthrough — stub on read, `EACCES` on write | ✅ | ✅ |
+| **`kib`** | FUSE passthrough — key names on read, values replaced (stub if the shape is unknown), `EPERM` on write | ✅ | ✅ |
 | [cplt](https://github.com/navikt/cplt) | Landlock blocks `.env*`, `.pem`, `.key` | ✅ | ✅ |
 | [aicontainer](https://github.com/stefanoginella/aicontainer) | `PreToolUse` hook blocks `.env*` reads | ❌ agent-level | ✅ |
 | [yoloai](https://github.com/kstenerud/yoloai) | `:copy` honours `.gitignore` | ✅ by omission | ✅ |
@@ -185,7 +201,7 @@ not scored.
 
 | Project | Workspace confinement | Kernel boundary | Egress control | Credential exposure | Host-config guard | In-project redaction | Clipboard | Shared-config guard | Hardening | Docker socket | Multi-session | Security tests | Platforms |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| **`kib` (baseline)** | ✅ **only `$PWD` + one `~/.claude` slice** — no host `$HOME`, no SSH agent, git identity by env | ❌ shared kernel | ❌ **open (accepted risk)** | ✅ **brokered by default — token never in the box** | ✅ **FUSE + structural git detection + content-validated `.git/config`** | ✅ **FUSE stub-on-read, covers mid-session files** | ✅ **proxy, writes refused** | ✅ RO mounts + host-side validator | ✅ cap-drop ALL, no-new-privs, seccomp, AppArmor | ❌ none | ✅ 1 container/project, N terminals | ✅ `security-test.sh`, 11 sections, both redaction modes | Linux, macOS |
+| **`kib` (baseline)** | ✅ **only `$PWD` + one `~/.claude` slice** — no host `$HOME`, no SSH agent, git identity by env | ❌ shared kernel | ❌ **open (accepted risk)** | ✅ **brokered by default — token never in the box** | ✅ **FUSE + structural git detection + content-validated `.git/config`** | ✅ **FUSE keys-not-values on read, covers mid-session files** | ✅ **proxy, writes refused** | ✅ RO mounts + host-side validator | ✅ cap-drop ALL, no-new-privs, seccomp, AppArmor | ❌ none | ✅ 1 container/project, N terminals | ✅ `security-test.sh`, 11 sections, both redaction modes | Linux, macOS |
 | [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) | ❌ "read access is allowed everywhere" (⚠️ opt-in workspace-only recipe) | ❌ OS sandbox | ✅ deny-all + allowlist proxy | ⚠️ opt-in `denyRead` | ✅ mandatory deny-write: `.git/config`, `.git/hooks`, `.vscode`, `.idea`, shell rc, `.mcp.json` | ⚠️ opt-in | ❓ | n/a | ✅ seccomp BPF, nested PID ns, WFP fence | n/a | ❓ | ✅ mandatory-deny-paths suite | macOS, Linux, Win (alpha) |
 | [microsandbox](https://github.com/superradcompany/microsandbox) | ❓ volumes explicit, host scope unstated | ✅ microVM | ✅ deny-default, DNS+TCP, airgap | ✅ **keys never enter VM** | ❓ | ❓ | ❓ | n/a | ✅ hardware-level VM | ❓ | ⚠️ named sandboxes | ✅ domain/port/secret tests | Linux, macOS, Windows |
 | [matchlock](https://github.com/jingkaihe/matchlock) | ❓ `/workspace` over FUSE, host root unstated | ✅ microVM | ✅ deny-all, nftables + MITM | ✅ **in-flight injection; VM sees placeholder** | ❓ | ⚠️ VFS hook rules, no default | ❓ | n/a | ✅ VM + gVisor netstack | ❓ | ⚠️ `exec <vm-id>` | ❓ tests exist, not claimed | Linux (KVM), macOS AS |
@@ -267,7 +283,7 @@ not scored.
 | Project | Why it matters to `kib` |
 |---|---|
 | [navikt/cplt](https://github.com/navikt/cplt) | **Closest philosophical match.** The same two rare controls — host-config guard *and* in-project secret blocking — kernel-enforced via Landlock instead of FUSE, plus the egress allowlist `kib` lacks. See `COMPARE_TO_CPLT.md`. |
-| [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) | Anthropic's mandatory deny-write list is the most complete enumeration of host-executed config paths in the field. Worth diffing against `guest/policy/global.kibignore`. Its structured `extract` masking is the credential refinement worth copying. |
+| [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) | Anthropic's mandatory deny-write list is the most complete enumeration of host-executed config paths in the field. **Diffed 2026-07-27** — twelve paths added to `[protect]`, a warn-class tier added for mixed-use config, and the `extract` masking taken as format-aware `[redact]`. Note their `onExtractNoMatch: warn` default fails *open*; `kib`'s fallback is the stub. |
 | [aicontainer](https://github.com/stefanoginella/aicontainer) | The only other **container** project treating `.git/config`, `.git/hooks` and cross-project config as first-class. Also ships a digest-pinned Docker socket proxy. |
 | [yoloai](https://github.com/kstenerud/yoloai) | The other on-by-default credential broker, and a working audit trail of its own escapes — including a host-RCE via agent-controlled `.git/config` filter drivers. |
 

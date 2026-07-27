@@ -140,6 +140,16 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   exactly like a `set -e` abort. Both regression-guarded. (`container-lifecycle.md`)
 - **Never unlink lock files**, and every backgrounded host process must close fds 200/201
   (`200>&- 201>&-`) — one miss strands every project's containers. (`container-lifecycle.md`)
+- **The host-executed-config guard is two tiers, split by USE, not by danger** — `[protect]`
+  refuses the write and the policy text tells the session to stop, so only pure-exec files get a
+  rule. Mixed-use config (`.claude/settings*.json`, `.mcp.json`, `mise.toml`, …) stays writable and
+  is *detected* by `audit_project_configs`. Don't promote one: rename-validation only works for
+  temp+rename writers, so a `[protect]` on `.claude/settings.json` breaks Claude's own "always
+  allow" with nothing to replace it. (`redaction-config-guard.md`)
+- **Don't add a `[mask]` section — `[redact]` is format-aware** — JSON and `.env*` read as keys
+  with values replaced, everything else keeps the stub. Making it a policy choice needs a third
+  verdict, a precedence table and an enable path, and lets a hostile repo pick the leakier
+  renderer for its own paths. Format is a property of the file. (`redaction-config-guard.md`)
 - **Shared assets are two tiers, and don't "harden" the open one by refusing scripts** —
   `plugins`/`hooks` are `:ro` (the host executes them); `skills`/`agents`/`commands` are rw and
   symlinked at canonical so authoring one shares it. The vetting line is auto-execution (a

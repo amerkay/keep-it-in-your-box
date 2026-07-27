@@ -1,8 +1,9 @@
 """The redacting FUSE passthrough. Runs in the guest, as the sandbox's view of the project.
 
-Mirrors `--src` at `--mnt`. Paths matching a rule read as a stub and refuse writes; paths the
-guard PROTECTS read through untouched and refuse writes, since stubbing `.git/config` would
-break in-container git outright.
+Mirrors `--src` at `--mnt`. Paths matching a rule refuse writes and read as their key names
+with every value redacted (JSON and dotenv) or as a flat stub (anything else — see `render`);
+paths the guard PROTECTS read through untouched and refuse writes, since stubbing
+`.git/config` would break in-container git outright.
 
 Rule parsing lives in `kib.shared.rules` and the host-executed-value tables in
 `kib.shared.dangerous`. This module owns the filesystem translation, plus the one guard needing
@@ -12,7 +13,9 @@ depth-aware logic no tail rule can express: git's executed paths nest arbitraril
 
 import argparse
 import errno
+import json
 import os
+import re
 import sys
 from collections.abc import Sequence
 from pathlib import PurePosixPath
@@ -33,15 +36,94 @@ log = get_logger("kib.fuse")
 STUB = (
     b"# REDACTED BY .kibignore \xe2\x80\x94 hidden from this Claude Code Docker sandbox"
     b" by user policy.\n"
-    b"# Intentional, not an error. All access paths return this stub; writes return EACCES.\n"
+    b"# Intentional, not an error. All access paths return this stub; writes return EPERM.\n"
     b"# Ask the user directly if you need the contents \xe2\x80\x94 don't try to work around it.\n"
 )
 REDACTED_NAME = "REDACTED.md"
+
+# kib policy refusals raise EPERM, never EACCES. The reason is logged to the SIDECAR's stderr —
+# a different container — so the agent sees an errno and nothing else, and the errno is the only
+# channel able to say "the guard refused this" rather than "check the file mode". EACCES stays
+# what `default_permissions` returns for an ordinary owner/mode failure.
+REFUSED = errno.EPERM
 
 # A git dir is identified by its layout, not its name: `git init --bare`,
 # `--separate-git-dir` and a `gitdir:` redirect all put config+hooks somewhere other than a
 # directory called '.git'.
 GITDIR_MARKERS = ("HEAD", "objects", "refs")
+
+# ── format-aware redaction ───────────────────────────────────────
+# A redacted file whose *shape* is known reads as its key names with every value replaced.
+# The whole-file stub hid which settings even exist, so the agent's next move was to ask the
+# user, who pasted the value into the transcript — the stub caused the leak it prevented.
+#
+# THE RULE: never pass a byte of the file through. Output is synthesised from parsed tokens
+# (key names only); anything a parser cannot vouch for falls back to STUB, so a comment, a
+# continuation or a value containing '#' or '=' cannot leak by construction.
+#
+# Accepted residual: a file where the *key* is the secret. Documented in etc-CLAUDE.md.
+REDACTED_VALUE = "<redacted>"
+RENDER_MAX = 64 * 1024  # config and credential files; bigger is not one of these shapes
+DOTENV_KEY = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+
+
+def _scrub(node: Any) -> Any:
+    """A JSON tree with every scalar leaf replaced. Keys and structure survive, values don't."""
+    if isinstance(node, dict):
+        return {k: _scrub(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_scrub(v) for v in node]
+    return REDACTED_VALUE
+
+
+def _render_json(text: str) -> bytes | None:
+    # RecursionError alongside ValueError: `[`×30000 is 60 KB of *valid* JSON that overflows
+    # the decoder, and _scrub recurses too. Uncaught it would surface as an unexplained read
+    # failure rather than the stub — the class of bug the pread note below is about.
+    try:
+        return (json.dumps(_scrub(json.loads(text)), indent=2) + "\n").encode()
+    except (ValueError, RecursionError):
+        return None
+
+
+def _render_dotenv(text: str) -> bytes | None:
+    """`KEY=<redacted>` per assignment, or None if any value spans lines.
+
+    A multi-line quoted value has to bail: its own interior lines match the key pattern, so
+    fragments of the secret would print as if they were names.
+    """
+    keys: list[str] = []
+    for line in text.splitlines():
+        m = DOTENV_KEY.match(line)
+        if not m:
+            continue
+        value = line[m.end() :].lstrip()
+        quote = value[:1]
+        if quote in ('"', "'"):
+            tail = value[1:].rstrip()
+            if not tail.endswith(quote) or tail.endswith("\\" + quote):
+                return None
+        keys.append(m.group(1))
+    return "".join(f"{k}={REDACTED_VALUE}\n" for k in keys).encode() if keys else None
+
+
+def render(name: str, real: str) -> bytes:
+    """What a redacted file serves on read. STUB on any doubt — unknown shape, parse failure,
+    unreadable, undecodable, or too large to be one of these shapes."""
+    # Bounded read rather than a size check then a read: one syscall fewer, and no window in
+    # which the file grows past the cap between the two.
+    try:
+        with open(real, encoding="utf-8", errors="strict") as fh:
+            text = fh.read(RENDER_MAX + 1)
+    except (OSError, UnicodeDecodeError):
+        return STUB
+    if len(text) > RENDER_MAX:
+        return STUB
+    if name.endswith(".json"):
+        return _render_json(text) or STUB
+    if name == ".env" or name.startswith(".env."):
+        return _render_dotenv(text) or STUB
+    return STUB
 
 
 # Operations comes from an unstubbed fusepy, so it is typed Any and strict mode refuses to
@@ -70,6 +152,27 @@ class Redact(Operations):  # type: ignore[misc]
         st = os.lstat(self.src)
         self.base_uid = st.st_uid
         self.base_gid = st.st_gid
+        # getattr must report the size read() will produce, so both have to see ONE render of
+        # one version of the file — recomputing per call lets a file changing under us report
+        # one size and serve another, splicing two versions across a partial read. Keyed on
+        # identity+mtime+size, capped because a project can hold any number of redacted files.
+        self._rendered: dict[tuple[str, int, int, int], bytes] = {}
+
+    def _render(self, rel: str) -> bytes:
+        """Cached bytes for a redacted file. A cache miss on a racing write just recomputes."""
+        real = self._real(rel)
+        try:
+            st = os.stat(real)
+        except OSError:
+            return STUB
+        key = (real, st.st_ino, st.st_mtime_ns, st.st_size)
+        hit = self._rendered.get(key)
+        if hit is None:
+            hit = render(PurePosixPath(rel).name, real)
+            if len(self._rendered) >= 64:
+                self._rendered.clear()
+            self._rendered[key] = hit
+        return hit
 
     def _own(self, st_uid: int, st_gid: int) -> tuple[int, int]:
         return (
@@ -159,7 +262,7 @@ class Redact(Operations):  # type: ignore[misc]
     def getattr(self, path: str, fh: int | None = None) -> dict[str, Any]:
         kind, root = self._classify(path)
         if kind == "file":
-            return self._stub_attr(0o100444, 1, len(STUB))
+            return self._stub_attr(0o100444, 1, len(self._render(root)))
         if kind == "dir":
             return self._stub_attr(0o040555, 2, 0)
         if kind == "inside":
@@ -198,7 +301,7 @@ class Redact(Operations):  # type: ignore[misc]
     def readlink(self, path: str) -> str:
         kind, _ = self._classify(path)
         if kind != "pass":
-            raise FuseOSError(errno.EACCES)
+            raise FuseOSError(REFUSED)
         return os.readlink(self._real(path))
 
     def statfs(self, path: str) -> dict[str, int]:
@@ -226,9 +329,9 @@ class Redact(Operations):  # type: ignore[misc]
             # Protected paths are writable only through the validated rename below;
             # nothing legitimate writes .git/config in place (git uses config.lock).
             if kind != "pass" or self._protected(path):
-                raise FuseOSError(errno.EACCES)
+                raise FuseOSError(REFUSED)
         if kind != "pass":
-            return 0  # virtual fd; reads served from STUB
+            return 0  # virtual fd; reads served from the render/STUB
         return os.open(self._real(path), flags)
 
     # pread/pwrite, NEVER lseek+read. With nothreads=False several workers serve one open file
@@ -236,9 +339,11 @@ class Redact(Operations):  # type: ignore[misc]
     # short buffer past EOF reads to the kernel as EOF — the caller silently sees the file
     # truncated at a 16 KiB boundary. pread carries the offset, so nothing races.
     def read(self, path: str, size: int, offset: int, fh: int) -> bytes:
-        kind, _ = self._classify(path)
+        kind, root = self._classify(path)
+        if kind == "file":
+            return self._render(root)[offset : offset + size]
         if kind != "pass":
-            return STUB[offset : offset + size]
+            return STUB[offset : offset + size]  # the REDACTED.md marker inside a masked dir
         return os.pread(fh, size, offset)
 
     def release(self, path: str, fh: int) -> int:
@@ -250,7 +355,7 @@ class Redact(Operations):  # type: ignore[misc]
     def _deny_if_masked(self, path: str) -> None:
         kind, _ = self._classify(path)
         if kind != "pass" or self._protected(path):
-            raise FuseOSError(errno.EACCES)
+            raise FuseOSError(REFUSED)
 
     # ── .git/config: validated writes ────────────────────────────
     # git never writes config in place — it writes config.lock and renames over the target, so
@@ -347,7 +452,7 @@ class Redact(Operations):  # type: ignore[misc]
         self._deny_if_masked(old)
         if self._is_git_config(self._rel(new)):
             if not self._git_config_write_ok(self._real(old), self._real(new)):
-                raise FuseOSError(errno.EACCES)
+                raise FuseOSError(REFUSED)
         else:
             self._deny_if_masked(new)
         os.rename(self._real(old), self._real(new))
@@ -433,7 +538,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         # The backing syscalls run as the SERVER, so a passthrough enforces no POSIX permission
         # at all by default — a `chmod 000` file reads and writes fine. This makes the KERNEL
         # re-apply a standard owner/mode check against the CALLER's ids on every op. Additive:
-        # a handler's own EACCES still stands, so the stubs (0444/0555) and the write denials
+        # a handler's own refusal still stands, so the stubs (0444/0555) and the write denials
         # are unaffected.
         default_permissions=True,
     )

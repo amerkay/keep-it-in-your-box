@@ -300,27 +300,53 @@ allow "regression: ordinary hardlink" bash -c "echo x > '$ARTIFACTS/hl-src'; ln 
 # ═════════════════════════════════════════════════════════════════
 section "Host-executed config guard — non-git paths"
 
-for p in .vscode/tasks.json .devcontainer/devcontainer.json .idea/workspace.xml .envrc; do
+for p in .vscode/tasks.json .devcontainer/devcontainer.json .idea/workspace.xml .envrc \
+    .githooks/pre-commit .gitmodules .claude/hooks/notify.sh .cursor/mcp.json \
+    .zed/tasks.json .zed/debug.json .run/app.run.xml .mvn/jvm.config \
+    .exrc .nvim.lua .ripgreprc .yarnrc.yml; do
     deny "write $p" bash -c "mkdir -p \"\$(dirname '$ARTIFACTS/$p')\" 2>/dev/null; echo x > '$ARTIFACTS/$p'"
+done
+
+# The guard is pure-exec files ONLY. A rule on a file ordinary work edits would refuse an
+# everyday write, and the policy text tells the session to stop — so mixed-use config stays
+# writable and is warned about host-side (audit_project_configs). Prompt text is not execution.
+for p in .cursor/rules/style.md .claude/commands/deploy.md .claude/settings.json .mcp.json mise.toml; do
+    allow "regression: $p stays writable (detected host-side, not refused)" \
+        bash -c "mkdir -p \"\$(dirname '$ARTIFACTS/$p')\" 2>/dev/null; echo '{}' > '$ARTIFACTS/$p'"
 done
 
 # ═════════════════════════════════════════════════════════════════
 section "Redaction — .env and .kibignore"
 
-# Staging the probe is itself a write to a redacted path, so it fails once the file exists;
-# the read below is what matters. The subshell is load-bearing — a failed redirection is
-# reported by the shell performing it, so `2>/dev/null` on the command alone misses it.
+# Staging the probe is itself a write to a redacted path, so it is refused and the read
+# checks below only run against a .env the HOST put there before launch — nothing inside the
+# box can create one, which is the control working. The subshell is load-bearing: a failed
+# redirection is reported by the shell performing it, so `2>/dev/null` on the command misses it.
 (printf 'SECRET=redacted-probe-value\n' >"$ARTIFACTS/.env") 2>/dev/null || true
 deny "write .env is refused" bash -c "echo x > '$ARTIFACTS/.env' 2>/dev/null"
-if [ -e "$ARTIFACTS/.env" ]; then
-    # Compare without printing: a real value must never reach the terminal or a log.
-    if grep -q 'redacted-probe-value' "$ARTIFACTS/.env" 2>/dev/null; then
-        fail ".env reads as a stub, not its contents" "the real value came through"
+
+# A redacted file reads as its KEY NAMES with every value replaced (kib.guest.fuse.render).
+# Both halves matter: hiding the names is what used to send the agent to ask the user, who
+# then pasted the secret into the transcript — the leak the redaction existed to prevent.
+# Compare without printing: no real value may reach the terminal or a log.
+_env_probe=""
+for _c in "$ARTIFACTS/.env" "$KIB_ROOT/.env"; do
+    [ -f "$_c" ] && _env_probe="$_c" && break
+done
+if [ -n "$_env_probe" ]; then
+    if grep -q 'redacted-probe-value' "$_env_probe" 2>/dev/null; then
+        fail ".env values are redacted" "a real value came through"
     else
-        pass ".env reads as a stub, not its contents"
+        pass ".env values are redacted"
+    fi
+    if grep -qE '^[A-Za-z_][A-Za-z0-9_]*=<redacted>$|^# REDACTED BY' "$_env_probe" 2>/dev/null; then
+        pass ".env reads as keyed names or the stub, never raw"
+    else
+        fail ".env reads as keyed names or the stub, never raw" "neither shape matched"
     fi
 else
-    skip ".env reads as a stub, not its contents" "could not stage a probe file"
+    skip ".env values are redacted" "no host-staged .env to read (the box cannot create one)"
+    skip ".env reads as keyed names or the stub, never raw" "no host-staged .env to read"
 fi
 allow "regression: .env.example is not redacted" \
     bash -c "echo 'KEY=placeholder' > '$ARTIFACTS/.env.example'"

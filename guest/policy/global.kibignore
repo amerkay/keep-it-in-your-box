@@ -17,10 +17,37 @@
 # worktree forms under .git/modules/<name>/ and .git/worktrees/<name>/) are NOT listed
 # here. They nest arbitrarily deep, which a tail rule cannot express, so they live in
 # Redact._git_sensitive() instead — one definition, shared with the write validator.
+#
+# ONLY pure-exec files belong here. A write here is refused and the policy text tells the
+# agent to stop and report, so a rule on a file anyone edits day to day ends the session
+# over ordinary work. Mixed-use config (.claude/settings.json, .mcp.json, mise.toml, …) is
+# DETECTED instead, by audit_project_configs() in kib/host/gitaudit.py.
 .vscode
 .devcontainer
 .idea
 .envrc
+
+# git indirection the .git/* guard does not reach: .githooks is the usual committed
+# core.hooksPath target (already-trusted config, so the validator never sees a change), and
+# .gitmodules names the URL and path a `git submodule update` acts on.
+.githooks
+.gitmodules
+
+# Agent and editor config that carries a command rather than prompt text. Deliberately
+# file-precise: .cursor/rules and .claude/commands are prompt text, which kib holds is not
+# execution (see the shared-assets tiers in redaction-config-guard.md).
+.claude/hooks
+.cursor/mcp.json
+.zed/tasks.json
+.zed/debug.json
+.run
+
+# Tool config whose value is an executable, run by the host at the next ordinary command.
+.mvn/jvm.config
+.exrc
+.nvim.lua
+.ripgreprc
+.yarnrc.yml
 
 [redact]
 # Stub on read + write-deny — the existing .kibignore behaviour. Secrets, not executables.
@@ -30,10 +57,14 @@
 # carve-outs cannot be used by a *project* to un-redact itself. The placeholder files
 # are committed by convention and contain no secrets — redacting them just breaks
 # ordinary work like "add the new key to .env.example".
+#
+# Deliberately three names, not every placeholder convention in the wild. Each entry here
+# is a file the agent may read in full, so the set is kept to spellings that are ALWAYS a
+# committed template. `.env.defaults` and `.env.dist` were carried and removed (2026-07-27):
+# both are also used for real per-environment values, and a wrong guess here leaks a secret
+# while a wrong guess the other way costs one "ask the user".
 .env
 .env.*
 !.env.example
 !.env.sample
 !.env.template
-!.env.defaults
-!.env.dist

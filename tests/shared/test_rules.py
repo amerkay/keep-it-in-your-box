@@ -54,8 +54,6 @@ def test_load_of_a_missing_file_is_an_empty_rule_set() -> None:
         ".env.example",
         ".env.sample",
         ".env.template",
-        ".env.dist",
-        ".env.defaults",
         "newd/.env.example",
         "a/b/c/.env.sample",
     ],
@@ -66,7 +64,20 @@ def test_env_placeholders_are_readable(path: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "path", [".env", ".env.local", ".env.production", "newd/.env", ".env.example.local"]
+    "path",
+    [
+        ".env",
+        ".env.local",
+        ".env.production",
+        "newd/.env",
+        ".env.example.local",
+        # Carried as placeholders and withdrawn (2026-07-27). Both spellings also hold real
+        # per-environment values in the wild, and the exemption is a full-content read: a
+        # wrong guess leaks a secret, where the other way costs one "ask the user".
+        ".env.defaults",
+        ".env.dist",
+        ".env.default",
+    ],
 )
 def test_secret_bearing_env_files_are_redacted(path: str) -> None:
     assert rules.verdict(guarded(), path) == rules.REDACT

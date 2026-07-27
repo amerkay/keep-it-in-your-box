@@ -8,6 +8,7 @@ Runs anywhere, including inside the sandbox: the `fuse` module is stubbed so the
 imports without libfuse, and no real mount is touched.
 """
 
+import errno
 import os
 import sys
 import types
@@ -17,13 +18,22 @@ from typing import Any
 
 import pytest
 
+
 # Stub fusepy before importing the server: the image has it, a bare test host may not, and
 # nothing here needs a real mount.
+class _FuseOSError(OSError):
+    """As fusepy defines it — the errno must land on `.errno`, which is what the kernel
+    returns to the agent and the only channel saying WHICH layer refused."""
+
+    def __init__(self, err: int) -> None:
+        super().__init__(err, os.strerror(err))
+
+
 _fuse = types.ModuleType("fuse")
 _fuse.__dict__.update(
     FUSE=lambda *a, **k: None,
     Operations=object,
-    FuseOSError=type("FuseOSError", (OSError,), {}),
+    FuseOSError=_FuseOSError,
     fuse_get_context=lambda: (os.getuid(), os.getgid(), os.getpid()),
 )
 sys.modules.setdefault("fuse", _fuse)
@@ -79,9 +89,97 @@ def test_the_root_always_passes(redact: Callable[[str], Any]) -> None:
     assert redact("")._classify("/") == ("pass", "")
 
 
-def test_read_of_a_masked_path_returns_the_stub(redact: Callable[[str], Any]) -> None:
-    assert redact("")._classify("/.env")[0] == "file"
+def test_read_of_a_masked_path_with_no_known_shape_returns_the_stub(
+    redact: Callable[[str], Any], tmp_path: Path
+) -> None:
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "secret.pem").write_text("-----BEGIN KEY-----\nabc\n")
+    assert redact("secret.pem\n").read("/secret.pem", 4096, 0, 0) == fuse.STUB
+
+
+def test_a_missing_masked_file_still_serves_the_stub(redact: Callable[[str], Any]) -> None:
+    """Nothing on disk to render, and the path must stay masked rather than 404 into a create."""
     assert redact("").read("/.env", 4096, 0, 0) == fuse.STUB
+
+
+# ── format-aware redaction: names visible, values never ──────────
+def test_a_dotenv_reads_as_its_key_names(redact: Callable[[str], Any], tmp_path: Path) -> None:
+    """The stub hid which settings exist, so the agent asked the user, who pasted the secret
+    into the transcript — the stub caused the leak it was preventing."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / ".env").write_text(
+        "# a comment\nAPI_KEY=s3cr3t\n\nexport DB_URL = postgres://u:p@h/db\n"
+    )
+    out = redact("").read("/.env", 4096, 0, 0).decode()
+    assert out == "API_KEY=<redacted>\nDB_URL=<redacted>\n"
+
+
+def test_a_json_secret_reads_as_its_structure(redact: Callable[[str], Any], tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "creds.json").write_text('{"tok":"s3cr3t","n":{"list":[1,2]},"ok":true}')
+    out = redact("creds.json\n").read("/creds.json", 4096, 0, 0).decode()
+    assert "s3cr3t" not in out
+    assert '"tok": "<redacted>"' in out and '"list"' in out
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'CERT="-----BEGIN-----\nMIIsecret\n-----END-----"\n',  # value spans lines
+        "NOTKEYVALUE\n",  # nothing parses as an assignment
+        '{"unterminated": ',  # not JSON after all
+    ],
+)
+def test_a_shape_the_parser_cannot_vouch_for_falls_back_to_the_stub(
+    redact: Callable[[str], Any], tmp_path: Path, body: str
+) -> None:
+    """A multi-line value's own interior lines match the key pattern, so a lenient parser
+    would print fragments of the secret as if they were names."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / ".env").write_text(body)
+    out = redact("").read("/.env", 4096, 0, 0)
+    assert out == fuse.STUB
+    assert b"MIIsecret" not in out
+
+
+def test_deeply_nested_json_falls_back_instead_of_erroring(
+    redact: Callable[[str], Any], tmp_path: Path
+) -> None:
+    """Valid JSON that overflows the decoder must read as the stub, not as an I/O error the
+    caller cannot explain — RecursionError is not a ValueError."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "creds.json").write_text("[" * 30_000 + "]" * 30_000)
+    assert redact("creds.json\n").read("/creds.json", 4096, 0, 0) == fuse.STUB
+
+
+def test_an_oversized_file_is_not_rendered(redact: Callable[[str], Any], tmp_path: Path) -> None:
+    """Beyond the cap it is not one of these shapes, whatever it parses as."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / ".env").write_text("K=v\n" * (fuse.RENDER_MAX // 2))
+    assert redact("").read("/.env", 4096, 0, 0) == fuse.STUB
+
+
+def test_the_reported_size_matches_what_read_serves(
+    redact: Callable[[str], Any], tmp_path: Path
+) -> None:
+    """getattr and read must see ONE render of one version: a size that disagrees with the
+    bytes splices two versions of a changing file across a partial read."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / ".env").write_text("A=1\nB=2\n")
+    r = redact("")
+    assert r.getattr("/.env")["st_size"] == len(r.read("/.env", 1 << 20, 0, 0))
+
+
+def test_the_render_cache_follows_the_file(redact: Callable[[str], Any], tmp_path: Path) -> None:
+    """Keyed on identity+mtime+size, so an edited file is re-rendered, not served stale."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    env = tmp_path / "src" / ".env"
+    env.write_text("A=1\n")
+    r = redact("")
+    assert r.read("/.env", 4096, 0, 0) == b"A=<redacted>\n"
+    os.utime(env, (0, 0))
+    env.write_text("A=1\nB=2\n")
+    assert r.read("/.env", 4096, 0, 0) == b"A=<redacted>\nB=<redacted>\n"
 
 
 # ── protection: what a write is refused ──────────────────────────
@@ -104,13 +202,65 @@ def test_git_paths_are_protected_at_any_nesting(redact: Callable[[str], Any], pa
     assert redact("")._protected("/" + path) is True
 
 
-@pytest.mark.parametrize("path", ["src/main.py", "hooks/deploy.sh", "config", "src/config"])
-def test_lookalike_paths_are_not_protected(redact: Callable[[str], Any], path: str) -> None:
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".githooks/pre-commit",
+        ".gitmodules",
+        ".claude/hooks/notify.sh",
+        ".cursor/mcp.json",
+        ".zed/tasks.json",
+        ".zed/debug.json",
+        ".run/app.run.xml",
+        ".mvn/jvm.config",
+        ".exrc",
+        ".nvim.lua",
+        ".ripgreprc",
+        ".yarnrc.yml",
+        "sub/.githooks/pre-push",  # tail-matched, so any depth
+        "vendor/pkg/.claude/hooks/x.sh",
+    ],
+)
+def test_non_git_host_executed_paths_are_protected(redact: Callable[[str], Any], path: str) -> None:
+    """Every entry names a file the HOST runs later. Writing one from in here is host code
+    execution that no container boundary sees."""
+    assert redact("")._protected("/" + path) is True
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "src/main.py",
+        "hooks/deploy.sh",
+        "config",
+        "src/config",
+        ".cursor/rules/style.md",  # prompt text, not execution
+        ".claude/commands/deploy.md",
+        ".claude/settings.json",  # mixed-use: detected by the audit gate, not refused
+        ".mcp.json",
+        "mise.toml",
+    ],
+)
+def test_lookalike_and_mixed_use_paths_are_not_protected(
+    redact: Callable[[str], Any], path: str
+) -> None:
+    """The guard is pure-exec files only. A refused write here would end the session over
+    ordinary work, so mixed-use config is warned about host-side instead."""
     assert redact("")._protected("/" + path) is False
 
 
 def test_a_project_cannot_un_protect_its_own_git_config(redact: Callable[[str], Any]) -> None:
     assert redact("!.git/config\n")._protected("/.git/config") is True
+
+
+@pytest.mark.parametrize("path", ["/.env", "/.envrc", "/.githooks/pre-commit"])
+def test_a_guard_refusal_is_eperm_not_eacces(redact: Callable[[str], Any], path: str) -> None:
+    """The reason is logged to the SIDECAR's stderr — a different container — so the agent
+    sees an errno and nothing else. EPERM is what distinguishes "the guard refused this"
+    from an ordinary owner/mode failure, which `default_permissions` reports as EACCES."""
+    with pytest.raises(OSError) as exc:
+        redact("").open(path, os.O_WRONLY)
+    assert exc.value.errno == errno.EPERM
 
 
 def test_a_gitdir_is_recognised_by_layout_not_by_name(

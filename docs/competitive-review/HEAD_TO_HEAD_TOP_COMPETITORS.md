@@ -255,7 +255,9 @@ Whichever is chosen, two claims are worth verifying empirically rather than trus
 **Keep:** the FUSE sidecar — it is what makes stub-on-read, after-launch coverage and a capless agent container possible at the same time. The `.git/config` validator. The clipboard read/write split. The broker. Confinement by bind mount rather than by deny-list. A regression suite that re-tests the *legitimate* operation alongside the attack.
 
 **Worth stealing:**
-- sandbox-runtime's structured `extract` masking — regex out just the credential span so a JSON file still parses.
+- ~~sandbox-runtime's structured `extract` masking~~ — **taken (2026-07-27)**, as format-aware
+  `[redact]`: JSON and `.env*` read as key names with values replaced, everything else keeps the
+  stub. Only the masking half; sentinel substitution on egress stays shelved (`FUTURE_TASKS.md` C1).
 - fence's *unoverridable* framing. `kib`'s guard already ignores `!` negation from a project; saying so as a guarantee, in the docs, is free.
 - yoloAI's copy-then-`apply` review gate, as an opt-in mode for genuinely untrusted repos.
 

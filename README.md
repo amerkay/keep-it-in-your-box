@@ -27,7 +27,7 @@
 You want to run an AI coding agent with `--dangerously-skip-permissions` so it stops asking. The problem was never the agent editing your code — that's the job. It's everything *around* the code: your `.env`, your OAuth token, a `.git/config` the host runs on the next commit, a clipboard write that becomes keystrokes at your next paste. Keep It in Your Box puts the agent in a container that can touch the project and nothing that would let it reach back out to the host.
 
 <p align="center">
-  <img src="docs/assets/readme/boundary.svg" width="100%" alt="At the box boundary: .env and .kibignore are stubbed on read with writes refused; .git/config is validated and host-executed keys refused; clipboard writes are stripped to plain text while reads pass; the OAuth token is readable so rotate after untrusted runs; your project code is read-write.">
+  <img src="docs/assets/readme/boundary.svg" width="100%" alt="At the box boundary: .env and .kibignore read as key names with every value replaced and writes refused; .git/config is validated and host-executed keys refused; clipboard writes are stripped to plain text while reads pass; the OAuth token is readable so rotate after untrusted runs; your project code is read-write.">
 </p>
 
 ### Two ways to box an agent
@@ -36,7 +36,7 @@ The sharpest comparison is with Docker's brand-new **[Docker Sandboxes](https://
 
 | At the boundary | `kib` (this repo) | Docker Sandboxes (`sbx`) |
 |---|---|---|
-| Workspace secrets (`.env`) | **Redacted** — stub on read, even for files created after launch | Readable — the git root is mounted into the VM |
+| Workspace secrets (`.env`) | **Redacted** — key names readable, every value replaced, even for files created after launch | Readable — the git root is mounted into the VM |
 | `.git/config` + host-run config | **Validated** — `hooksPath` / `sshCommand` / `alias.*` refused | Left to you — *"review Git hooks / Makefiles / CI after the session"* |
 | Clipboard | **Mediated** — reads pass, writes stripped to plain text | n/a — no host display is exposed |
 | Egress | Open — an accepted risk | **Deny-by-default** host proxy |
@@ -47,8 +47,8 @@ Neither is strictly safer — they defend different halves. The [full 7-sandbox 
 
 <h2 id="box"><img src="docs/assets/readme/section-box.svg" width="100%" alt="What's in the box"></h2>
 
-- **Secrets are redacted, not just hidden.** A FUSE layer over the project stubs reads and refuses writes to `.env`, `.env.*`, and anything in `.kibignore` — including files created *after* launch, which no bind mount can cover. Committed placeholders (`.env.example`, `.env.sample`, …) stay readable.
-- **Host-executed config is guarded.** The real boundary isn't the container — it's what the *host* runs later. `.git/config` is content-validated on write (a new `core.hooksPath`, `core.sshCommand`, `alias.*`, `filter.*.clean`, or `include` is refused; `git remote add` and `push -u` still work). `.vscode/`, `.devcontainer/`, `.envrc`, git hooks and submodule/worktree equivalents are read-through, write-denied. At launch and teardown an audit gate refuses to start a session into a poisoned config, and names any hidden path git is tracking anyway — without writing a hook into your repo.
+- **Secrets are redacted, not just hidden.** A FUSE layer over the project refuses writes to `.env`, `.env.*`, and anything in `.kibignore` — including files created *after* launch, which no bind mount can cover. Reads give the agent the **key names with every value replaced** (JSON and `.env*`; anything else reads as a flat stub), so it can see that `STRIPE_KEY` exists and needs setting without ever seeing one — which is what stops it asking you to paste the value into the chat. Three committed-template spellings stay fully readable: `.env.example`, `.env.sample`, `.env.template`.
+- **Host-executed config is guarded.** The real boundary isn't the container — it's what the *host* runs later. `.git/config` is content-validated on write (a new `core.hooksPath`, `core.sshCommand`, `alias.*`, `filter.*.clean`, or `include` is refused; `git remote add` and `push -u` still work). `.vscode/`, `.devcontainer/`, `.envrc`, `.githooks/`, `.claude/hooks/`, `.cursor/mcp.json`, `.ripgreprc`, git hooks and submodule/worktree equivalents are read-through, write-denied — files nothing but the host executes. Config that is *also* edited in normal work (`.claude/settings.json`, `.mcp.json`, `mise.toml`, …) stays writable and is reported by the audit gate instead, because a refused write there would stop the session over routine work. At launch and teardown an audit gate refuses to start a session into a poisoned config, and names any hidden path git is tracking anyway — without writing a hook into your repo.
 - **The clipboard is filtered, not handed over.** The host Wayland socket is proxied: *reads* pass (so image paste works), and a *write* reaches your clipboard only as plain text with control characters stripped out in flight — a verbatim write is host code execution at your next terminal paste (an embedded `ESC[201~` ends bracketed paste and the rest is typed). So select-to-copy works and the escape can't ride along. macOS gets the same filter through its `pbpaste` bridge, which cleans the text before it ever reaches `pbcopy`.
 - **Projects can't read each other, and `~/.claude` stays stock.** kib keeps your canonical `~/.claude`/`~/.claude.json` untouched and assembles each container from only *this* project's slice per launch (its transcripts, prompt history and `.claude.json` entry), merging changes back out on exit. So a plain host `claude` and `cc` share one login, one `--resume` list and one history — while no project's box can see another's data.
 - **One container per project, shared by every terminal.** Every terminal `docker exec`s into the same long-lived container, so `/resume`, prompt history and background jobs are shared across tabs. It's torn down only when the last session exits.
@@ -80,7 +80,7 @@ Measured against six other agent sandboxes on the controls that decide whether a
 
 | Sandbox | Workspace secrets | Host-exec config | Clipboard | Egress | Credential | Isolation |
 |---|:--:|:--:|:--:|:--:|:--:|---|
-| **`kib`** (this repo) | ✅ stub-on-read ¹ | ✅ validated | ✅ mediated | ✕ open | ✅ brokered ⁴ | container, `cap-drop=ALL` |
+| **`kib`** (this repo) | ✅ keys-not-values ¹ | ✅ validated | ✅ mediated | ✕ open | ✅ brokered ⁴ | container, `cap-drop=ALL` |
 | [Docker `sbx`](https://www.docker.com/products/docker-sandboxes/) | ✕ `.env` readable | ✕ review-after | — no display | ✅ deny | ✅ brokered | **microVM** |
 | [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) | ◑ sentinel (Linux) | ✕ block | ✕ | ✅ deny | ✅ brokered | bwrap / Seatbelt |
 | [fence](https://github.com/fencesandbox/fence) | ◑ emptied ² | ✕ block | ✕ | ✅ deny | ✕ | bwrap / Landlock |
@@ -197,7 +197,7 @@ code --install-extension EditorConfig.EditorConfig
 Five things that will bite otherwise:
 
 - **`.vscode/` is write-denied from inside the box** — it's on the host-executed-config guard list.
-  An agent in the sandbox getting EACCES if it edits these files is the guard working, not a bug;
+  An agent in the sandbox getting EPERM if it edits these files is the guard working, not a bug;
   edit them from a host terminal.
 - **Point VS Code at `.venv`** (`Python: Select Interpreter`). `fromEnvironment` resolves ruff and
   mypy through the selected interpreter; without it both fall back to bundled versions and you get
