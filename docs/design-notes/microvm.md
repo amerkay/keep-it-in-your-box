@@ -3,6 +3,16 @@
 **Verdict: not planned.** A hypervisor closes none of kib's documented risks and costs most of its
 integration surface. This note exists so the question is answered once rather than re-litigated.
 
+**Re-confirmed 2026-07-28** against a 30-project survey
+([`../competitive-review.md`](../competitive-review.md)), which hardens it twice over. The CAP gate
+below is not merely hard to pass but unpassable by construction: kib serves the redaction view from
+a *sidecar* container that mounts FUSE and propagates it into the agent's namespace, and a
+hypervisor-per-container gives that mount nowhere to land — so adopting one deletes the only
+control the survey found nothing else combines (stub-on-read, after-launch coverage, capless
+agent). And the field's VM adopters bought a kernel boundary and nothing above it: `cleanroom`'s
+SporeVM has no networking at all on Linux/AMD64, `matchlock` is open NAT passthrough, and
+`microsandbox` allows the public internet by default.
+
 ## Why it is overkill
 
 kib's risks cross the boundary through **files the host executes later**, never through the kernel:

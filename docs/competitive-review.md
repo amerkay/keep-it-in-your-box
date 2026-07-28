@@ -20,6 +20,37 @@ the cell says **verified absent** rather than inferring absence from silence.
 
 ---
 
+## Contents
+
+- [The finding](#the-finding)
+- [The control that gates every other one: can the agent read your `$HOME`?](#the-control-that-gates-every-other-one-can-the-agent-read-your-home)
+- [Where `kib` leads](#where-kib-leads)
+  - [1. Host-executed config: the guard is common, the coverage is not](#1-host-executed-config-the-guard-is-common-the-coverage-is-not)
+  - [2. Coverage of files that do not exist yet — and this got stronger](#2-coverage-of-files-that-do-not-exist-yet--and-this-got-stronger)
+  - [3. In-project secret redaction](#3-in-project-secret-redaction)
+  - [4. Clipboard mediation — 0 of 30](#4-clipboard-mediation--0-of-30)
+  - [5. The enforcement privilege lives outside the agent's container](#5-the-enforcement-privilege-lives-outside-the-agents-container)
+- [The self-widening sandbox](#the-self-widening-sandbox)
+- [Deliberate positions, and what they cost](#deliberate-positions-and-what-they-cost)
+  - [Egress](#egress)
+  - [Kernel boundary](#kernel-boundary)
+  - [Ephemerality](#ephemerality)
+- [Credentials](#credentials)
+- [The full matrix](#the-full-matrix)
+  - [Group 1 — the closest peers](#group-1--the-closest-peers)
+  - [Group 2 — VM-class and OS sandboxes](#group-2--vm-class-and-os-sandboxes)
+  - [Group 3 — containers and wrappers](#group-3--containers-and-wrappers)
+  - [Group 4 — the long tail](#group-4--the-long-tail)
+- [Project health](#project-health)
+- [Read these five](#read-these-five)
+- [If you had to hand one to someone else](#if-you-had-to-hand-one-to-someone-else)
+- [What the field agrees on](#what-the-field-agrees-on)
+- [Where this leaves `kib`](#where-this-leaves-kib)
+- [Method, and what to distrust](#method-and-what-to-distrust)
+- [Sources](#sources)
+
+---
+
 ## The finding
 
 `kib` is strong on the threat class the industry named in July 2026 — files the agent writes that the
@@ -37,6 +68,16 @@ What survives verification is narrower and more specific:
 - **Clipboard mediation.** Still **0 of 30**. Nobody else splits read from write.
 
 The concession is unchanged and deliberate: **egress is open**, against 7 of 30 that default-deny.
+
+<p align="center">
+  <img src="assets/sandbox-comparison/control-rarity.svg" width="100%"
+       alt="Adoption across the field, of 30 surveyed projects: clipboard mediation 0 (kib has it), in-project secret redaction 6 (kib has it), VM-class boundary 6 (kib declines by design), default-deny egress 7 (kib declines by design), host-executed config guard 10 (kib has it).">
+</p>
+
+Only controls this document can count from re-verified primary sources are charted. Credential
+brokering, workspace confinement and security-suite adoption are described in the tables but not
+plotted — the earlier draft's figures for them were never re-counted, and estimating is how the
+"4 of 30" error happened in the first place.
 
 ---
 
@@ -245,13 +286,33 @@ block the override.
 
 ---
 
-## Where `kib` is behind
+## Deliberate positions, and what they cost
 
-| Gap | The field | `kib` today |
+Three places `kib` sits in the minority. None is a backlog item: each was decided, written down, and
+is being paid for. What follows is the price of each, stated as the residual risk rather than as a
+gap someone intends to close.
+
+| Position | The field | The residual `kib` accepts |
 |---|---|---|
-| **Egress** | **7 of 30** default-deny | Open — documented accepted risk, no opt-in mode |
-| **Kernel boundary** | 6 use a VM or microVM | Shared kernel |
-| **Ephemerality** | `chamber`, `yoloai`, `matchlock`, `cleanroom` reseed per run | Long-lived container by design |
+| **Egress is open** | **7 of 30** default-deny | LAN and metadata-endpoint reach — *not* exfiltration, which no allowlist closes |
+| **Shared kernel** | 6 use a VM or microVM | A kernel 0-day found by an unprivileged, seccomp-filtered process |
+| **Container outlives the run** | `chamber`, `yoloai`, `matchlock`, `cleanroom` reseed per run | Blast radius spans the concurrent terminals on one project, until the last exits |
+
+### Egress
+
+An allowlist does not close exfiltration, and every project that ships one says so unprompted —
+fence, cplt, and `FoamoftheSea`, which names the exact bypass ("a public Gist"). It cannot close
+`api.anthropic.com` or the package registries, which is where exfiltration actually happens, and the
+LLM channel itself is higher-bandwidth than anything a domain rule governs. `kib` shipped the
+credential broker instead, on the reasoning that removing the thing worth stealing beats fencing a
+channel that cannot be closed ([`credential-broker.md`](design-notes/credential-broker.md)).
+
+**What an allowlist would genuinely buy is lateral reach**, not exfiltration: LAN services, cloud
+metadata endpoints, an internal admin panel. `kib` keeps those reachable on purpose —
+`connect_broker_network` dual-homes the container so host dev servers and the LAN stay available
+alongside the broker network, and dropping that is a recorded dead end. That is the real price of
+this position, and it is worth naming rather than folding into the exfiltration argument, which is
+where most of the field's discussion stops.
 
 The verified default-deny seven: `sandbox-runtime` (netns removed entirely, traffic via host proxies
 on Unix sockets), `fence`, `agent-sandbox` (mitmproxy + iptables, and unusually it verifies **both** a
@@ -272,13 +333,38 @@ Two projects the earlier draft credited with default-deny do not have it: `match
 passthrough; an empty allowlist means allow-all even with `--network-intercept`) and `microsandbox`,
 above.
 
-`kib`'s position is a real trade-off, not an oversight: a default-deny allowlist conflicts with
-building untrusted repos that fetch from arbitrary registries, and an allowlist cannot close
-`api.anthropic.com` or the registries, which is where exfiltration actually happens. The proxy-sidecar
-design is worked out and deliberately unscheduled; `kib` shipped the credential broker instead, on the
-reasoning that removing the thing worth stealing beats fencing a channel that cannot be closed
-([`credential-broker.md`](design-notes/credential-broker.md)). It remains the minority position, and
-unlike `cplt` or `yoloAI` there is no opt-in mode to reach for.
+A default-deny allowlist also conflicts with building untrusted repos that fetch from arbitrary
+registries, so the **default** would not change either way. The proxy-sidecar design is worked out
+and deliberately unscheduled — but unlike `cplt`, `yoloAI`, `agent-sandbox` and `claudebox` there is
+no opt-in mode to reach for, and an opt-in costs nothing when off. That, not the default, is the
+part still open.
+
+### Kernel boundary
+
+**Verdict: not planned, and re-confirmed against this survey.**
+[`microvm.md`](design-notes/microvm.md) holds the four gates and the option table; two findings here
+harden it rather than reopening it.
+
+A hypervisor closes none of the class this document is organised around. Host-executed config reaches
+the host at the same absolute path on every substrate — virtiofs instead of a bind changes how those
+bytes travel, not that they arrive, or that the host runs them afterwards. And decisively, `kib`
+serves its redaction view from a **sidecar** container that mounts FUSE and propagates it into the
+agent's mount namespace; a hypervisor-per-container gives that nowhere to land. A microVM would trade
+away the one control this survey found nothing else combines — stub-on-read, after-launch coverage,
+and a capless agent container at once — to buy a boundary against a threat `kib` does not rank.
+
+The VM adopters bear that out: `cleanroom`'s SporeVM supports no networking at all on Linux/AMD64,
+`matchlock` is open NAT passthrough, `microsandbox` allows the public internet by default. Each bought
+a kernel boundary and nothing above it. If kernel-boundary work is ever worth hours, it goes into a
+tighter seccomp profile — the only row in that note passing all four gates — not a substrate swap.
+
+### Ephemerality
+
+`kib` is ephemeral; the granularity differs. The container is destroyed once the **last** session for
+a project exits rather than after each run, because one container serves N terminals attached by
+`docker exec` — the many-terminals-one-container model the per-run reseeders do not offer. Nothing
+installed outside the project tree and `$CLAUDE_CONFIG_DIR` survives that teardown. What is accepted
+is the window in between: two terminals on one project share a container, and so share a blast radius.
 
 ---
 
@@ -328,9 +414,10 @@ Keychain, `gh auth token` and `GITHUB_TOKEN` with no prompt and failures silentl
 
 ## The full matrix
 
-**Legend** — ✅ documented and specific · ⚠️ partial, opt-in, or conditional · ❌ absent
-(**verified** where source was read) · ❓ not stated in the docs. Every cell describes the **default**
-posture.
+**Legend** — ✅ the control is present, or the exposure is closed · ⚠️ partial, opt-in, or conditional
+· ❌ the control is absent, or the exposure is open (**verified** where source was read) · ❓ not
+stated in the docs. **Every row reads the same direction: ✅ is always the safer posture**, including
+rows named for an exposure rather than a control. Every cell describes the **default**.
 
 Thirty projects across four groups; `kib` repeats as the first column so each table stands alone.
 Group 1 is the closest peers, group 2 the VM-class and OS sandboxes, group 3 containers and wrappers,
@@ -382,7 +469,7 @@ group 4 the long tail.
 |---|---|---|---|---|---|---|---|---|
 | **Egress** | ❌ open | ✅ deny | ✅ deny | ⚠️ 443 + proxy on | ⚠️ opt-in | ⚠️ opt-in | ❌ open (stated non-goal) | ❌ open |
 | **Account credential** | ✅ brokered | ❌ | ✅ sentinel | ❌ exposed | ✅ brokered ×3 | ❌ shared volume | ❌ | ❌ env-forwarded ×2 |
-| **SSH agent** | ❌ never | ❓ passes | ⚠️ socket-blocked | ✅ stripped | ✅ denylisted | ❌ never | ✅ denied | ⚠️ **forwarded** |
+| **Host SSH credentials** | ✅ **never mounted** | ❓ socket passes | ⚠️ socket blocked | ✅ stripped | ✅ denylisted | ✅ never mounted | ✅ denied | ❌ **agent forwarded** |
 | **Third-party MCP credential** | ✅ | ❌ | ✅ sentinel | ❌ | ❌ | ⚠️ stripped, not brokered | ❌ | ❓ |
 | **Clipboard** | ✅ **mediated** | ❓ | ❓ | ⚠️ on/off, on by default | ❌ nothing bridged | ❌ nothing bridged | ⚠️ opt-in enable | ❌ verified |
 | **Docker socket** | ❌ none | ❓ | ⚠️ self-inflicted | ✅ blocked | ✅ stripped | ✅ digest-pinned proxy | ✅ denied | ❌ none |
@@ -436,7 +523,7 @@ group 4 the long tail.
 |---|---|---|---|---|---|---|---|---|
 | **Egress** | ❌ open | ⚠️ public allowed, private denied | ⚠️ **open NAT** | ⚠️ schema-required, absent Linux/AMD64 | ❌ "intentionally unrestricted" | ✅ offline by default | ❌ "fully open" | ❓ |
 | **Account credential** | ✅ brokered | ⚠️ placeholder + **CVE-2026-61670** | ✅ in-flight injection | ✅ host-side gateway | ✅ keychain, ro mount | ⚠️ keychain write granted | ❓ | ⚠️ real values in container env |
-| **SSH agent** | ❌ never | ❓ | ❓ | ❓ | ❌ `~/.ssh` mounted ro | ✅ `~/.ssh` denied | ⚠️ socket passes, keys denied | ❓ |
+| **Host SSH credentials** | ✅ **never mounted** | ❓ | ❓ | ❓ | ❌ `~/.ssh` mounted ro | ✅ `~/.ssh` denied | ⚠️ socket passes, keys denied | ❓ |
 | **Third-party MCP credential** | ✅ | ❓ | ❓ | ❓ | ❓ | ❌ | ❓ | ❓ |
 | **Clipboard** | ✅ **mediated** | ❓ | ❓ | ❓ | ❓ | ❌ verified | ❌ | ❓ |
 | **Docker socket** | ❌ none | ❓ | ❌ none | ⚠️ deferred, unenforced | ⚠️ opt-in, "defeats isolation" | ⚠️ config denied only | ❌ none | ❓ host prereq |
@@ -490,7 +577,7 @@ group 4 the long tail.
 |---|---|---|---|---|---|---|---|---|
 | **Egress** | ❌ open | ✅ **deny, boot-verified** | ✅ **iptables DROP + ipset** | ❌ no network rules | ❓ | ❓ default bridge | ❌ plain NAT | ❌ none |
 | **Account credential** | ✅ brokered | ❌ **token in agent volume** | ⚠️ API key env | ✅ fresh auth inside | ❓ | ❌ `~/.claude` rw, ungated | ❌ `~/.claude` rw | ⚠️ key in global config |
-| **SSH agent** | ❌ never | ✅ port 22 blocked | ❌ **keys mounted `:ro`** | ❌ not in allowlist | ❓ | ⚠️ opt-in ro / agent | ❌ own keypair | ⚠️ `~/.ssh` `:ro` |
+| **Host SSH credentials** | ✅ **never mounted** | ✅ port 22 blocked | ❌ **keys mounted `:ro`** | ✅ not in allowlist | ❓ | ⚠️ opt-in ro / agent | ✅ own keypair | ❌ `~/.ssh` `:ro` |
 | **Third-party MCP credential** | ✅ | ✅ proxy-injected | ⚠️ merged into ro temp | ❓ | ❓ | ❓ | ❓ | ❓ |
 | **Clipboard** | ✅ **mediated** | ❓ | ❓ | ❓ | ❓ | ❓ | ❌ verified none | ❓ |
 | **Docker socket** | ❌ none | ❌ none | ❌ none | ❌ n/a | ❓ | ❌ none | ❌ none | ⚠️ opt-in, dead under default backend |
@@ -544,7 +631,7 @@ group 4 the long tail.
 |---|---|---|---|---|---|---|---|---|
 | **Egress** | ❌ open | ❌ `--share-net` | ✅ **kernel deny + localhost** | ⚠️ **broken by default** | ❌ unrestricted by design | ❌ default bridge | ✅ **internal net + SNI** | ❌ default bridge |
 | **Account credential** | ✅ brokered | ❌ `~/.claude` rw | ❓ | ⚠️ baked into VM disk | ❓ keychain writable | ❌ **`.credentials.json` rw** | ✅ volume, not host | ❌ **auto-discovered** |
-| **SSH agent** | ❌ never | ❌ **forwarded** | ❓ | ❌ own keypair | ❓ | ❌ not mounted | ❌ not mounted | ❌ token URL rewrite |
+| **Host SSH credentials** | ✅ **never mounted** | ❌ **agent forwarded** | ❓ | ✅ own keypair | ❓ | ✅ not mounted | ✅ not mounted | ✅ token URL rewrite |
 | **Third-party MCP credential** | ✅ | ❓ | ❓ | ❓ | ❓ | ⚠️ `gh`/jira only | ❓ | ❓ |
 | **Clipboard** | ✅ **mediated** | ❓ | ❓ | ✅ **disabled** (`--no-clipboard`) | ❓ | ❌ verified | ❓ | ⚠️ web UI feature only |
 | **Docker socket** | ❌ none | ❌ n/a | ❌ n/a | ❌ n/a | ❓ | ❌ none | ❌ none + tested | ❌ none |
@@ -724,10 +811,10 @@ that `❓` must never be upgraded to `❌` was explicit.
    wherever another project's mechanism exists but is undocumented. The re-verification narrowed the
    gap — it upgraded several competitors' cells and corrected six `kib` claims — but did not remove it.
 3. **Star counts are a popularity signal, not a security signal**, and they drift daily.
-4. **The two SVG figures predate the re-verification.** `hero.svg` and `gitconfig-strategies.svg` are
-   retained as visual headers; where their embedded figures disagree with the tables above, the tables
-   are correct. The former `control-rarity.svg` chart has been dropped rather than shown with numbers
-   now known to be wrong.
+4. **The figures were rebuilt against the re-verification (2026-07-28).** All three now carry
+   post-verification counts and framing. `control-rarity.svg` plots only what this document states
+   from primary sources and omits the rest rather than estimating; where any figure still disagrees
+   with the tables above, the tables are correct.
 
 **Scope.** In: locally-run, open-source tools for containing a coding agent on a developer's own
 machine. Out: hosted/SaaS sandboxes (E2B, Daytona, Modal, Vercel, Fly, Runloop, Northflank,
