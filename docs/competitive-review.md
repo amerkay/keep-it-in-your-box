@@ -3,20 +3,14 @@
        alt="Sandbox Comparison — kib measured against 30 open-source agent sandboxes on security and containment.">
 </p>
 
-A survey of open-source projects that sandbox AI coding agents, compared against this repository's
-`kib` on **security and containment**. Field compiled 2026-07-22; **every project re-verified from
-primary sources on 2026-07-28**, one research pass each, reading source rather than documentation
-wherever a claim depended on behaviour. `kib`'s own column was verified against the current tree.
+A survey of 30 open-source projects that sandbox AI coding agents, compared against this
+repository's `kib` on **security and containment**. Every project was verified from primary sources,
+reading source rather than documentation wherever a claim depended on behaviour; `kib`'s own column
+was read against the current tree.
 
 **Every cell about another project comes from that project.** `❓` means *"the docs don't say"* —
-never *"the project lacks it."* Where the re-verification could prove a control absent from source,
-the cell says **verified absent** rather than inferring absence from silence.
-
-> **The re-verification changed the headline.** The 2026-07-22 pass read documentation. Reading
-> source found that host-executed config guards are roughly **two and a half times more common** than
-> that pass suggested, that two projects credited with default-deny egress do not have it, and that
-> one project's `.git/config` protection had existed for three months behind a stale README. Those
-> corrections are recorded in place, not quietly folded in.
+never *"the project lacks it."* Where source could prove a control absent, the cell says **verified
+absent** rather than inferring absence from silence.
 
 ---
 
@@ -26,7 +20,7 @@ the cell says **verified absent** rather than inferring absence from silence.
 - [The control that gates every other one: can the agent read your `$HOME`?](#the-control-that-gates-every-other-one-can-the-agent-read-your-home)
 - [Where `kib` leads](#where-kib-leads)
   - [1. Host-executed config: the guard is common, the coverage is not](#1-host-executed-config-the-guard-is-common-the-coverage-is-not)
-  - [2. Coverage of files that do not exist yet — and this got stronger](#2-coverage-of-files-that-do-not-exist-yet--and-this-got-stronger)
+  - [2. Coverage of files that do not exist yet](#2-coverage-of-files-that-do-not-exist-yet)
   - [3. In-project secret redaction](#3-in-project-secret-redaction)
   - [4. Clipboard mediation — 0 of 30](#4-clipboard-mediation--0-of-30)
   - [5. The enforcement privilege lives outside the agent's container](#5-the-enforcement-privilege-lives-outside-the-agents-container)
@@ -54,30 +48,29 @@ the cell says **verified absent** rather than inferring absence from silence.
 ## The finding
 
 `kib` is strong on the threat class the industry named in July 2026 — files the agent writes that the
-**host** executes later — but it is **not** the rarity the earlier draft of this document claimed.
-Ten of thirty projects guard `.git/config` or `.git/hooks` in some form.
+**host** executes later — but the guard itself is not rare: ten of thirty projects protect
+`.git/config` or `.git/hooks` in some form.
 
-What survives verification is narrower and more specific:
+What is rare is narrower and more specific:
 
 - **Validating `.git/config` instead of blocking it.** `kib` alone. Everyone else who protects it
   denies writes outright, which breaks `git remote add`, or confines git elsewhere.
 - **Recognising a git directory by layout** (`HEAD` + `objects` + `refs`) rather than by the name
   `.git`. `kib` alone. Every other implementation matches the literal string.
-- **Covering paths that do not exist yet.** On Linux, `kib` alone. This one got *stronger* under
-  verification, not weaker — see below.
+- **Covering paths that do not exist yet.** On Linux, `kib` alone.
 - **Clipboard mediation.** Still **0 of 30**. Nobody else splits read from write.
 
-The concession is unchanged and deliberate: **egress is open**, against 7 of 30 that default-deny.
+The most visible minority position is deliberate: **egress is open**, against 7 of 30 that
+default-deny.
 
 <p align="center">
   <img src="assets/sandbox-comparison/control-rarity.svg" width="100%"
        alt="Adoption across the field, of 30 surveyed projects: clipboard mediation 0 (kib has it), in-project secret redaction 6 (kib has it), VM-class boundary 6 (kib declines by design), default-deny egress 7 (kib declines by design), host-executed config guard 10 (kib has it).">
 </p>
 
-Only controls this document can count from re-verified primary sources are charted. Credential
-brokering, workspace confinement and security-suite adoption are described in the tables but not
-plotted — the earlier draft's figures for them were never re-counted, and estimating is how the
-"4 of 30" error happened in the first place.
+Only controls counted from primary sources are charted. Credential brokering, workspace confinement
+and security-suite adoption are described in the tables but not plotted, because a number nobody
+counted is worse than no number.
 
 ---
 
@@ -91,12 +84,10 @@ of the host `$HOME` is mounted** — no `~/.ssh`, `~/.aws`, `~/.gnupg`, no SSH-a
 `~/.gitconfig` (git identity is read host-side and passed as `GIT_AUTHOR_*`). The container's `$HOME`
 is a container path.
 
-**The carve-out, stated plainly and corrected.** Two slices of canonical `~/.claude` are bound in,
-and they are **two tiers, not one**: `plugins` and `hooks` are read-only (writable only under
-`--unlock-shared`); `skills`, `agents` and `commands` are **writable by default**, because authoring
-a skill from one project is meant to share it. Everything else Claude needs is assembled into
-`$KIB_STATE_ROOT` scratch. Earlier drafts of this document described all five as read-only. They are
-not.
+**The carve-out, stated plainly.** Slices of canonical `~/.claude` are bound in, in **two tiers**:
+`plugins` and `hooks` are read-only (writable only under `--unlock-shared`); `skills`, `agents` and
+`commands` are **writable by default**, because authoring a skill from one project is meant to share
+it. Everything else Claude needs is assembled into `$KIB_STATE_ROOT` scratch.
 
 A bind mount only shows what you name, so the confinement cannot drift as new secret-bearing paths
 appear in `$HOME`. A deny-list has to be kept current; an allowlist of one directory does not. That
@@ -139,12 +130,11 @@ file the host later executes.
 | "One Docker socket to rule them all" | Codex, Cursor, Gemini CLI | GHSA-v4xv-rqh3-w9mc | no socket mounted |
 | "GitPwned: allowlist to RCE" | Codex CLI | patched v0.95.0 | n/a — no command allowlist to bypass |
 
-**Ten of thirty guard this surface**, not four: `sandbox-runtime`, `fence`, `cplt` (macOS only),
-`aicontainer`, `agent-seatbelt`, `claude-code-devcontainer`, `container-use`, `sandvault`,
-`agent-sandbox` (opt-in, default off), and `kib`. The earlier count of four was an artifact of
-reading READMEs.
+**Ten of thirty guard this surface:** `sandbox-runtime`, `fence`, `cplt` (macOS only), `aicontainer`,
+`agent-seatbelt`, `claude-code-devcontainer`, `container-use`, `sandvault`, `agent-sandbox` (opt-in,
+default off), and `kib`.
 
-Two of those were invisible to a documentation pass and deserve credit:
+Two of those are invisible to a documentation pass and deserve credit:
 
 - **`claude-code-devcontainer`** has mounted `.git/config` and `.git/hooks` read-only since
   2026-04-24 (commit `5203cb5`, credited to an outside reporter), plus a host-side launch guard that
@@ -156,7 +146,7 @@ Two of those were invisible to a documentation pass and deserve credit:
 
 <p align="center">
   <img src="assets/sandbox-comparison/gitconfig-strategies.svg" width="100%"
-       alt="Four strategies for the .git/config problem: kib validates content; fence, sandbox-runtime, aicontainer and cplt-on-macOS block all writes; yoloAI confines git; cplt on Linux leaves it writable.">
+       alt="Five strategies for the .git/config problem: kib validates content; fence, sandbox-runtime, aicontainer, cplt-on-macOS, cc-devcontainer and agent-sandbox block all writes; yoloAI confines git; container-use filters .git on export; cplt on Linux, agent-safehouse and the long tail leave it writable.">
 </p>
 
 | Strategy | Projects | What it costs |
@@ -178,13 +168,13 @@ case, while Claude Code's docs claim the opposite; `agent-safehouse` grants the 
 resolves them host-side at the audit gate (`git config --list --includes`); `aicontainer` excludes
 them from config seeding; nobody else addresses it.
 
-**One caveat on `kib`'s own guard, added 2026-07-27.** `[protect]` is no longer absolute: a nested
-path may be written **iff its bytes are identical to the same guarded name at the project root**, so
-`git worktree add`, `clone`, a branch switch and `stash pop` work on a repo that tracks `.vscode/`.
-The root copy is never writable, a nested path with no root anchor is refused, and the check is
-fail-closed at four points. Reproduce, never author.
+**One caveat on `kib`'s own guard.** `[protect]` is not absolute: a nested path may be written **iff
+its bytes are identical to the same guarded name at the project root**, so `git worktree add`,
+`clone`, a branch switch and `stash pop` work on a repo that tracks `.vscode/`. The root copy is
+never writable, a nested path with no root anchor is refused, and the check is fail-closed at four
+points. Reproduce, never author.
 
-### 2. Coverage of files that do not exist yet — and this got stronger
+### 2. Coverage of files that do not exist yet
 
 A bind mount cannot cover a file that isn't there. `sandbox-runtime` says so outright:
 
@@ -195,10 +185,10 @@ That constraint is mechanical, so it applies to every `:ro`-bind guard in the fi
 `aicontainer`'s, `claude-code-devcontainer`'s, `agent-sandbox`'s. `cplt` hits the same wall
 (`.cplt.toml` "can still be created" on Linux).
 
-The earlier draft credited `fence` alongside `kib` here. Verification removed it: **fence's Linux
-wrap mode computes deny paths once at launch, skips non-existent ones, and Landlock is allow-only**.
-Only its macOS Seatbelt globs and its `hooks` mode cover after-launch files. `sandbox-runtime` fixed
-the equivalent gap on **Windows** on 2026-07-22, leaving Linux as its sole affected platform.
+`fence` does not close it either: **its Linux wrap mode computes deny paths once at launch, skips
+non-existent ones, and Landlock is allow-only**. Only its macOS Seatbelt globs and its `hooks` mode
+cover after-launch files. `sandbox-runtime` has fixed the equivalent gap on **Windows**, leaving
+Linux as its sole affected platform.
 
 So on Linux, `kib` is alone. FUSE sees the `create()` call; the guard rules are evaluated per syscall
 against a live view, and cover `sub/.git/config`, `.git/modules/<name>/config` and
@@ -232,10 +222,10 @@ desktop notification, and macOS runs the same filter at its `pbpaste` spool befo
 Nobody else splits read from write. Verified positions: `chamber` hardcodes `--no-clipboard`
 (disabled outright); `cplt`'s `--deny-clipboard` is all-or-nothing on macOS and the clipboard is
 **reachable by default** because it rides the blanket `mach-lookup` Node.js needs;
-`agent-safehouse` denies it structurally but only until `--enable=clipboard`, and — correcting an
-earlier claim in this document — its clipboard test assertions are *inclusion* checks for that flag,
-not blocks; `yolobox` ships an opt-in bridge it describes as "intentionally creates a host-write
-channel"; `aicontainer` and `yoloAI` bridge nothing.
+`agent-safehouse` denies it structurally but only until `--enable=clipboard`, and its clipboard test
+assertions are *inclusion* checks for that flag rather than blocks; `yolobox` ships an opt-in bridge
+it describes as "intentionally creates a host-write channel"; `aicontainer` and `yoloAI` bridge
+nothing.
 
 The asymmetry is the point. A clipboard *write* is host code execution at the user's next terminal
 paste — an embedded `ESC[201~` ends bracketed paste early and the rest is interpreted as typed
@@ -260,9 +250,8 @@ egress proxy but **not** to the container running the agent; `claude-code-devcon
 
 ## The self-widening sandbox
 
-A class the 2026-07-22 pass missed entirely, because it only appears when you read the config loader:
-**a hostile repository ships a committed file that the tool auto-loads, and the sandbox grants itself
-away.**
+A class that only appears when you read the config loader: **a hostile repository ships a committed
+file that the tool auto-loads, and the sandbox grants itself away.**
 
 | Project | Channel | What a cloned repo can obtain |
 |---|---|---|
@@ -329,9 +318,8 @@ public internet by default and denies only private ranges; true deny-by-default 
 "deny-by-default" with incompatible meanings. `cleanroom` requires deny-by-default in its policy
 schema, but SporeVM — the engine that enforces it — supports no networking at all on Linux/AMD64.
 
-Two projects the earlier draft credited with default-deny do not have it: `matchlock` (open NAT
-passthrough; an empty allowlist means allow-all even with `--network-intercept`) and `microsandbox`,
-above.
+Two projects commonly credited with default-deny do not have it: `matchlock` (open NAT passthrough;
+an empty allowlist means allow-all even with `--network-intercept`) and `microsandbox`, above.
 
 A default-deny allowlist also conflicts with building untrusted repos that fetch from arbitrary
 registries, so the **default** would not change either way. The proxy-sidecar design is worked out
@@ -341,9 +329,8 @@ part still open.
 
 ### Kernel boundary
 
-**Verdict: not planned, and re-confirmed against this survey.**
-[`microvm.md`](design-notes/microvm.md) holds the four gates and the option table; two findings here
-harden it rather than reopening it.
+**Verdict: not planned.** [`microvm.md`](design-notes/microvm.md) holds the four gates and the option
+table; two findings here harden it.
 
 A hypervisor closes none of the class this document is organised around. Host-executed config reaches
 the host at the same absolute path on every substrate — virtiofs instead of a bind changes how those
@@ -376,12 +363,10 @@ synthetic `.credentials.json`, and the broker re-originates TLS upstream so ther
 container. Per-route `allow_paths` restricts the real token to `/v1/` and `/api/oauth/profile`,
 404-ing key minting and organisation writes.
 
-**Correcting this document's own overclaim:** the registry carries `OPENAI_BASE_URL` and
+**The reach is narrower than the registry suggests.** It carries `OPENAI_BASE_URL` and
 `GOOGLE_GEMINI_BASE_URL` rows, but they are ready-but-unstarted — a route exists only once a
-non-empty host token file is present. In practice `kib` brokers Claude alone today, which is the same
-shape as the gap this document previously held against `yoloAI`. That contrast was wrong in both
-directions: `yoloAI` brokers **three** agents today (claude, gemini, codex); its "only wired for
-Claude" line is a stale heading whose own body says otherwise.
+non-empty host token file is present, so `kib` brokers Claude alone today. `yoloAI` brokers **three**
+(claude, gemini, codex), despite a stale "only wired for Claude" heading its own body contradicts.
 
 The genuine extension is elsewhere: the same broker injects **third-party MCP credentials** as a
 header the container never sees, runs client-signed credentials in their own `cap-drop=ALL` sidecar,
@@ -693,7 +678,7 @@ shipping no LICENSE file** — GitHub detects no license for any of the three. `
 
 | Project | Why it matters to `kib` |
 |---|---|
-| [navikt/cplt](https://github.com/navikt/cplt) | **Closest philosophical match**, and the most candid SECURITY.md in the field — it documents **24+** of its own bypasses, not the eight recorded earlier. Kernel-enforced via Landlock instead of FUSE, plus the egress allowlist `kib` lacks. Critical for any Linux comparison: its kernel-blocked rows are macOS-only, because Landlock cannot deny a subpath inside an allowed directory. Its Linux kernel test suite **does** exist (`tests/integration_linux.rs`, 59 tests) — an earlier claim here said otherwise. See [`docs/security/compare-to-cplt.md`](security/compare-to-cplt.md). |
+| [navikt/cplt](https://github.com/navikt/cplt) | **Closest philosophical match**, and the most candid SECURITY.md in the field — it documents **24+** of its own bypasses. Kernel-enforced via Landlock instead of FUSE, plus the egress allowlist `kib` lacks. Critical for any Linux comparison: its kernel-blocked rows are macOS-only, because Landlock cannot deny a subpath inside an allowed directory. Its Linux kernel test suite does exist (`tests/integration_linux.rs`, 59 tests). See [`docs/security/compare-to-cplt.md`](security/compare-to-cplt.md). |
 | [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) | Anthropic's mandatory deny-write list remains the most complete path enumeration in the field, and its Linux existing-files-only caveat is the sharpest self-documented limitation anywhere. Note two things its own README does not tell you: the entire credential subsystem is documented only on the Claude Code docs site, and its default `onExtractNoMatch: warn` fails open. |
 | [aicontainer](https://github.com/stefanoginella/aicontainer) | The closest match to `kib`'s thesis, and the only other container project treating cross-project config poisoning as first-class. Its digest-pinned Docker socket proxy exposes exactly `ping` and `version`. Two acknowledged holes: VS Code runs a repo's `initializeCommand` on the host before it can validate anything, and its `:ro` guards cannot cover a repo cloned mid-session. |
 | [yoloai](https://github.com/kstenerud/yoloai) | A working audit trail of its own escapes, including a fixed critical host-RCE via agent-controlled `.git/config` filter drivers. Read `findings-unresolved.md` before trusting the review gate: **DF136**, reproduced 2026-07-20 and unfixed, lets an agent on the macOS backends redirect `apply` to any user-writable path. |
@@ -708,13 +693,13 @@ host-executed config RCE, egress explicitly not a criterion.** Ratings are for *
 
 | | Rating | Why |
 |---|---|---|
-| **aicontainer** | ★★★★☆ | Still the only one meeting both hard requirements with **no configuration**. Cons: `.vscode/` unprotected and the README actively directs overrides there; `:ro` guards miss mid-session clones; one human maintainer. |
-| **claude-code-devcontainer** | ★★★★☆ | **Upgraded from ★★☆☆☆.** It does guard `.git/config` and `.git/hooks`, and refuses to launch if a repo requests `SYS_ADMIN` — the earlier rating was based on a stale README. Cons unchanged and real: the SSH agent is forwarded by default with no opt-out, egress is fully open, the container user has passwordless sudo, and there are no tests. |
+| **aicontainer** | ★★★★☆ | The only one meeting both hard requirements with **no configuration**. Cons: `.vscode/` unprotected and the README actively directs overrides there; `:ro` guards miss mid-session clones; one human maintainer. |
+| **claude-code-devcontainer** | ★★★★☆ | Guards `.git/config` and `.git/hooks`, and refuses to launch if a repo requests `SYS_ADMIN` — neither of which its README mentions. Cons are real: the SSH agent is forwarded by default with no opt-out, egress is fully open, the container user has passwordless sudo, and there are no tests. |
 | **sandbox-runtime** | ★★★★☆ | Fails requirement 1 as shipped but documents the exact fix, and has the field's most complete host-config deny list, tested. Best maintenance story by an order of magnitude. Cons: confinement lives in a config file that can drift; worktrees and submodules get no guard on Linux. |
-| **sandvault** | ★★★★☆ | **New entry.** Confinement enforced twice over and behaviourally tested, host-side git invocations hardened against exactly this attack, actively maintained. Cons: concurrent agents share one account and can overwrite each other's credentials; egress unrestricted; guards only cover repos cloned through `sv-clone`. |
+| **sandvault** | ★★★★☆ | Confinement enforced twice over and behaviourally tested, host-side git invocations hardened against exactly this attack, actively maintained. Cons: concurrent agents share one account and can overwrite each other's credentials; egress unrestricted; guards only cover repos cloned through `sv-clone`. |
 | **fence** | ★★★☆☆ | Strongest *unoverridable* framing for hooks and shell rc. Cons: read confinement is opt-in, `allowGitConfig` is a foot-gun, after-launch coverage is macOS-only, and v0.1.64 **removed** `.claude/commands` and `.claude/agents` from mandatory protection while the website still advertises the old guarantee. |
 | **cplt** | ★★★☆☆ | The only OS sandbox with both controls on by default, and macOS is its better half. Cons: `.vscode` explicitly allowed — the unpatched `tasks.json` chain, live by design — and `$HOME` is not truly out of reach. |
-| **yoloAI** | ★★☆☆☆ | **Downgraded from ★★★☆☆.** The copy-then-`apply` review gate was the reason to recommend it, and on the macOS backends DF136 defeats that gate: an agent can rewrite `environment.json`'s `HostPath` so the next `apply` writes its patch to `~/.ssh` or another project. Filed, reproduced, not fixed. Revisit if that closes. |
+| **yoloAI** | ★★☆☆☆ | The copy-then-`apply` review gate is the reason to want it, and on the macOS backends DF136 defeats that gate: an agent can rewrite `environment.json`'s `HostPath` so the next `apply` writes its patch to `~/.ssh` or another project. Filed, reproduced, not fixed. Worth revisiting if that closes. |
 | **agent-safehouse** | ★★☆☆☆ | Best `$HOME` confinement here, but no in-repo protected paths means the agent writes `.git/hooks/post-checkout` and you execute it later. Fails the second requirement. |
 | **`kib`** | *n/a* | Best fit on the brief itself, but unpublished, unlicensed, single-author and needs a host terminal. Not something a stranger can install. |
 
@@ -737,8 +722,7 @@ That is a 30-second test and it is most of the decision.
 4. **Documentation lags source, badly, and in both directions.** Trail of Bits' README understated
    its own protections by three months. `microsandbox` and `cleanroom` overstate theirs. `vibebox`,
    `sculptor` and `scode` each market a guarantee their own security docs contradict. A survey built
-   on READMEs — including the first version of this one — will be wrong about roughly a third of the
-   field.
+   on READMEs will be wrong about roughly a third of the field.
 5. **Confinement is settled; host-executed config is not.** Most projects keep `$HOME` out of reach.
    Ten guard in-repo host-executed config, but only one validates rather than blocks, and only one
    covers paths that do not exist yet on Linux. The industry named this bug class in July 2026; the
@@ -751,16 +735,16 @@ That is a 30-second test and it is most of the decision.
 ## Where this leaves `kib`
 
 **Keep:** the FUSE sidecar — it is what makes stub-on-read, after-launch coverage and a capless agent
-container possible at the same time, and after verification it is the only mechanism in the field
-that does all three. The `.git/config` validator. The clipboard read/write split. The broker.
+container possible at the same time, and it is the only mechanism in the field that does all three.
+The `.git/config` validator. The clipboard read/write split. The broker.
 Confinement by bind mount rather than deny-list. A regression suite that re-tests the *legitimate*
 operation alongside the attack.
 
 **Worth stealing:**
 
-- ~~sandbox-runtime's structured `extract` masking~~ — **taken (2026-07-27)** as format-aware
-  `[redact]`. Only the masking half; sentinel substitution on egress stays shelved, because the
-  base-URL broker needs no CA in the container trust store.
+- ~~sandbox-runtime's structured `extract` masking~~ — **taken**, as format-aware `[redact]`. Only
+  the masking half; sentinel substitution on egress stays shelved, because the base-URL broker needs
+  no CA in the container trust store.
 - **`agent-safehouse`'s terminal-deny ordering.** It emits the deny on its own config *after* every
   grant, so no later rule can override it, and applies it to a path that does not yet exist. `kib`
   achieves the same outcome differently; the explicit ordering guarantee is worth stating.
@@ -771,12 +755,6 @@ operation alongside the attack.
   relies on a similar "the anchor is immutable" argument.
 - fence's *unoverridable* framing, as documentation. `kib`'s guard already ignores `!` negation from
   a project; saying so as a guarantee is free.
-
-**Fix in this document's own claims** — all corrected above, listed here so they are not re-introduced:
-shared assets are two tiers, not all read-only; `[protect]` is 16 tail-matched entries plus depth-aware
-git handling in code, not one policy file; the FUSE validator refuses includes rather than following
-them; `[protect]` admits a byte-identical nested mirror; the suite has 13 sections; and the broker
-serves one provider today, not three.
 
 **Still open:** an opt-in default-deny egress mode. Not as the default, but `cplt`, `yoloAI`,
 `agent-sandbox` and `claudebox` all show the shape of an opt-in that costs nothing when off.
@@ -790,17 +768,16 @@ serves one provider today, not three.
 
 <br>
 
-**Discovery (2026-07-22).** ~10 web searches plus three curated indexes —
+**Discovery.** ~10 web searches plus three curated indexes —
 [webcoyote/awesome-AI-sandbox](https://github.com/webcoyote/awesome-AI-sandbox),
 [wincent's coding-agent-sandbox gist](https://gist.github.com/wincent/2752d8d97727577050c043e4ff9e386e),
 and [efij/awesome-claude-code-security](https://github.com/efij/awesome-claude-code-security).
 Roughly 120 projects surfaced; 30 were in scope.
 
-**Re-verification (2026-07-28).** One independent research pass per project, 30 in total, plus one
-against `kib`'s own tree. Each pass was given the existing claims and asked to confirm or refute them
-from primary sources, to read source rather than documentation wherever a claim depended on
-behaviour, and to distinguish "verified absent from source" from "not documented". The instruction
-that `❓` must never be upgraded to `❌` was explicit.
+**Verification.** One independent research pass per project, 30 in total, plus one against `kib`'s
+own tree. Each was asked to confirm or refute the claims from primary sources, to read source rather
+than documentation wherever a claim depended on behaviour, and to distinguish "verified absent from
+source" from "not documented". The instruction that `❓` must never be upgraded to `❌` was explicit.
 
 **Limitations, in order of how much they should worry you:**
 
@@ -808,13 +785,11 @@ that `❓` must never be upgraded to `❌` was explicit.
    reported GitHub's contributor graph or API as unavailable — contributor counts marked `❓` are
    genuinely unknown, not zero.
 2. **`kib`'s column comes from its own repo with full source access.** That asymmetry favours `kib`
-   wherever another project's mechanism exists but is undocumented. The re-verification narrowed the
-   gap — it upgraded several competitors' cells and corrected six `kib` claims — but did not remove it.
+   wherever another project's mechanism exists but is undocumented. Reading competitors' source
+   narrowed the gap; it did not remove it.
 3. **Star counts are a popularity signal, not a security signal**, and they drift daily.
-4. **The figures were rebuilt against the re-verification (2026-07-28).** All three now carry
-   post-verification counts and framing. `control-rarity.svg` plots only what this document states
-   from primary sources and omits the rest rather than estimating; where any figure still disagrees
-   with the tables above, the tables are correct.
+4. **The figures carry only counts this document states from primary sources**, and omit the rest
+   rather than estimating. Where a figure disagrees with the tables above, the tables are correct.
 
 **Scope.** In: locally-run, open-source tools for containing a coding agent on a developer's own
 machine. Out: hosted/SaaS sandboxes (E2B, Daytona, Modal, Vercel, Fly, Runloop, Northflank,

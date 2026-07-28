@@ -78,6 +78,6 @@
   </g>
 
   <path d="M64 330 H1136" stroke="#21262d" stroke-width="1.5"/>
-  <text x="64" y="354" class="mono" font-size="16" fill="#6e7681">Counts come from re-verified primary sources.</text>
+  <text x="64" y="354" class="mono" font-size="16" fill="#6e7681">Counts come from primary sources, read per project.</text>
   <text x="64" y="378" class="mono" font-size="16" fill="#6e7681">The two positions kib declines by design are priced in the text, not charted.</text>
 </svg>
