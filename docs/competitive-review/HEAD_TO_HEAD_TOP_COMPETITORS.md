@@ -127,7 +127,7 @@ Only two of seven ship default-deny, and note how thin the others' protection is
 - **yoloAI** shipped an in-container firewall the agent could flush, with the empirical proof in its own docs (`sudo iptables -F OUTPUT`, then a successful `curl`). Fixed for Docker by moving enforcement into a sidecar netns. Still IPv4-only — filed as DF104, "PARKED".
 - **fence**: *"domain filtering does not inspect content. If you allow a domain, code can exfiltrate via that domain."*
 
-`kib`'s position — a default-deny allowlist conflicts with building untrusted repos that fetch from arbitrary registries — is a real trade-off, not an oversight. It is still the minority position, and unlike cplt or yoloAI there is no opt-in mode to reach for. `docs/FUTURE_TASKS.md` (E1) holds the design.
+`kib`'s position — a default-deny allowlist conflicts with building untrusted repos that fetch from arbitrary registries — is a real trade-off, not an oversight. It is still the minority position, and unlike cplt or yoloAI there is no opt-in mode to reach for. The proxy-sidecar design is worked out and deliberately unscheduled — kib shipped the credential broker instead, on the reasoning that removing the thing worth stealing beats fencing a channel that cannot be closed ([`credential-broker.md`](../design-notes/credential-broker.md)).
 
 ---
 
@@ -257,7 +257,8 @@ Whichever is chosen, two claims are worth verifying empirically rather than trus
 **Worth stealing:**
 - ~~sandbox-runtime's structured `extract` masking~~ — **taken (2026-07-27)**, as format-aware
   `[redact]`: JSON and `.env*` read as key names with values replaced, everything else keeps the
-  stub. Only the masking half; sentinel substitution on egress stays shelved (`FUTURE_TASKS.md` C1).
+  stub. Only the masking half; sentinel substitution on egress stays shelved — the base-URL broker
+  needs no CA in the container trust store, so a TLS-terminating proxy buys nothing today.
 - fence's *unoverridable* framing. `kib`'s guard already ignores `!` negation from a project; saying so as a guarantee, in the docs, is free.
 - yoloAI's copy-then-`apply` review gate, as an opt-in mode for genuinely untrusted repos.
 

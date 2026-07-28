@@ -21,11 +21,14 @@ empty capability bounding set, `no-new-privileges`, seccomp in filter mode, and 
 
 ## Options
 
-Gates are `FUTURE_TASKS.md` § The gates: **CAP** (can it still mount the FUSE view), **OS** (one
-design for Ubuntu *and* macOS), **POST** (redaction survives), **LIVE** (workspace at the same
-absolute path). **CAP** now also asks whether a *sidecar* container can mount and propagate the
-view to a second container — kib serves it that way on both platforms (`macos.md`), so a substrate
-that isolates containers from each other fails here even if it grants `/dev/fuse`.
+Four gates. A substrate that violates one is **DISQUALIFIED**, not low-rated:
+
+| Gate | Requirement |
+|---|---|
+| **CAP** | Every process the agent runs keeps `CapEff=0` and **no `CAP_SYS_ADMIN`/`CAP_SETPCAP` in its bounding set** — and a *sidecar* container can still mount the FUSE view and propagate it to the agent's. kib serves it that way on both platforms (`macos.md`), so a substrate that isolates containers from each other fails here even if it grants `/dev/fuse`. |
+| **OS** | One design covers Ubuntu *and* macOS. |
+| **POST** | Redaction covers files created **after** launch, not only those present at start. |
+| **LIVE** | The project stays a live mount at the same absolute path — Claude's configs are path-keyed. |
 
 | Option | Added dep | CAP | OS | Verdict |
 |---|---|---|---|---|

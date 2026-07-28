@@ -184,8 +184,9 @@ developed treatment found.
 
 The egress position is defensible and deliberate: a default-deny allowlist conflicts with building
 untrusted repos that fetch from arbitrary registries, and an allowlist cannot close
-`api.anthropic.com` or the registries — which is where exfil actually happens. `docs/FUTURE_TASKS.md`
-(E1) holds the design if that trade ever changes.
+`api.anthropic.com` or the registries — which is where exfil actually happens. The proxy-sidecar
+design is worked out and deliberately unscheduled if that trade ever changes; kib shipped the
+credential broker instead ([`credential-broker.md`](../design-notes/credential-broker.md)).
 
 ---
 

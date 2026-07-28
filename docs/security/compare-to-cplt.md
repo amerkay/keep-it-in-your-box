@@ -49,6 +49,7 @@ cross-project config poisoning is a first-class axis; the account credential nev
 defended, with a kernel-mandatory `--proxy-forced` mode. Plus unconditional lifecycle-script
 suppression, and no container dependency at all.
 
-**The cross-pollination worth doing:** cplt's egress model, as an opt-in mode. `docs/FUTURE_TASKS.md`
-(E1) records why it is designed but not scheduled — an allowlist cannot close `api.anthropic.com`
-or the registries, which is where exfil actually happens.
+**The cross-pollination worth doing:** cplt's egress model, as an opt-in mode. It is designed but
+not scheduled — an allowlist cannot close `api.anthropic.com` or the registries, which is where
+exfil actually happens, so kib shipped the credential broker instead
+([`credential-broker.md`](../design-notes/credential-broker.md)).

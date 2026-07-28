@@ -89,7 +89,7 @@ AppArmor at all (LinuxKit).
 
 ## TODO — checks not yet run
 
-Tracked upstream in `docs/FUTURE_TASKS.md` § "Open questions" and `macos.md` § "Still open".
+Tracked in `macos.md` § "Still open".
 
 - [ ] **Image paste end-to-end (Mac hardware).** Confirmed broken on the first Mac run, three
       causes fixed (dropped `xclip` args, a 2 s budget against `osascript`, and only one trigger
