@@ -206,5 +206,7 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
 ## Conventions
 
 - Conventional commit style. Never commit unless asked.
+- **Commit straight to `main` — never create a branch.** Solo repo, no PR flow; a branch only
+  adds a merge step to undo.
 - Keep the relevant `docs/design-notes/` file updated in the same change as the behaviour or
   rationale. Its `README.md` is the map.
