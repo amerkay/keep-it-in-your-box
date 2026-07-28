@@ -49,6 +49,23 @@
   spellings are exempt and work normally: `.env.example`, `.env.sample`, `.env.template`. Any
   other `.env.*` is redacted, including `.env.defaults` and `.env.dist` — they hold real values
   often enough that the exemption was withdrawn.
+  - **Writing a `.kibignore`: the syntax is gitignore-*shaped*, not gitignore.** A **bare name**
+    is the match-anywhere form — `*.pem` covers every depth, `_dev_data` seals that directory
+    wherever it appears. A rule containing `/` is anchored at the project **root** and matches
+    that **exact** number of components; `*` never crosses a `/`, and a `**` segment is just
+    another spelling of one segment — so `**/*.pem` covers `a/k.pem` and nothing else, neither
+    `k.pem` nor `a/b/k.pem`. Drop the `**/` and write the bare name. A leading `/` or a `..` is
+    dropped as unsafe. `!` re-includes and the last match wins, but a matched **directory seals
+    everything below it**: `secrets` + `!secrets/README.md` still redacts the README — write
+    `secrets/*` + `!secrets/README.md`. Your `!` cannot cancel the tiers above (`!.env` does
+    nothing), and a `[protect]`/`[redact]` heading belongs to kib's own guard file — in a
+    project's file it is read as a pattern, not a section.
+  - **It is read once, when the container is created**, so say this whenever you write one: the
+    live layer keeps enforcing the OLD rules for the rest of the session, and the next `kib`
+    **refuses to attach** until every session for this project is closed and the container
+    recreated. That next launch also mirrors the rules into the repo's `.gitignore` as a managed
+    block, and names any **already-tracked** file they match — `.gitignore` cannot catch those,
+    so the user has to `git rm --cached` them.
 - **Protected** — `.git/config`, `.git/hooks` (+ submodule/worktree equivalents), `.githooks/`,
   `.gitmodules`, `.vscode/`, `.devcontainer/`, `.idea/`, `.envrc`, `.claude/hooks/`,
   `.cursor/mcp.json`, `.zed/tasks.json`, `.zed/debug.json`, `.run/`, `.mvn/jvm.config`, `.exrc`,
