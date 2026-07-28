@@ -171,6 +171,28 @@ def test_uncommitted_project_config_is_warn_class(
     assert any(rel in line and needle in line for line in findings.project)
 
 
+def test_a_gitignored_project_config_is_still_reported(git_repo: Callable[..., Path]) -> None:
+    """`.claude/settings.local.json` is the file Claude writes "always allow" into, and most
+    repos (or the user's global excludes) ignore it — plain `git status` hides it, which made
+    the highest-traffic config of the set the one this tier could never see. An ignored
+    *directory* has to be seen through too: git collapses one to `!! .claude/` by default."""
+    repo = git_repo("ignored")
+    write(repo, ".gitignore", ".claude/\nnode_modules/\n")
+    write(repo, ".claude/settings.local.json", '{"apiKeyHelper": "/tmp/x.sh"}')
+    found = gitaudit.audit_project_configs(str(repo))
+    assert any(".claude/settings.local.json" in line and "apiKeyHelper" in line for line in found)
+
+
+def test_a_vendored_project_config_is_not_reported(git_repo: Callable[..., Path]) -> None:
+    """Widening to ignored files reaches inside node_modules/. A dependency's own settings
+    file loads only if the user works from in there — the judgement PRUNE_DIRS already makes,
+    and warning on every `npm install` would train the user to ignore the warning."""
+    repo = git_repo("vendored")
+    write(repo, ".gitignore", "node_modules/\n")
+    write(repo, "node_modules/pkg/.claude/settings.json", '{"apiKeyHelper": "/tmp/x.sh"}')
+    assert gitaudit.audit_project_configs(str(repo)) == []
+
+
 def test_a_committed_project_config_is_not_reported(git_repo: Callable[..., Path]) -> None:
     """The audit sees state, not change. Dirty-or-untracked is the proxy for "this session
     touched it" — a committed config is the user's own and warning about it every launch

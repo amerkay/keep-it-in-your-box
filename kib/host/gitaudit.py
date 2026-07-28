@@ -188,17 +188,31 @@ TEXT_CONFIGS = (
 )
 
 
+#: One pathspec per config name, matching it at the root and at any depth — the same tails
+#: `_tail_match` accepts, handed to git so the `--ignored` widening below stays bounded.
+CONFIG_PATHSPECS = tuple(f":(glob)**/{name}" for name, _ in (*PROJECT_CONFIGS, *TEXT_CONFIGS))
+
+
 def _tail_match(rel: str, name: str) -> bool:
     return rel == name or rel.endswith("/" + name)
 
 
-def _dirty(top: str) -> list[str]:
+def _dirty(top: str, pathspecs: Sequence[str] = ()) -> list[str]:
     """Paths git reports modified, staged or untracked — the proxy for "changed since commit".
+
+    With `pathspecs`, ignored files are included too, and the listing is limited to them:
+    plain `status` hides an ignored path, and `.claude/settings.local.json` — the file Claude
+    writes "always allow" into — is gitignored in most repos, so the highest-traffic config of
+    the set was the one the audit could never see. Repo-wide, `--ignored --untracked-files=all`
+    would enumerate every path under node_modules, hence the pathspec.
 
     A rename or copy carries a second NUL-separated path; consume it, or the origin reads as
     the next entry's status field and every later path shifts by three characters.
     """
-    entries = iter(_git(["status", "--porcelain", "-z", "--untracked-files=all"], top).split("\0"))
+    args = ["status", "--porcelain", "-z", "--untracked-files=all"]
+    if pathspecs:
+        args += ["--ignored=traditional", "--", *pathspecs]
+    entries = iter(_git(args, top).split("\0"))
     dirty: list[str] = []
     for entry in entries:
         if len(entry) < 4:
@@ -249,7 +263,11 @@ def _scan_json(path: str, kind: str) -> list[str]:
 def audit_project_configs(top: str) -> list[str]:
     """Uncommitted project config naming a command the host runs. Warn-class."""
     found: list[str] = []
-    for rel in _dirty(top):
+    for rel in _dirty(top, CONFIG_PATHSPECS):
+        # A vendored copy under node_modules/ is a dependency's own file, and only loads if
+        # the user works from inside it — the same judgement PRUNE_DIRS already makes.
+        if PRUNE_DIRS.intersection(rel.split("/")[:-1]):
+            continue
         path = os.path.join(top, rel)
         for name, kind in PROJECT_CONFIGS:
             if _tail_match(rel, name):
