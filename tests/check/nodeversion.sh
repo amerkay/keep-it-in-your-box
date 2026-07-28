@@ -58,6 +58,39 @@ else
         "the seeded symlink would point at nothing"
 fi
 
+# ── Per-line pnpm ────────────────────────────────────────────────
+# The only global with a hard node floor, so each baked line carries its own. It has to be
+# installed while the store is still at $NVM_DIR/versions/node — after the mv, `npm install -g`
+# would land in a prefix no session ever sees, and the breakage is silent until someone runs pnpm.
+_nv_bake="$(sed -n '/^ARG NODE_LTS_LINES=/,/^$/p' "$KIB_ROOT/Dockerfile")"
+_nv_pnpm_ln="$(printf '%s\n' "$_nv_bake" | grep -n -- '--engine-strict' | head -1 | cut -d: -f1)"
+_nv_mv_ln="$(printf '%s\n' "$_nv_bake" | grep -n 'mv .*versions/node' | head -1 | cut -d: -f1)"
+if [ -z "$_nv_pnpm_ln" ]; then
+    fail "the baked lines get no pnpm of their own" \
+        "nvm use 18 would fall through to the system pnpm, which crashes below node 22.13"
+elif [ -n "$_nv_mv_ln" ] && [ "$_nv_pnpm_ln" -gt "$_nv_mv_ln" ]; then
+    fail "pnpm is installed after the store moves out of \$NVM_DIR" \
+        "it lands in a prefix no session sees; pnpm stays broken and nothing says so"
+else
+    pass "each baked line installs its own pnpm, before the store moves"
+fi
+
+# Newest-first, or every line silently gets the oldest pnpm that any of them can run.
+case "$(sed -n 's/^ARG PNPM_TAGS="\([^"]*\)".*/\1/p' "$KIB_ROOT/Dockerfile")" in
+    latest\ *) pass "PNPM_TAGS is tried newest-first" ;;
+    "") fail "no ARG PNPM_TAGS in the Dockerfile" "the per-line pnpm install has no tag list" ;;
+    *) fail "PNPM_TAGS does not start with 'latest'" "the newest compatible pnpm would never win" ;;
+esac
+
+# Node ${NODE_MAJOR} has no baked dir to hold a copy, so its pnpm is the system-prefix one.
+if sed -n '/^RUN npm install -g/,/^$/p' "$KIB_ROOT/Dockerfile" \
+    | grep -q '^[[:space:]]*pnpm[[:space:]]*\\\?[[:space:]]*$'; then
+    pass "the system prefix still installs pnpm (the default node's copy)"
+else
+    fail "pnpm was dropped from the system npm install -g" \
+        "the default node, and any unbaked version, would have no pnpm at all"
+fi
+
 # ── The resolver, run for real against a fake store ──────────────
 # Extracted rather than sourced: the entrypoint executes on source. If the markers move, the
 # extraction comes back empty and this fails loudly instead of silently testing nothing.
@@ -109,3 +142,4 @@ fi
 
 rm -rf "$_nv_dir"
 unset _nv_dir _nv_lines _nv_missing _nv_store _nv_bad _m _v _b out
+unset _nv_bake _nv_pnpm_ln _nv_mv_ln

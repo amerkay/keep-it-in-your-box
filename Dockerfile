@@ -81,6 +81,13 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
 # hosted-MCP sidecar (host/broker.sh start_hosted_mcp) runs it to expose a local/client-signed MCP
 # (e.g. Google Search Console) over the broker network without the credential entering the
 # agent container. Pre-installed so the sidecar needs no runtime npm fetch.
+#
+# These land in the SYSTEM prefix (/usr/lib/node_modules, bins in /usr/bin), which no `nvm use`
+# ever shadows — unlike npm/npx, which ship inside each node tarball and switch with it. That is
+# fine for all of these but pnpm: the rest are `#!/usr/bin/env node` scripts with no real engine
+# floor, so they simply run under whichever node PATH resolves. pnpm 11 declares node >=22.13 and
+# hard-crashes below it, so the baked lines get their own copy — see NODE_LTS_LINES below. This
+# one stays: it is Node ${NODE_MAJOR}'s pnpm, and the fallback for anything not baked.
 RUN npm install -g \
     ts-node \
     tsx \
@@ -115,9 +122,23 @@ RUN git clone --depth 1 --branch "$NVM_VERSION" https://github.com/nvm-sh/nvm.gi
 # inside a real versions/node are invisible to its `find … -type d` enumeration.
 # Read-only by design: `nvm install` of an unbaked version is refused, `nvm use` of a baked one
 # is instant. Add a line here and rebuild instead.
+#
+# Each line also gets its OWN pnpm, in that version's prefix, where `nvm use` picks it up. npm
+# installs `latest` regardless of engines, so the tag is chosen by trying pnpm's per-major
+# dist-tags newest-first under --engine-strict and keeping the first one this node satisfies
+# (18/20 -> pnpm 10, 22/24 -> pnpm 11). The list never rots upward — `latest` is always tried
+# first, so a future pnpm 12 is picked up with no edit here.
 ARG NODE_LTS_LINES="18 20 22 24"
+ARG PNPM_TAGS="latest latest-11 latest-10 latest-9"
 RUN export NVM_DIR=/opt/nvm && . /opt/nvm/nvm.sh \
-    && for m in $NODE_LTS_LINES; do nvm install "$m"; done \
+    && for m in $NODE_LTS_LINES; do \
+        nvm install "$m" \
+        && { for t in $PNPM_TAGS; do npm install -g --engine-strict "pnpm@$t" && break; done; } \
+        && command -v pnpm | grep -q "^$NVM_DIR/versions/node/" \
+        && pnpm --version \
+        || exit 1; \
+    done \
+    && npm cache clean --force \
     && nvm cache clear \
     && mv /opt/nvm/versions/node /opt/nvm-versions \
     && rm -rf /opt/nvm/versions \
