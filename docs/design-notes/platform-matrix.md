@@ -60,7 +60,7 @@ creation. What differs is only *where the propagation root lives*, and how it is
 | Inhibitor | `systemd-inhibit --what=sleep` held by a background `sleep infinity` | `caffeinate -is` | `sleep-guard.md` | ✅ |
 | Idle lid-shut suspend | Proactive `systemctl suspend` when idle + lid closed + no external display + no other kib lock, gated by the post-resume SETTLE window | Not applicable — macOS re-evaluates sleep itself once the assertion drops | `sleep-guard.md` | ✅ |
 | Activity metric | Same sampler, sourced by both the guard and the diagnostic | Identical | `sleep-guard.md` | ✅ |
-| Desktop notifications | `notify-send -u <urgency> -i <icon>` | `osascript display notification` (urgency and icon dropped). NOTE: `notify_desktop` has no `terminal-notifier` fallback, so an alert from a *detached* process (`shared-watch.sh`) can be dropped silently unless the user has granted Script Editor notification access — the case `clipboard-bridge.sh` works around | `clipboard-and-dns.md` | 🧪 |
+| Desktop notifications | `notify-send -u <urgency> -i <icon>` | `terminal-notifier` when present, else `osascript display notification` (urgency and icon dropped either way). The fallback order is load-bearing, not cosmetic: `display notification` from a *detached* process is attributed to Script Editor and dropped silently without that grant, and the loudest caller — `shared-watch.sh`, "a shared prompt asset now loads in every project" — runs under `detach_pgrp`. Same order as `notify_clip` | `clipboard-and-dns.md` | 🧪 |
 | `kib sleep-monitor` | Full diagnostic: KDE idle clock, systemd block locks, `/proc` sampling | Refuses (exit 2) and points at `pmset -g assertions` — none of its data sources exist | `sleep-guard.md` | ✅ |
 
 ## Launch, host toolchain and mounts

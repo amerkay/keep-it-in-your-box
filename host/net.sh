@@ -37,8 +37,13 @@ host_has_resolved() { [ -r "$RESOLV_SRC_FILE" ]; }
 # were named literally here and again in the security suite, so a third one a future systemd
 # adds would be an open channel neither side noticed. Globbing fails closed instead. `-S` is
 # required — the same dir holds `netif/`, a DIRECTORY, and `-v /dev/null:…` onto it aborts the
-# whole `docker run`. This shadows by NAME at create time, so it still cannot cover a socket
-# under a different prefix; that residual is recorded in clipboard-and-dns.md.
+# whole `docker run`. The glob runs ONCE, at create time, and /run/host-resolve is a live
+# directory view — so a socket under another prefix, or a matching one that appears only AFTER
+# launch, is not shadowed. The literal mounts this replaced did cover the second case, being
+# unconditional. security-test.sh globs inside the container, so either gap fails a `deny` there
+# rather than passing silently; unioning the glob with the known names needs a host-side probe
+# first (mounting /dev/null onto a path that may not exist inside a :ro bind).
+# (clipboard-and-dns.md)
 add_resolv_sync_args() {
     host_has_resolved || return 0
     ARGS+=(-v "$RESOLV_SRC_DIR:/run/host-resolve:ro")

@@ -174,10 +174,9 @@ fi
 # …and there is exactly ONE project key. The sidecar binds the project at its host path, so
 # canonical and the session agree; a second, re-keying argument would be a translation layer
 # growing back. Asserted on the dispatch table, which is what actually decides.
-if grep -qE '"(scope-in-json|seed-history|merge-out-json|merge-history)": \([a-z_]+, 3\),' \
-    "$KIB_ROOT/kib/host/config_scope.py" \
-    && [ "$(grep -cE '"(scope-in-json|seed-history|merge-out-json|merge-history)": \([a-z_]+, 3\),' \
-        "$KIB_ROOT/kib/host/config_scope.py")" = 4 ]; then
+# All FOUR verbs, counted: a `grep -q` as well would pass on any one of them.
+if [ "$(grep -cE '"(scope-in-json|seed-history|merge-out-json|merge-history)": \([a-z_]+, 3\),' \
+    "$KIB_ROOT/kib/host/config_scope.py")" = 4 ]; then
     pass "canonical and the session share one project key (no box-key translation)"
 else
     fail "config_scope took back a second project key" \

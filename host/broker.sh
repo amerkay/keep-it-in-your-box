@@ -216,6 +216,13 @@ start_broker() {
 
     # One read-only token mount per SIDECAR-SERVED route, at /run/broker/token/<id> (the path
     # _write_broker_config puts in token_paths).
+    #
+    # This re-walks the registry with the same predicate as broker_enabled_providers rather than
+    # consuming its output, because only the walk carries `basename` — the host filename. Left
+    # deliberately: collapsing it means widening _active_providers to `id|basename`, and its
+    # output is also broker_config_hash's input, so the attach-refusal hash would shift for a
+    # six-line saving on the credential path. The drift it invites is closed by a test instead —
+    # tests/check/mcp.sh, "both walks agree".
     local id delivery kind basename
     local -a tok_mounts=()
     while IFS='|' read -r id delivery kind basename; do
@@ -696,8 +703,10 @@ EOF
 }
 
 # ── kib broker add: one command from "I want this MCP" to a live route ──
-# `kib mcp add` stays the non-interactive machinery (adopt and intercept share it); this closes
-# its one real gap — it wrote a def and then told you to run a SECOND command. Bash only ever
+# The ONLY way to declare a route. The `kib mcp add` verb it replaced was a strict subset — no
+# name validation, no proof the def loads, no credential prompt, no printed URL — so it exited 0
+# on defs the broker would then refuse. `kib.host.mcp`'s python `add` entry point lives on and is
+# what provider_add calls. (docs/design-notes/credential-broker.md) Bash only ever
 # detects "no args and a tty → ask the questions"; every flag goes to argparse, because a
 # hand-rolled flag parser is a bug this repo has already paid for once (kib/shared/cli.py).
 

@@ -277,8 +277,6 @@ else
     fail "a bad provider def broke the good ones" "$soft"
 fi
 
-rm -rf "$_mcp_tmp"
-
 # ── the enabled set and the token mounts must be ONE decision ───────────────
 # `_write_broker_config` writes `enabled` + `token_paths`; `start_broker` builds the
 # `-v …:/run/broker/token/<id>:ro` mounts in a SECOND walk carrying its own copy of the delivery
@@ -332,3 +330,5 @@ else
         "enabled=[$_tw_en] token_paths=[$_tw_pa] mounted=[$_tw_mo] — all should be claude,withtok"
 fi
 unset _tokwalk _tw_en _tw_pa _tw_mo _r
+
+rm -rf "$_mcp_tmp" # last, not mid-file: the tokwalk probe above re-creates it under $KIB_DIR

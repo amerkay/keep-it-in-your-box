@@ -38,7 +38,9 @@ SETTLE="${SLEEP_GUARD_SETTLE:-15}" # (LINUX) after a resume, stay awake this lon
 # check. A genuinely missing portable.sh is already fatal everywhere else (host/_load.sh).
 HOST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=SCRIPTDIR/portable.sh
-. "$HOST_DIR/portable.sh"
+# `|| exit 1`: this script has no `set -e`, so an unguarded source of a missing portable.sh
+# would carry on with is_macos undefined and die mid-poll instead of at startup.
+. "$HOST_DIR/portable.sh" || exit 1
 # shellcheck source=SCRIPTDIR/sleep-sample.sh
 . "$HOST_DIR/sleep-sample.sh"
 

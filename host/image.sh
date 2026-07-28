@@ -14,12 +14,14 @@ latest_claude_version() {
 # BUILD_LOCK, and the first launch is exactly when a second one can collide — `kib build` in one
 # terminal while a first `cc` runs in another gave two concurrent builds on the same tag. It
 # also resolves CLAUDE_VERSION (a literal `latest` poisons Docker's layer cache forever) and
-# writes BUILD_LOG. It exits 0 on a non-interactive failure by design, so the image is
-# re-inspected here rather than trusting the status.
+# writes BUILD_LOG. Its exit status is deliberately NOT trusted — it exits 0 on a
+# non-interactive failure, and 1 on an interactive one, which under `set -e` would abort kib
+# here and leave the `die` below (the message the user needs) unreachable. `|| true`, then
+# re-inspect: the image either exists or it does not.
 build_image_if_missing() {
     docker image inspect "$IMAGE_NAME" &>/dev/null && return 0
     echo "🔨 Building Claude Code image (first time, please wait)..." >&2
-    "$KIB_ROOT/tools/build-image.sh"
+    "$KIB_ROOT/tools/build-image.sh" || true
     docker image inspect "$IMAGE_NAME" &>/dev/null \
         || die "the image build did not produce $IMAGE_NAME — see $BUILD_LOG."
 }

@@ -127,7 +127,7 @@ def adopt(args: argparse.Namespace) -> int:
     """Store the secret host-side, strip the inline entry, leave a brokered route behind.
 
     Only a remote MCP whose upstream matches a reverse_proxy_mcp route can be adopted; a
-    local/stdio MCP needs a hosted_mcp definition (`kib mcp add … --run …`) instead.
+    local/stdio MCP needs a hosted_mcp definition (`kib broker add … --run …`) instead.
     """
     name = args.name
     hit = None
@@ -151,7 +151,7 @@ def adopt(args: argparse.Namespace) -> int:
     if not url or not authval:
         raise cli.AbortError(
             f"{name!r} has no inline remote auth header to broker. A local/stdio MCP needs a "
-            "hosted_mcp definition (kib mcp add … --run …), not adoption."
+            "hosted_mcp definition (kib broker add … --run …), not adoption."
         )
 
     # Reuse an existing brokered route for this host, else SYNTHESIZE a provider def from the
@@ -419,7 +419,7 @@ def intercept(args: argparse.Namespace) -> int:
             f"--transport http {nm} <url>\n"
         )
         w("     • Or a single-value hosted server:\n")
-        w(f'         kib mcp add {nm} --run "<cmd>" --cred-env <ENV>\n')
+        w(f'         kib broker add {nm} --run "<cmd>" --cred-env <ENV>\n')
         w("     • To knowingly accept the secret INSIDE the sandbox, re-run with:\n")
         w("         KIB_ALLOW_INLINE_MCP_SECRET=1 kib claude mcp add …\n")
         print("blocked")

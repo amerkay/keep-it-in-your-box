@@ -226,6 +226,36 @@ t_wait_until() {
     fi
 }
 
+# The darwin notifier must prefer terminal-notifier. `display notification` from a DETACHED
+# osascript is attributed to Script Editor and dropped without that grant — and the caller that
+# matters most, shared-watch.sh ("a shared prompt asset now loads in every project"), is detached.
+# Stubs on PATH record which binary ran; no real notification is raised on this Linux box.
+t_notify_desktop() {
+    local d
+    d="$(mktemp -d)"
+    printf '#!/bin/sh\necho "tn $*" >>"%s/log"\n' "$d" >"$d/terminal-notifier"
+    printf '#!/bin/sh\necho "osa $*" >>"%s/log"\n' "$d" >"$d/osascript"
+    chmod +x "$d/terminal-notifier" "$d/osascript"
+
+    PATH="$d:$PATH" notify_desktop critical "kib · t" 'body "quoted" \ back'
+    case "$(cat "$d/log" 2>/dev/null)" in
+        tn*) pass "notify_desktop: prefers terminal-notifier on darwin" ;;
+        *) fail "notify_desktop ignores terminal-notifier" \
+            "a detached osascript alert is silently dropped without a Script Editor grant" ;;
+    esac
+
+    # Without it, the osascript path still fires — and the AppleScript string literals stay
+    # escaped, so a quote in the body cannot truncate the notification.
+    : >"$d/log"
+    rm -f "$d/terminal-notifier"
+    PATH="$d:$PATH" notify_desktop normal "kib · t" 'body "quoted" \ back'
+    case "$(cat "$d/log" 2>/dev/null)" in
+        *osa*display\ notification*\\\"quoted\\\"*) pass "notify_desktop: falls back to escaped osascript" ;;
+        *) fail "notify_desktop fallback" "got: $(cat "$d/log" 2>/dev/null)" ;;
+    esac
+    rm -rf "$d"
+}
+
 t_hash8
 t_lockfd
 t_detach
@@ -233,6 +263,7 @@ t_detach_fds
 t_kill_pgrp
 t_busiest
 t_wait_until
+t_notify_desktop
 
 KIB_OS="$_saved_os"
 unset _saved_os

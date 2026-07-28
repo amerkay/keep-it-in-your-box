@@ -115,6 +115,11 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   every provider. The broker is ON by default (`broker = off` or `KIB_BROKER=0` disables it); a
   first launch with no token auto-runs the login, else falls back to copying the real credential
   in (dir-backed, never a single-file bind — the rename footgun). (`credential-broker.md`)
+- **Don't collapse `start_broker`'s token-mount walk into `broker_enabled_providers`** — only the
+  walk carries the host `basename`, so collapsing widens `_active_providers` to `id|basename`, and
+  that same output feeds `broker_config_hash`: the attach-refusal hash shifts for a six-line
+  saving on the credential path. Drift is closed by a test instead — `tests/check/mcp.sh`, "both
+  walks agree". (`credential-broker.md`)
 - **Don't "simplify" `resolv-sync.sh` to overwrite resolv.conf wholesale** — `127.0.0.11` must
   stay first or the `kib-broker` alias breaks mid-session. (`clipboard-and-dns.md`)
 - **Never nest a bind inside another bind's destination** — Docker Desktop aborts the whole

@@ -149,6 +149,13 @@ kill_pgrp() { # <pidfile>
 notify_desktop() {
     local urgency="$1" title="$2" body="$3"
     if [ "$KIB_OS" = darwin ]; then
+        # terminal-notifier first: `display notification` from a DETACHED osascript is attributed
+        # to Script Editor and dropped silently without that grant — and the loudest caller,
+        # shared-watch.sh, is exactly that (detach_pgrp). Same order as clipboard-bridge.sh.
+        if command -v terminal-notifier >/dev/null 2>&1; then
+            terminal-notifier -title "$title" -message "$body" >/dev/null 2>&1 || true
+            return 0
+        fi
         command -v osascript >/dev/null 2>&1 || return 0
         # Escape for the AppleScript string literals.
         title=${title//\\/\\\\}
