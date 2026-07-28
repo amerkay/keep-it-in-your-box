@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 610" width="1200" height="610" role="img" aria-labelledby="t d">
+  <title id="t">Every audit finding, arranged by pass and severity, coloured by status</title>
+  <desc id="d">A matrix of all 22 findings across three audit passes. Columns are the passes: pass 1 on 2026-07-22 against a Linux host, 118 vectors swept; pass 2 on 2026-07-25, Linux, 50 vectors; pass 3 on 2026-07-27 against a macOS host, 24 vectors. Rows are severity. Critical, 7 total: C1, C2, C3, C4 and C5 from the Linux passes, MAC-C1 and MAC-C2 from the macOS pass, all fixed. High, 11 total: H1, H2 and H8 fixed, H3 and H5 mitigated, H4 accepted, H6 split between a fixed half and an accepted half, H9 fixed, and MAC-H1, MAC-H2 and MAC-H3 fixed. Medium, 1: MAC-M1, mitigated by detection. Low, 3: MAC-L1 and MAC-L2 fixed, L1 still open as a P3 defence-in-depth item. Overall 16 findings are fixed, 4 are mitigated or split, 1 is accepted as a deliberate risk and 1 is open.</desc>
+  <defs>
+    <linearGradient id="mbg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0d1424"/>
+      <stop offset="1" stop-color="#0a0e17"/>
+    </linearGradient>
+    <pattern id="mgrid" width="34" height="34" patternUnits="userSpaceOnUse">
+      <path d="M34 0H0V34" fill="none" stroke="#8b949e" stroke-opacity="0.06" stroke-width="1"/>
+    </pattern>
+    <style>
+      .mono { font-family: ui-monospace, "SFMono-Regular", "Cascadia Code", Menlo, Consolas, monospace; }
+      .sans { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, "Helvetica Neue", Arial, sans-serif; }
+      .chip { font-size: 15px; font-weight: 700; text-anchor: middle; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="610" fill="url(#mbg)"/>
+  <rect width="1200" height="610" fill="url(#mgrid)"/>
+
+  <text x="64" y="64" class="mono" font-size="15" letter-spacing="3.2" fill="#58a6ff">22 FINDINGS &#183; 3 PASSES &#183; 2 HOST PLATFORMS</text>
+  <text x="62" y="110" class="sans" font-size="34" font-weight="800" fill="#e6edf3" letter-spacing="-0.5">Every finding, by pass and severity</text>
+
+  <!-- ── column headers ───────────────────────────────────────────────── -->
+  <g class="sans">
+    <text x="268" y="158" font-size="17" font-weight="700" fill="#e6edf3">PASS 1 &#183; 2026-07-22</text>
+    <text x="564" y="158" font-size="17" font-weight="700" fill="#e6edf3">PASS 2 &#183; 2026-07-25</text>
+    <text x="860" y="158" font-size="17" font-weight="700" fill="#e6edf3">PASS 3 &#183; 2026-07-27</text>
+  </g>
+  <g class="mono" font-size="14" fill="#6e7681">
+    <text x="268" y="178">Linux host &#183; 118 vectors</text>
+    <text x="564" y="178">Linux &#183; 50 vectors</text>
+    <text x="860" y="178">macOS host &#183; 24 vectors</text>
+  </g>
+  <path d="M64 190 H1140" stroke="#8b949e" stroke-opacity="0.18" stroke-width="1"/>
+
+  <!-- ── severity row labels ──────────────────────────────────────────── -->
+  <g class="sans" font-size="18" font-weight="700" text-anchor="end">
+    <text x="240" y="226" fill="#f85149">CRITICAL <tspan fill="#6e7681" font-weight="400">7</tspan></text>
+    <text x="240" y="324" fill="#db6d28">HIGH <tspan fill="#6e7681" font-weight="400">11</tspan></text>
+    <text x="240" y="468" fill="#d29922">MEDIUM <tspan fill="#6e7681" font-weight="400">1</tspan></text>
+    <text x="240" y="528" fill="#58a6ff">LOW <tspan fill="#6e7681" font-weight="400">3</tspan></text>
+  </g>
+
+  <!-- ── CRITICAL ─────────────────────────────────────────────────────── -->
+  <g class="mono chip">
+    <rect x="268" y="206" width="84" height="30" rx="8" fill="#0f2417" stroke="#238636"/><text x="310" y="226" fill="#56d364">C1</text>
+    <rect x="360" y="206" width="84" height="30" rx="8" fill="#0f2417" stroke="#238636"/><text x="402" y="226" fill="#56d364">C2</text>
+    <rect x="452" y="206" width="84" height="30" rx="8" fill="#0f2417" stroke="#238636"/><text x="494" y="226" fill="#56d364">C3</text>
+    <rect x="268" y="244" width="84" height="30" rx="8" fill="#0f2417" stroke="#238636"/><text x="310" y="264" fill="#56d364">C4</text>
+    <rect x="564" y="206" width="84" height="30" rx="8" fill="#0f2417" stroke="#238636"/><text x="606" y="226" fill="#56d364">C5</text>
+    <rect x="860" y="206" width="84" height="30" rx="8" fill="#0f2417" stroke="#238636"/><text x="902" y="226" fill="#56d364">MAC-C1</text>
+    <rect x="952" y="206" width="84" height="30" rx="8" fill="#0f2417" stroke="#238636"/><text x="994" y="226" fill="#56d364">MAC-C2</text>
+  </g>
+  <path d="M64 288 H1140" stroke="#8b949e" stroke-opacity="0.10" stroke-width="1"/>
+
+  <!-- ── HIGH ─────────────────────────────────────────────────────────── -->
+  <g class="mono chip">
+    <rect x="268" y="304" width="84" height="30" rx="8" fill="#0f2417" stroke="#238636"/><text x="310" y="324" fill="#56d364">H1</text>
+    <rect x="360" y="304" width="84" height="30" rx="8" fill="#0f2417" stroke="#238636"/><text x="402" y="324" fill="#56d364">H2</text>
+    <rect x="452" y="304" width="84" height="30" rx="8" fill="#241a09" stroke="#9e6a03"/><text x="494" y="324" fill="#e3b341">H3</text>
+    <rect x="268" y="342" width="84" height="30" rx="8" fill="#161b22" stroke="#30363d"/><text x="310" y="362" fill="#8b949e">H4</text>
+    <rect x="360" y="342" width="84" height="30" rx="8" fill="#241a09" stroke="#9e6a03"/><text x="402" y="362" fill="#e3b341">H5</text>
+    <rect x="452" y="342" width="84" height="30" rx="8" fill="#241a09" stroke="#9e6a03"/><text x="494" y="362" fill="#e3b341">H6</text>
+    <rect x="268" y="380" width="84" height="30" rx="8" fill="#0f2417" stroke="#238636"/><text x="310" y="400" fill="#56d364">H8</text>
+    <rect x="564" y="304" width="84" height="30" rx="8" fill="#0f2417" stroke="#238636"/><text x="606" y="324" fill="#56d364">H9</text>
+    <rect x="860" y="304" width="84" height="30" rx="8" fill="#0f2417" stroke="#238636"/><text x="902" y="324" fill="#56d364">MAC-H1</text>
+    <rect x="952" y="304" width="84" height="30" rx="8" fill="#0f2417" stroke="#238636"/><text x="994" y="324" fill="#56d364">MAC-H2</text>
+    <rect x="1044" y="304" width="84" height="30" rx="8" fill="#0f2417" stroke="#238636"/><text x="1086" y="324" fill="#56d364">MAC-H3</text>
+  </g>
+  <path d="M64 432 H1140" stroke="#8b949e" stroke-opacity="0.10" stroke-width="1"/>
+
+  <!-- ── MEDIUM ───────────────────────────────────────────────────────── -->
+  <g class="mono chip">
+    <rect x="860" y="448" width="84" height="30" rx="8" fill="#241a09" stroke="#9e6a03"/><text x="902" y="468" fill="#e3b341">MAC-M1</text>
+  </g>
+  <path d="M64 492 H1140" stroke="#8b949e" stroke-opacity="0.10" stroke-width="1"/>
+
+  <!-- ── LOW ──────────────────────────────────────────────────────────── -->
+  <g class="mono chip">
+    <rect x="268" y="508" width="84" height="30" rx="8" fill="#2d1417" stroke="#8b3a3f"/><text x="310" y="528" fill="#f85149">L1</text>
+    <rect x="860" y="508" width="84" height="30" rx="8" fill="#0f2417" stroke="#238636"/><text x="902" y="528" fill="#56d364">MAC-L1</text>
+    <rect x="952" y="508" width="84" height="30" rx="8" fill="#0f2417" stroke="#238636"/><text x="994" y="528" fill="#56d364">MAC-L2</text>
+  </g>
+
+  <!-- ── legend ───────────────────────────────────────────────────────── -->
+  <g class="mono" font-size="15">
+    <rect x="268" y="566" width="16" height="16" rx="5" fill="#0f2417" stroke="#238636"/>
+    <text x="294" y="579" fill="#8b949e">fixed <tspan fill="#e6edf3" font-weight="700">16</tspan></text>
+    <rect x="420" y="566" width="16" height="16" rx="5" fill="#241a09" stroke="#9e6a03"/>
+    <text x="446" y="579" fill="#8b949e">mitigated / split <tspan fill="#e6edf3" font-weight="700">4</tspan></text>
+    <rect x="700" y="566" width="16" height="16" rx="5" fill="#161b22" stroke="#30363d"/>
+    <text x="726" y="579" fill="#8b949e">accepted risk <tspan fill="#e6edf3" font-weight="700">1</tspan></text>
+    <rect x="944" y="566" width="16" height="16" rx="5" fill="#2d1417" stroke="#8b3a3f"/>
+    <text x="970" y="579" fill="#8b949e">open <tspan fill="#e6edf3" font-weight="700">1</tspan></text>
+  </g>
+</svg>

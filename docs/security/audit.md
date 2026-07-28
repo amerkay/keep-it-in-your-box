@@ -1,14 +1,14 @@
 <!-- Hero: rendered from ../assets/security-audit/hero.svg -->
 <p align="center">
   <img src="../assets/security-audit/hero.svg" width="100%"
-       alt="Security Audit of the kib Claude Code Docker sandbox. Six host-RCE paths were found by live exploitation and all six are now closed; zero container escapes. A terminal pane shows each exploit re-run against the patched guard and refused with EACCES." />
+       alt="Security Audit of the kib Claude Code Docker sandbox, across three passes on two host platforms. Thirteen host-RCE paths were found by live exploitation and all thirteen are now closed; 22 findings in total, 7 Critical and 11 High; zero container escapes. A terminal pane shows two git-config attacks refused by the guard, leaving the host's own git status with nothing to execute." />
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/host--RCE%20paths-6%20found%20%E2%86%92%206%20closed-2ea043?style=flat-square" alt="host-RCE paths: 6 found, 6 closed" />
+  <img src="https://img.shields.io/badge/host--RCE%20paths-13%20found%20%E2%86%92%2013%20closed-2ea043?style=flat-square" alt="host-RCE paths: 13 found, 13 closed" />
   <img src="https://img.shields.io/badge/container%20escapes-0%20reproduced-2ea043?style=flat-square" alt="container escapes: 0 reproduced" />
-  <img src="https://img.shields.io/badge/vectors%20swept-118-30363d?style=flat-square" alt="118 candidate vectors swept" />
-  <img src="https://img.shields.io/badge/critical%20%2B%20high-8%20fixed%20%C2%B7%201%20mitigated%20%C2%B7%202%20accepted-1f6feb?style=flat-square" alt="critical and high: 8 fixed, 1 mitigated, 2 documented as accepted risk" />
+  <img src="https://img.shields.io/badge/vectors%20swept-192-30363d?style=flat-square" alt="192 candidate vectors swept across three passes" />
+  <img src="https://img.shields.io/badge/critical%20%2B%20high-14%20fixed%20%C2%B7%203%20mitigated%20%C2%B7%201%20accepted-1f6feb?style=flat-square" alt="critical and high: 14 fixed, 3 mitigated, 1 documented as accepted risk" />
   <img src="https://img.shields.io/badge/cross--project%20pivot-closed-2ea043?style=flat-square" alt="cross-project pivot: closed" />
   <img src="https://img.shields.io/badge/clipboard-reads%20pass%2C%20writes%20sanitised-2ea043?style=flat-square" alt="clipboard: sandbox can read it, writes are stripped to plain text" />
   <img src="https://img.shields.io/badge/every%20fix-re--verified%20live-8957e5?style=flat-square" alt="every fix re-verified live" />
@@ -24,7 +24,16 @@
 
 > **Can a malicious script, webpage, or GitHub repo driving this session escape the sandbox and execute code on the host?**
 
-**As audited, yes.** Six confirmed paths reached the host, four rated **Critical**. The container hardening is excellent — every classic container-escape class was tested and blocked — but the sandbox's own stated boundary, *"what the host runs later,"* had multiple holes in the **git-config guard**, and the shared credential surface is exfiltrable by design.
+**As audited, yes — thirteen times, over three passes.** The first pass (2026-07-22, Linux) found **six** paths to the host, four rated Critical. A second pass (07-25) found **two** more of already-known classes. The first audit on a **macOS host** (07-27) found **five** more, plus a Medium and two Lows. **All thirteen are closed.**
+
+The container hardening is excellent — every classic escape class was tested and blocked, and re-tested without regression on macOS. The exposure was entirely at the sandbox's own stated boundary, *"what the host runs later,"* which had repeated holes in the **git-config guard**; the shared credential surface is exfiltrable by design and answered by the broker rather than by a guard rule.
+
+| | 2026-07-22 · Linux | 2026-07-25 · Linux | 2026-07-27 · macOS | total |
+|:--|--:|--:|--:|--:|
+| **Host-RCE paths** | 6 | 2 | 5 | **13** |
+| **All findings** | 12 | 2 | 8 | **22** |
+| **Vectors swept** | 118 | 50 | 24 | **192** |
+| **Container escapes** | 0 | 0 | 0 | **0** |
 
 > [!TIP]
 > **All `P0` and `P1` work has shipped.** C1–C4, H1, H2 and H8 are **fixed**; H5 is **mitigated**; H6 is **split** — its host-RCE half (`plugins`/`hooks`) fixed, its prompt-asset half deliberately reopened and accepted ([why](#reopening-the-prompt-asset-tier--2026-07-26)); H3/H4 remain the deliberate accepted risk. Findings are retained as the record of *why* each control exists — see [Changelog](#changelog).
@@ -86,6 +95,12 @@ Severity, mechanism, root cause and remediation for every confirmed issue. This 
 | **L1** | Unguarded project `.claude/settings*.json` & `.mcp.json` | 🟡 Low<br>In-container only | `guest/policy/global.kibignore` lists `.vscode`/`.envrc`/`.env*` but not `.claude/` or `.mcp.json`; a malicious repo's autoload files get in-container RCE — **already free** under skip-permissions | Not pruned or validated | ⬜ **Open** `P3` — defense-in-depth against a future non-skip-permissions use; add them to a validated guard section |
 | **—** | Container-escape CVEs, FUSE-server pivot, symlink escape, mount abuse, host-resolver reach, sleep-guard injection | 🟢 Info | — | — | **Verified blocked** — see below |
 
+<!-- Findings matrix: rendered from ../assets/security-audit/findings-matrix.svg -->
+<p align="center">
+  <img src="../assets/security-audit/findings-matrix.svg" width="100%"
+       alt="Matrix of all 22 findings by pass and severity. Critical (7): C1-C5 from the Linux passes and MAC-C1, MAC-C2 from the macOS pass, all fixed. High (11): H1, H2, H8, H9 and MAC-H1, MAC-H2, MAC-H3 fixed; H3 and H5 mitigated; H6 split; H4 accepted. Medium (1): MAC-M1, mitigated. Low (3): MAC-L1 and MAC-L2 fixed, L1 open. Overall 16 fixed, 4 mitigated or split, 1 accepted, 1 open." />
+</p>
+
 ---
 
 ## Remediation verified live
@@ -139,6 +154,20 @@ Tested, not assumed.
 - **H3 / H4 — the shared OAuth token under open egress. CLOSED for the brokered path** (credential broker built 2026-07-23, **on by default** 2026-07-25). No guard rule could close it — Claude needs the token, and a default-deny allowlist contradicts the sandbox's purpose of building untrusted repos that fetch from arbitrary registries — so the answer was to remove the thing worth stealing: the durable credential now sits host-side and the container gets a placeholder plus a base URL. **Residual, in three shapes.** (1) A launch with no stored token and no interactive login falls back to mounting the real credential, with a warning — **token rotation after any untrusted session** remains the operational answer there. (2) `broker = off` / `KIB_BROKER=0` restores the old exposure by choice. (3) Brokering removes the credential, not the channel: egress is still open, so anything *in* the session is still exfiltratable. See `docs/design-notes/credential-broker.md`.
 - **H5 is mitigated, not fixed.** Validation runs at launch, not at write. The propagation step is what matters and it is covered, but a poisoned file exists between the write and the next launch.
 - **L1 `P3`** — add `.claude/settings*.json`, `.claude/hooks` and `.mcp.json` to a validated guard section; keep the host kernel and `runc` patched.
+
+---
+
+## The passes
+
+Everything above is the **current state** of the boundary. What follows is the **chronology** — each
+pass, what it found, and why it found it. Findings are retained as the record of *why* each control
+exists; nothing here is a live issue unless [Open items](#open-items) says so.
+
+| Pass | Host | What it added |
+|:--|:--|:--|
+| [Second audit pass](#second-audit-pass--2026-07-25) · 07-25 | Linux | **C5** and **H9** — two host-RCE paths, both re-treads of the C3 and H5 classes, found by a 50-vector sweep |
+| [Reopening the prompt-asset tier](#reopening-the-prompt-asset-tier--2026-07-26) · 07-26 | — | *Not a findings pass.* H6 split into two tiers so `skills`/`agents`/`commands` could go back to rw |
+| [macOS pass](#macos-pass--2026-07-27) · 07-27 | macOS | **MAC-C1 … MAC-L2** — 8 findings, 5 of them reaching the host; the first audit on a second platform |
 
 ---
 
@@ -713,6 +742,18 @@ As written at audit time; all are now implemented — see [Fixes](#fixes--2026-0
 
 ---
 
+## Overall assessment
+
+The **container** is hardened to a high standard; every kernel and namespace escape class was tested and blocked. The exposure was entirely at the **host-executed-config boundary the sandbox itself set out to defend**, plus the shared-config, clipboard and credential surfaces sitting outside it. The git-config guard was the right idea implemented on two brittle assumptions — *path strings identify inodes*, and *hand-parsing equals git's resolution* — each bypassable.
+
+Both the `P0` and `P1` waves have shipped. The parser follows git's grammar and refuses `include`/`includeIf`, `link()` validates its source inode, git dirs are recognised by layout, the shared config dir is read-only behind a per-project merge farm, the clipboard is read-only, and shared `settings.json` is vetted before any container reads it. What remains is the shared OAuth token under open egress — accepted deliberately, answered by rotation.
+
+The **second pass (2026-07-25)** reinforced the same lesson one layer deeper: both new findings were re-treads of already-named classes — a parser diverging from git's grammar (C5, the C3 class) and a too-narrow denylist on a host-reaching config surface (H9, the H5 class). Both are fixed, with regressions. The standing recommendation from that pass is to **stop hand-parsing git config** and diff `git config --list` output instead, so the divergence class cannot recur at all; and to add a **broker path allowlist** (R3). Neither the container boundary nor any escape class regressed.
+
+The **macOS pass (2026-07-27)** made the case for that standing recommendation twice over: MAC-C2 and MAC-H1 are the *same* divergence class again, one layer below grammar at **input normalisation**, and they were reachable because the quote-aware fix answered the two known spellings rather than the category. The parser now normalises the way git does and falls closed on any residual divergence, which does close the category — but the deeper rewrite is still declined for a stated reason (shelling out to `git` inside the FUSE handler risks deadlock), so this is the one place the audit's own top recommendation remains unimplemented by choice. MAC-H2 and MAC-H3 are likewise the H5/H9 class with two instances left unpatched, now closed. The two genuinely new things this pass found are platform-shaped: a **guarantee that held on one transport and not the other** (MAC-C1 — the clipboard filter is shared and correct, the macOS transport staged it in a sandbox-writable file), and a **symlink read primitive** in the deliberately-reopened prompt-asset tier (MAC-M1, mitigated by detection because a bind mount offers nothing to interpose on). The container boundary was re-verified on Docker Desktop / LinuxKit and did not regress; CVE-2025-9074 is not reachable from the box. Egress and the accepted H3/H4 residual are unchanged on either platform.
+
+---
+
 ## Changelog
 
 Security-relevant work, oldest first. Everything before the audit built the boundary; everything after closed the holes the audit found in it.
@@ -759,18 +800,6 @@ New to the macOS pass:
 - **CVE-2026-35022** — Claude Code auth-helper command injection (`gcpAuthRefresh` / `apiKeyHelper` / `awsAuthRefresh` / `awsCredentialExport`); `gcpAuthRefresh` was the sink missing from kib's denylist (MAC-H3)
 - **CVE-2025-9074** — Docker Desktop unauthenticated Engine API from a container; re-tested and **not reachable** from the box (host hygiene: Docker Desktop ≥ 4.44.3)
 - **CVE-2024-32002** — recursive-clone symlink RCE on case-insensitive filesystems; relevant to a Mac reviewer's own `git` (≥ 2.45.1)
-
----
-
-## Overall assessment
-
-The **container** is hardened to a high standard; every kernel and namespace escape class was tested and blocked. The exposure was entirely at the **host-executed-config boundary the sandbox itself set out to defend**, plus the shared-config, clipboard and credential surfaces sitting outside it. The git-config guard was the right idea implemented on two brittle assumptions — *path strings identify inodes*, and *hand-parsing equals git's resolution* — each bypassable.
-
-Both waves have shipped. The parser follows git's grammar and refuses `include`/`includeIf`, `link()` validates its source inode, git dirs are recognised by layout, the shared config dir is read-only behind a per-project merge farm, the clipboard is read-only, and shared `settings.json` is vetted before any container reads it. What remains is the shared OAuth token under open egress — accepted deliberately, answered by rotation.
-
-The **second pass (2026-07-25)** reinforced the same lesson one layer deeper: both new findings were re-treads of already-named classes — a parser diverging from git's grammar (C5, the C3 class) and a too-narrow denylist on a host-reaching config surface (H9, the H5 class). Both are fixed, with regressions. The standing recommendation from that pass is to **stop hand-parsing git config** and diff `git config --list` output instead, so the divergence class cannot recur at all; and to add a **broker path allowlist** (R3). Neither the container boundary nor any escape class regressed.
-
-The **macOS pass (2026-07-27)** made the case for that standing recommendation twice over: MAC-C2 and MAC-H1 are the *same* divergence class again, one layer below grammar at **input normalisation**, and they were reachable because the quote-aware fix answered the two known spellings rather than the category. The parser now normalises the way git does and falls closed on any residual divergence, which does close the category — but the deeper rewrite is still declined for a stated reason (shelling out to `git` inside the FUSE handler risks deadlock), so this is the one place the audit's own top recommendation remains unimplemented by choice. MAC-H2 and MAC-H3 are likewise the H5/H9 class with two instances left unpatched, now closed. The two genuinely new things this pass found are platform-shaped: a **guarantee that held on one transport and not the other** (MAC-C1 — the clipboard filter is shared and correct, the macOS transport staged it in a sandbox-writable file), and a **symlink read primitive** in the deliberately-reopened prompt-asset tier (MAC-M1, mitigated by detection because a bind mount offers nothing to interpose on). The container boundary was re-verified on Docker Desktop / LinuxKit and did not regress; CVE-2025-9074 is not reachable from the box. Egress and the accepted H3/H4 residual are unchanged on either platform.
 
 ---
 
