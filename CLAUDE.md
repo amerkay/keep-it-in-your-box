@@ -115,6 +115,12 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   every provider. The broker is ON by default (`broker = off` or `KIB_BROKER=0` disables it); a
   first launch with no token auto-runs the login, else falls back to copying the real credential
   in (dir-backed, never a single-file bind — the rename footgun). (`credential-broker.md`)
+- **Never name a varlink socket literally in `add_resolv_sync_args`** — runc creates the
+  mountpoint and cannot on a `:ro` bind, so `-v /dev/null:<name>` aborts the entire launch the
+  moment that socket is absent at create time. Keep every shadow inside the `[ -e ]`-guarded
+  glob; the residual (one appearing after create is unshadowed) is caught by `security-test.sh`
+  from inside the box and is not fixable by unioning the names in. Regression-guarded.
+  (`clipboard-and-dns.md`)
 - **Don't collapse `start_broker`'s token-mount walk into `broker_enabled_providers`** — only the
   walk carries the host `basename`, so collapsing widens `_active_providers` to `id|basename`, and
   that same output feeds `broker_config_hash`: the attach-refusal hash shifts for a six-line

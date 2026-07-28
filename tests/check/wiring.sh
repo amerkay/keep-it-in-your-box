@@ -372,3 +372,21 @@ else
         "a renamed log kind silently ends every clipboard desktop alert"
 fi
 unset wg_emitted wg_watched wg_missing wg_k
+
+# Every /dev/null varlink shadow must stay INSIDE add_resolv_sync_args' existence-guarded loop,
+# i.e. name the socket via the loop variable and never a literal. runc has to create the
+# mountpoint and cannot on a read-only bind, so a hardcoded name aborts the whole launch the
+# moment that socket is absent at create time (`make mountpoint …: read-only file system`) —
+# which is what the literal io.systemd.Resolve/.Monitor mounts this replaced would have done.
+# Nothing in the check suite can see a docker run, so the shape is pinned in the source instead.
+vl_body="$(sed -n '/^add_resolv_sync_args() {/,/^}/p' "$KIB_ROOT/host/net.sh")"
+vl_all="$(printf '%s\n' "$vl_body" | grep -c '/dev/null:' || true)"
+# shellcheck disable=SC2016  # a grep pattern matching the literal text ${_s##*/}, not an expansion
+vl_var="$(printf '%s\n' "$vl_body" | grep -c '/dev/null:.*\${_s##\*/}' || true)"
+if [ "$vl_all" -ge 1 ] && [ "$vl_all" = "$vl_var" ]; then
+    pass "every varlink /dev/null shadow is loop-derived, never a literal socket name"
+else
+    fail "add_resolv_sync_args hardcodes a varlink socket name ($vl_var/$vl_all loop-derived)" \
+        "runc cannot create a mountpoint on a :ro bind — an absent socket aborts every launch"
+fi
+unset vl_body vl_all vl_var
