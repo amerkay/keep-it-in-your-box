@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# MCP brokering, host-side: the inline-secret detector, `kib mcp adopt`, `kib mcp add`, and
-# the front-line interceptor for a pasted `claude mcp add … --header <secret>`.
+# MCP brokering, host-side: the inline-secret detector, `kib mcp adopt`, and the front-line
+# interceptor for a pasted `claude mcp add … --header <secret>`. Declaring a route from scratch
+# is `kib broker add` (host/broker.sh) — it validates the name and proves the def loads.
 #
 # All four are thin — parsing, classification and file surgery live in kib.host.mcp. This file
 # owns the bash-visible contract: where the files are, and how an outcome maps to an exit code.
@@ -30,14 +31,6 @@ mcp_adopt() {
         echo "   The broker is off for this project — re-enable it to use '$name' without" \
             "a header in the sandbox: remove 'broker = off' from $KIB_CONFIG, then relaunch."
     fi
-}
-
-# Declare a brokered MCP directly, without first adding it inline. Host-global and
-# identity-free, so it works from anywhere.
-mcp_add() {
-    need_python
-    mkdir -p "$PROVIDERS_DIR" && chmod 700 "$PROVIDERS_DIR"
-    kib_py host.mcp add --providers-dir "$PROVIDERS_DIR" "$@"
 }
 
 # Front-line preventer for the pasted vendor command. Users don't learn kib's flags; they take

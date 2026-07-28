@@ -161,9 +161,6 @@ _OBSOLETE = {
     "mcp_port": "the hosted-MCP port is fixed",
 }
 
-#: Delivery modes the broker sidecar itself serves (the rest run in their own sidecar).
-SIDECAR_SERVED = ("base_url_env", "reverse_proxy_mcp")
-
 #: One human-readable line per rejected/ignored def, refilled by every merge_user_providers().
 #: Never contains file CONTENT — a def sits next to credentials and may hold a pasted one.
 DEF_PROBLEMS: list[str] = []

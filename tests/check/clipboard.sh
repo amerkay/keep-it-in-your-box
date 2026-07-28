@@ -171,5 +171,5 @@ fi
 kill "$_clip_host_pid" 2>/dev/null
 rm -rf "$_clip_tmp"
 wait "$_clip_host_pid" 2>/dev/null || true
-unset _clip_tmp _clip_host_pid _clip_budget _s _mark _req _id
+unset _clip_tmp _clip_host_pid _clip_budget _s _mark _id
 unset -f _clip_wait

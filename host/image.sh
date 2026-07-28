@@ -10,12 +10,18 @@ latest_claude_version() {
     curl -sf "$CLAUDE_DIST_URL" 2>/dev/null | tr -d '[:space:]' || true
 }
 
+# tools/build-image.sh, never a `docker build` of our own: it is the one path that takes
+# BUILD_LOCK, and the first launch is exactly when a second one can collide — `kib build` in one
+# terminal while a first `cc` runs in another gave two concurrent builds on the same tag. It
+# also resolves CLAUDE_VERSION (a literal `latest` poisons Docker's layer cache forever) and
+# writes BUILD_LOG. It exits 0 on a non-interactive failure by design, so the image is
+# re-inspected here rather than trusting the status.
 build_image_if_missing() {
     docker image inspect "$IMAGE_NAME" &>/dev/null && return 0
     echo "🔨 Building Claude Code image (first time, please wait)..." >&2
-    local latest
-    latest="$(latest_claude_version)"
-    docker build --build-arg CLAUDE_VERSION="${latest:-latest}" -t "$IMAGE_NAME" "$KIB_ROOT"
+    "$KIB_ROOT/tools/build-image.sh"
+    docker image inspect "$IMAGE_NAME" &>/dev/null \
+        || die "the image build did not produce $IMAGE_NAME — see $BUILD_LOG."
 }
 
 check_for_updates() {
@@ -32,9 +38,12 @@ check_for_updates() {
 
     echo "🔍 Checking for Claude Code updates..." >&2
     local installed latest
+    # No `claude --version` fallback: the Dockerfile has written /etc/claude-code-version since
+    # the second commit in this repo's history, and tools/build-image.sh is the only way an
+    # image is produced — so an image without the file cannot exist. An empty answer here means
+    # the `docker run` itself failed, and paying for a second failing container start to learn
+    # that again only slowed the launch down. `${installed:-unknown}` already covers it.
     installed="$(docker run --rm --entrypoint="" "$IMAGE_NAME" cat /etc/claude-code-version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
-    # Old images predate /etc/claude-code-version.
-    [ -n "$installed" ] || installed="$(docker run --rm --entrypoint="" "$IMAGE_NAME" claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
     latest="$(latest_claude_version)"
     echo "   Installed: ${installed:-unknown}" >&2
     echo "   Latest:    ${latest:-unknown}" >&2

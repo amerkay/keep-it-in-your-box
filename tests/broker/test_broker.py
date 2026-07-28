@@ -632,9 +632,12 @@ def test_host_config_gives_bash_the_route_path_not_a_port(
     registry.merge_user_providers()
     broker_cli.host_config("acme")
     out = capsys.readouterr().out
-    assert "KIB_BROKER_MCP_URL_PATH=/mcp/acme/http" in out
     assert "KIB_BROKER_MCP_PORT=8100" in out
     assert "KIB_BROKER_LISTEN_PORT=''" in out
+    # The path reaches the agent through route-url, not through a host-config key — that is
+    # the string the .claude.json entry actually carries, so it is what must be pinned.
+    broker_cli.route_url("acme", "kib-broker")
+    assert capsys.readouterr().out.strip() == "http://kib-broker:8100/mcp/acme/http"
 
 
 def test_list_providers_is_one_safe_line_per_route(capsys: pytest.CaptureFixture[str]) -> None:

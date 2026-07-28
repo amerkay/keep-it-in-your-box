@@ -194,16 +194,22 @@ prepare_redaction() {
 
 sidecar_running() { [ -n "$(docker ps -q -f "name=^${FUSE_CNAME}$" 2>/dev/null)" ]; }
 
-# A fuse fs at the mountpoint as the SIDECAR sees it. Readiness polling only — propagation out
-# of that container is a separate question, asked once (see prepare_redaction).
-_sidecar_mounted() {
-    docker exec "$FUSE_CNAME" sh -c '
+# Is there a fuse fs at <path>, as <container> sees it? One probe, two callers: readiness
+# polling in the SIDECAR, and the attach check in the AGENT's container. Written twice once,
+# which left the attach-time copy — the one keeping a second terminal out of a container whose
+# view was unmounted underneath it — free to go stale on its own.
+_fuse_mounted_in() { # <container> <path>
+    docker exec "$1" sh -c '
+        p=$(readlink -f "$1" 2>/dev/null || echo "$1")
         while read -r _d _m _t _r; do
-            [ "$_m" = "$1" ] || continue
+            [ "$_m" = "$p" ] || continue
             case "$_t" in fuse*) exit 0 ;; esac
         done </proc/self/mounts
-        exit 1' _ "$FUSE_ROOT/mnt" 2>/dev/null
+        exit 1' _ "$2" 2>/dev/null
 }
+
+# Zero-arg wrapper: `wait_until … _sidecar_mounted_or_gone` calls it by name.
+_sidecar_mounted() { _fuse_mounted_in "$FUSE_CNAME" "$FUSE_ROOT/mnt"; }
 
 # Mounted, or dead — either way waiting longer is pointless. A sidecar that exited on a bad
 # argument would otherwise cost 100 failing `docker exec`s before anyone said so.
@@ -219,13 +225,7 @@ verify_redaction_attach() {
     # (unmounted underneath us) while its container still runs, leaving $PWD as the bare
     # mountpoint. Asked in the AGENT's container, so it is the consuming end that answers, and
     # `docker exec` costs the same on both platforms — unlike a probe of the root on macOS.
-    if ! sidecar_running || ! docker exec "$CNAME" sh -c '
-        p=$(readlink -f "$1" 2>/dev/null || echo "$1")
-        while read -r _d _m _t _r; do
-            [ "$_m" = "$p" ] || continue
-            case "$_t" in fuse*) exit 0 ;; esac
-        done </proc/self/mounts
-        exit 1' _ "$PWD" 2>/dev/null; then
+    if ! sidecar_running || ! _fuse_mounted_in "$CNAME" "$PWD"; then
         die "this project's container has no live redaction view, so neither" \
             "$KIB_RULE_FILE nor the host-config guard is being enforced in it." \
             "Refusing to attach — close all kib sessions for this project and relaunch." \

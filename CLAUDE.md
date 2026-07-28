@@ -37,6 +37,14 @@ A file's directory says which side of the trust boundary it is on. `kib/shared/`
   then, and `guest/entrypoint/*` plus the three `guest/bin/` shims are **baked into the image** —
   they need a rebuild, not a relaunch. Before believing a "no change" result, check the
   container's birth time: `ps -o lstart= -p 1` inside it.
+- **Editing a host script while a session is LIVE corrupts that running session.** `bash` reads a
+  script incrementally by byte offset, so shortening `bin/kib` or a `host/*.sh` under a running
+  `kib` makes it resume mid-token — seen as `_mcp_secrets: command not found` for a
+  `warn_inline_mcp_secrets` call that is perfectly intact on disk. The same launch also holds the
+  OLD sourced bash while `kib_py` execs the NEW bind-mounted python, so an argv contract changed
+  on both sides still fails (`merge-out-json needs 3 argument(s), got 4`). Both are fail-closed
+  and neither is a bug in the tree: **diagnose from a fresh launch, never from the session the
+  edit landed under.** (`container-lifecycle.md`)
 - **`bash -n` every script you touch** before finishing — a syntax error leaves the user unable
   to start the sandbox at all.
 

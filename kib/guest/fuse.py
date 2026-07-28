@@ -628,7 +628,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     ap.add_argument("--src", required=True)
     ap.add_argument("--mnt", required=True)
     ap.add_argument("--patterns-file", required=True)
-    ap.add_argument("--guard-file")
+    # Required, like --patterns-file: an optional guard file fails OPEN. Dropping the flag
+    # would start a sidecar with ZERO [protect]/[redact] rules, report the mount as active,
+    # and launch the box unprotected — with the only witness a `guard=0` on a stderr nothing
+    # reads. "No rules" is spelled as an EMPTY FILE (host/redaction.sh), never a missing flag.
+    ap.add_argument("--guard-file", required=True)
     # kib always passes the agent's ids (see Redact.__init__). Optional so the module stays
     # usable standalone, where reporting the backing store's real ownership is the right default.
     ap.add_argument("--uid", type=int, default=None, help="report this owner in the root's place")
@@ -638,7 +642,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     # Guard rules first for readability only: verdict() tallies immune rules separately, so
     # they outrank project rules regardless of position here. Their order relative to *each
     # other* is what matters (last match wins).
-    rule_list = rules.load(args.guard_file, guard=True) if args.guard_file else []
+    rule_list = rules.load(args.guard_file, guard=True)
     guard_count = len(rule_list)
     rule_list += rules.load(args.patterns_file)
     ops = Redact(args.src, rule_list, uid=args.uid, gid=args.gid)

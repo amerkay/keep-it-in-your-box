@@ -104,8 +104,9 @@ own scratch dirs is unaffected — that is APFS, not a bind.
 Claude keys `projects/`, `.claude.json` and `history.jsonl` by its **resolved** cwd. Under the
 sidecar the redacted view is bound at the project's **host** path, so that mountpoint makes the
 `$HOME`-shaped parent a real directory, the entrypoint's `$HOST_HOME` symlink is never created,
-and the resolved cwd *is* the host path. Canonical and the session share one key, and
-`config_scope`'s `box` argument is left at its default.
+and the resolved cwd *is* the host path. Canonical and the session share one key, so
+`config_scope`'s verbs take **one** project path — the second, re-keying argument was deleted
+2026-07-28 once nothing could make the two differ.
 
 The two diverged during the one window kib mounted the view in-container. With no `$PWD` bind,
 `$HOST_HOME` became a symlink to the container home, `/Users/<u>/proj` resolved to

@@ -1,6 +1,8 @@
 """ "This value is a command the host runs" — the one place that idea is defined.
 
-Two tables, because the two file formats are genuinely different, and one scanner each:
+Two key tables, because the two file formats are genuinely different, one scanner each, plus a
+generic JSON walk (`json_commands`) for the schemas that have no table — `.mcp.json`,
+`.zed/settings.json`, and a skill's own bundled config:
 
 * **git INI** (`.git/config`, `git config --list` output). A sandbox that can set
   `core.fsmonitor` has host code execution at the next bare `git status`, before the user
@@ -18,6 +20,7 @@ Over-matching costs exactly one refused write, which is the right side to err on
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 # Last-component matches. Every entry names a value git will execute or hand to a shell.
@@ -231,3 +234,36 @@ def settings_findings(cfg: dict[str, Any]) -> list[str]:
                     if isinstance(hook, dict) and hook.get("command"):
                         bad.append(f"hooks.{event}[].command = {hook['command']}")
     return bad
+
+
+#: JSON keys whose string value is a command the host will run. Walked generically rather than
+#: per-schema, so one function covers `.mcp.json`'s `mcpServers.*.command`, zed's
+#: `formatter.external.command` and `terminal.shell.program`, and whatever key either adds next.
+JSON_EXEC_KEYS = ("command", "program")
+
+
+def json_commands(
+    node: object, *, arm: Sequence[str] = (), trail: str = "", armed: bool = True
+) -> list[str]:
+    """Every nested command-valued string in a JSON tree, as `where = value` lines.
+
+    Two callers, one walk — this used to be written twice (the asset scanner and the audit
+    gate), in a module whose whole contract is that "is this a command" is defined once.
+
+    `arm` is what separates them. Empty (the audit gate) reports every `command`/`program` it
+    finds. Non-empty (the asset scanner, `arm=("hooks", "mcpServers")`) starts DISARMED and
+    reports only below one of those keys: a skill's own prose may well mention a `command`, and
+    flagging that trains the user to ignore the warning that matters.
+    """
+    found: list[str] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            where = f"{trail}.{key}" if trail else str(key)
+            if armed and key in JSON_EXEC_KEYS and isinstance(value, str) and value.strip():
+                found.append(f"{where} = {value.strip()}")
+            else:
+                found += json_commands(value, arm=arm, trail=where, armed=armed or key in arm)
+    elif isinstance(node, list):
+        for i, value in enumerate(node):
+            found += json_commands(value, arm=arm, trail=f"{trail}[{i}]", armed=armed)
+    return found

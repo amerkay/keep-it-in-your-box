@@ -21,14 +21,3 @@
 #   kib broker logout     # remove it
 broker = on
 
-# ── Egress (deferred E1 proxy — not yet enforcing) ─────────────────────────────
-# open       — no egress restriction (default; everything reachable, as today).
-# restricted — route egress through the filtering proxy with a default-deny allowlist.
-egress = open
-
-# Under `egress = restricted` only: these are default-DENY and you opt them back in here.
-# (This is the inverse of tools that block all private IPs — your dev services are the
-# intended destination.) Link-local / cloud metadata (169.254.0.0/16) is ALWAYS denied.
-allow_host_services = false        # reach host.docker.internal (e.g. Nuxt on :3000)
-allow_lan           = false        # reach RFC1918 LAN HTTP/HTTPS
-# lan_cidrs         = 10.0.0.0/8, 192.168.0.0/16   # optional narrowing when allow_lan = true

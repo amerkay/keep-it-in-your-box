@@ -201,7 +201,7 @@ validate_shared_assets() {
                 "$(printf '%s\n' "$bad" | sed 's/^/    /')" \
                 "It loads in EVERY project's next session and in your host claude, which is not" \
                 "sandboxed. Remove it — until you do, kib mounts this tree read-only."
-            notify critical "kib · shared $_t is no longer prompt-only" \
+            notify_desktop critical "kib · shared $_t is no longer prompt-only" \
                 "Something in ~/.claude/$_t runs a command or links out of the tree."
         fi
     done
@@ -375,15 +375,12 @@ assemble_session_dir() {
 
     if have_python; then
         # Scoped .claude.json (globals + this project's entry only). Fail-soft to empty.
-        # The box key IS the host key — the sidecar binds the project at its host path, so
-        # Claude resolves the same cwd canonical is keyed by (see kib_legacy_box_pwd). Passed
-        # explicitly rather than omitted: config_scope's dispatcher checks arity exactly, so a
-        # 3-arg call aborts and the session silently starts from an empty config.
-        _scope scope-in-json "$CLAUDE_JSON" "$PWD" "$SESSION_BASE/.claude.json" "$PWD" \
+        # ONE project key: the sidecar binds the project at its host path, so Claude resolves
+        # the same cwd canonical is keyed by and there is nothing to translate.
+        _scope scope-in-json "$CLAUDE_JSON" "$PWD" "$SESSION_BASE/.claude.json" \
             || warn "could not scope .claude.json — starting this session from an empty config."
         # This project's ↑ history only (never another project's prompts/pastes).
         _scope seed-history "$CLAUDE_HOME/history.jsonl" "$PWD" "$SESSION_BASE/history.jsonl" \
-            "$PWD" \
             || : >"$SESSION_BASE/history.jsonl"
     else
         printf '{\n  "projects": {}\n}\n' >"$SESSION_BASE/.claude.json"
@@ -428,10 +425,9 @@ merge_out_session() {
     }
     exec 203>"$CLAUDE_JSON.lock"
     if lock_fd -w 30 -x 203; then
-        _scope merge-out-json "$SESSION_BASE/.claude.json" "$PWD" "$CLAUDE_JSON" "$PWD" \
+        _scope merge-out-json "$SESSION_BASE/.claude.json" "$PWD" "$CLAUDE_JSON" \
             || warn "could not merge this project's .claude.json changes back to ~/.claude.json."
         _scope merge-history "$SESSION_BASE/history.jsonl" "$PWD" "$CLAUDE_HOME/history.jsonl" \
-            "$PWD" \
             || true
         merge_out_credential
         merge_out_shared_settings

@@ -77,6 +77,21 @@ def test_the_write_path_is_allowed(conn: Connection) -> None:
     assert conn.objects[SOURCE] == "ext_data_control_source_v1"
 
 
+@pytest.mark.parametrize("mime", ["STRING", "UTF8_STRING", "TEXT"])
+def test_the_x11_text_atoms_are_allowed(conn: Connection, mime: str) -> None:
+    """wl-clipboard offers these X11 atom names alongside `text/*` on an ordinary copy.
+
+    Without X11_TEXT the offer reads as a non-text flavour, `_denied` raises and the guard
+    CLOSES the connection — select-to-copy breaks outright, which is the failure the whole
+    sanitise-the-content design exists to avoid. `strings /usr/bin/wl-copy` carries TEXT and
+    UTF8_STRING verbatim; STRING is kept for other clipboard clients, not read off wl-copy.
+    """
+    to_server(conn, bind("ext_data_control_manager_v1", 10))
+    to_server(conn, msg(10, 0, struct.pack("<I", SOURCE)))  # create_data_source
+    to_server(conn, msg(SOURCE, 0, wl_str(mime)))  # offer — must not raise
+    assert conn.objects[SOURCE] == "ext_data_control_source_v1"
+
+
 @pytest.mark.parametrize("mime", ["image/png", "x-special/gnome-copied-files", "application/x"])
 def test_a_non_text_flavour_is_refused(conn: Connection, mime: str) -> None:
     """clean_text guarantees nothing about bytes it cannot read as text."""

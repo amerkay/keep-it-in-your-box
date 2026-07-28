@@ -14,7 +14,7 @@
 # container stays multi-homed, so host dev servers and the LAN stay reachable.
 # (docs/design-notes/credential-broker.md)
 #
-# Reads:  KIB_ROOT KIB_CONFIG KIB_CFG_BROKER KIB_BROKER KIB_BROKER_ENDPOINT_MODE
+# Reads:  KIB_ROOT KIB_CONFIG KIB_CFG_BROKER KIB_BROKER
 #         CNAME BROKER_CNAME BROKER_NET BROKER_DIR BROKER_OUT BROKER_HASH IMAGE_NAME
 #         SHARED_BASE SHARED_CDIR CLAUDE_HOME CRED_WITNESS
 # Writes: KIB_DIR BROKER_TOKEN_FILE PROVIDERS_DIR BROKER_ENABLED HOSTED_MCP_UP ARGS
@@ -76,7 +76,7 @@ EOF
 # env var) and for an unknown id. Never hardcode the port here — registry.py owns it.
 _broker_route_url() {
     have_python || return 0
-    kib_py broker.cli route-url "$1" 2>/dev/null || true
+    kib_py broker.cli route-url "$1" "$BROKER_ALIAS" 2>/dev/null || true
 }
 
 # Active ids (host credential file non-empty) whose delivery is in the space-separated set $1,
@@ -109,7 +109,7 @@ hosted_mcp_providers() { _active_providers "hosted_mcp"; }
 broker_config_hash() {
     local fp=""
     have_python && fp="$(kib_py broker.cli route-fingerprint 2>/dev/null)"
-    hash8 "$(broker_enabled_providers)|$(hosted_mcp_providers)|$KIB_BROKER_ENDPOINT_MODE|$fp"
+    hash8 "$(broker_enabled_providers)|$(hosted_mcp_providers)|$fp"
 }
 
 # Host-facing facts for one provider, from the registry. Sets KIB_BROKER_* in the CALLER's

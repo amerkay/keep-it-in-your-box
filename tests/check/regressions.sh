@@ -84,6 +84,18 @@ else
         "build-image.sh must honour --background, and host/image.sh must pass it AND redirect"
 fi
 
+# tools/build-image.sh is the ONE builder, because it is the one path that takes BUILD_LOCK and
+# the one that resolves CLAUDE_VERSION. The first-launch build was a second, unlocked
+# `docker build`, so `kib build` racing a first `cc` ran two builds on the same tag — and a bare
+# build pins CLAUDE_VERSION to the literal `latest`, which poisons the layer cache for good.
+if sed 's/#.*$//' "$KIB_ROOT/host/image.sh" "$KIB_ROOT/host/lifecycle.sh" "$KIB_ROOT/bin/kib" \
+    | grep -qE '\bdocker[[:space:]]+build\b'; then
+    fail "a bare 'docker build' is back outside tools/build-image.sh" \
+        "it skips BUILD_LOCK (two concurrent builds on one tag) and pins CLAUDE_VERSION=latest"
+else
+    pass "every image build goes through tools/build-image.sh (locked, version-resolved)"
+fi
+
 # FUSE reads must be pread, not lseek+read. With nothreads=False several worker threads serve
 # one open file and share the fd's offset, so racing lseeks made a reader see the file
 # truncated at a 16 KiB boundary — silent corruption that showed up as "flaky" lint runs.
@@ -123,9 +135,21 @@ unset _ma
 # exclusive retry) and 203 (the canonical .claude.json lock) are held only while tearing down,
 # where nothing is backgrounded today; a background job added THERE would need them too.
 # portable.sh is excluded — it DEFINES detach_pgrp, and closes every fd >=2 itself on darwin.
+#
+# The FILE list is derived from host/_load.sh, not typed here: it was typed once and went stale
+# the moment _load.sh grew gitguard and mcp, leaving three launch-path units — core, gitguard,
+# mcp — unchecked while this guard read as covering everything. sleep-guard/sleep-monitor are
+# not in _load.sh and are correctly out of scope: the guard is itself launched with the closes
+# (host/lifecycle.sh), and the monitor is a diagnostic off the launch path.
 fd_bad=""
-for fd_f in bin/kib host/lifecycle.sh host/desktop.sh host/broker.sh host/image.sh \
-    host/redaction.sh host/net.sh host/config.sh; do
+fd_units="$(sed -n 's/^for _kib_unit in \(.*\); do$/\1/p' "$KIB_ROOT/host/_load.sh")"
+if [ -z "$fd_units" ]; then
+    fail "cannot read the unit list out of host/_load.sh" \
+        "the fd-200/201 guard derives its file list from it and would silently check nothing"
+fi
+for fd_f in bin/kib $(for fd_u in $fd_units; do
+    [ "$fd_u" = portable ] || printf 'host/%s.sh\n' "$fd_u"
+done); do
     [ -f "$KIB_ROOT/$fd_f" ] || continue
     while IFS= read -r fd_line; do
         # A file with no background job yields one empty line from the heredoc below.
@@ -260,7 +284,7 @@ else
     fail "the sidecar binds the host's /etc/passwd" \
         "fusermount3 cannot resolve uid 501 from it on macOS — and it leaks the user table"
 fi
-unset _red _life _agent_args _leaked _flag _td
+unset _red _life _leaked _flag _td
 
 # The mount must remap ownership: on macOS the project reaches the sidecar over virtiofs as
 # root:root, and without --uid/--gid git reads the whole tree as another user's and refuses it.
@@ -272,6 +296,18 @@ else
         "virtiofs reports root:root; git then refuses the whole tree"
 fi
 
+# Both rule files are argv, and both are required=True in fuse.py — an optional --guard-file
+# would fail OPEN: the sidecar starts with zero [protect] rules, reports the mount active, and
+# the box launches unprotected. "No rules" is an empty file, never a missing flag.
+if grep -q -- '--guard-file /usr/local/share/global.kibignore' "$KIB_ROOT/host/redaction.sh" \
+    && grep -q -- '--patterns-file /kib-patterns' "$KIB_ROOT/host/redaction.sh" \
+    && grep -q 'add_argument("--guard-file", required=True)' "$KIB_ROOT/kib/guest/fuse.py"; then
+    pass "the sidecar is handed both rule files, and refuses to start without the guard one"
+else
+    fail "the redaction sidecar can start without guard rules" \
+        "a dropped --guard-file must abort the sidecar, not launch an unprotected box"
+fi
+
 # The server's syscalls run as ITS uid, not the caller's. Without default_permissions nothing in
 # the project is permission-checked and a `chmod 000` file reads and writes fine.
 if grep -q 'default_permissions=True' "$KIB_ROOT/kib/guest/fuse.py"; then
@@ -281,19 +317,11 @@ else
         "a passthrough enforces no POSIX permission at all without it"
 fi
 
-# Inodes the server creates land on the HOST. Every path that makes one has to hand it to the
-# caller, or a project file ends up owned by whoever the server happens to run as.
-_unadopted=""
-for _op in create mkdir symlink; do
-    awk -v op="$_op" '$0 ~ "^    def " op "\\(" {f=1} f && /_adopt\(/ {ok=1} f && /^$/ {f=0}
-        END {exit ok?0:1}' "$KIB_ROOT/kib/guest/fuse.py" || _unadopted="$_unadopted $_op"
-done
-if [ -z "$_unadopted" ]; then
-    pass "every inode the server creates is chown'd to the caller"
-else
-    fail "kib/guest/fuse.py:$_unadopted no longer adopts the inode it creates" \
-        "the file lands on the host owned by the server's uid"
-fi
+# (Inode adoption — that every path creating an inode hands it to the caller — is guarded
+# behaviourally in tests/guest/test_fuse.py: test_a_created_file_is_given_to_the_caller,
+# test_a_created_directory_is_given_to_the_caller, test_an_adopted_symlink_is_not_dereferenced
+# and test_adoption_failure_does_not_fail_the_create. Those monkeypatch os.fchown/os.chown and
+# assert the ids actually passed, which a grep for `_adopt(` cannot see.)
 
 # The pre-commit hook kib used to install into every project is gone, and the marker it left
 # behind is still recognised so the one-time cleanup can fire.

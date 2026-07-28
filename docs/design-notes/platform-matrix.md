@@ -39,7 +39,7 @@ creation. What differs is only *where the propagation root lives*, and how it is
 | Transport | Wayland proxy sidecar holds the only real compositor socket | Host watcher (`host/clipboard-bridge.sh`) over a spool dir bind-mounted at `/kib-clip` | `clipboard-and-dns.md` | — |
 | Reads | Relayed verbatim by the proxy | Answered host-side with `pbpaste` / osascript PNG extraction | `clipboard-and-dns.md`, `macos.md` | — |
 | Writes | Sanitised in flight at the `send` event — control characters stripped, non-text flavours refused (`WLGUARD-STRIP` / `WLGUARD-DENY`) | Sanitised host-side through `kib.shared.clipboard`, then `pbcopy`; non-text refused at the shim | `clipboard-and-dns.md` | ✅ |
-| Write alert (strip or refusal) | `notify-send`, one per 30 s | None | `clipboard-and-dns.md` | — |
+| Write alert (strip or refusal) | `notify-send`, one per 30 s | `notify_clip` (`terminal-notifier`, else `osascript`), one per 30 s | `clipboard-and-dns.md`, `macos.md` | — |
 | Paste trigger env | `WAYLAND_DISPLAY=wayland-0` + proxied socket | `WAYLAND_DISPLAY=kib-clip` + spool. No `DISPLAY`: Claude's `xclip \|\| wl-paste` chain reads neither | `host/desktop.sh` | ✅ |
 | Reader request type | n/a — the proxy relays verbatim | `wl-paste`/`xclip` spellings both map to text/png/list; 10 s budget for osascript png extraction | `clipboard-and-dns.md` | ✅ |
 | No clipboard available | No Wayland socket → info line, paste disabled (fail-soft) | No `pbpaste` → info line, paste disabled | `clipboard-and-dns.md` | — |
@@ -60,7 +60,7 @@ creation. What differs is only *where the propagation root lives*, and how it is
 | Inhibitor | `systemd-inhibit --what=sleep` held by a background `sleep infinity` | `caffeinate -is` | `sleep-guard.md` | ✅ |
 | Idle lid-shut suspend | Proactive `systemctl suspend` when idle + lid closed + no external display + no other kib lock, gated by the post-resume SETTLE window | Not applicable — macOS re-evaluates sleep itself once the assertion drops | `sleep-guard.md` | ✅ |
 | Activity metric | Same sampler, sourced by both the guard and the diagnostic | Identical | `sleep-guard.md` | ✅ |
-| Desktop notifications | `notify-send -u <urgency> -i <icon>` | `osascript display notification` (urgency and icon dropped) | `clipboard-and-dns.md` | 🧪 |
+| Desktop notifications | `notify-send -u <urgency> -i <icon>` | `osascript display notification` (urgency and icon dropped). NOTE: `notify_desktop` has no `terminal-notifier` fallback, so an alert from a *detached* process (`shared-watch.sh`) can be dropped silently unless the user has granted Script Editor notification access — the case `clipboard-bridge.sh` works around | `clipboard-and-dns.md` | 🧪 |
 | `kib sleep-monitor` | Full diagnostic: KDE idle clock, systemd block locks, `/proc` sampling | Refuses (exit 2) and points at `pmset -g assertions` — none of its data sources exist | `sleep-guard.md` | ✅ |
 
 ## Launch, host toolchain and mounts
@@ -109,7 +109,7 @@ platform facts, not topology facts. All are fixed and regression-guarded.
 |---|---|---|
 | Every git command refuses the repo; `dev.sh` finds no files | `fakeowner` reports the project `root:root` | `regressions.sh` (`--uid`/`--gid`), `test_fuse.py` |
 | The synthetic `.credentials.json` is writable | `chmod 0400` is a no-op on a bind | `regressions.sh` (`:ro` by mount) |
-| Two sets of `projects/`, `.claude.json`, `↑` history | box path ≠ host path while the view was mounted in-container; the sidecar's `$PWD` bind makes them one key again | `wiring.sh`, `test_config_scope.py` |
+| Two sets of `projects/`, `.claude.json`, `↑` history | box path ≠ host path while the view was mounted in-container; the sidecar's `$PWD` bind makes them one key again, and the re-keying argument is gone | `wiring.sh`, `test_config_scope.py` |
 | No `commands/` in the box | the merge farm returned early with no shared source | — (entrypoint) |
 | 3 `lock_fd` failures + 2 false passes | the shim suite used GNU `flock(1)` as its own oracle | `portability.sh` now holds `shims.sh` to the contract |
 | AppArmor assertion cannot pass | LinuxKit ships no AppArmor | `security-test.sh` skips when the label is empty |

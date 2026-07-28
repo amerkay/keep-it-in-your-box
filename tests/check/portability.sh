@@ -50,7 +50,7 @@ for f in "${HOST_BASH[@]}" "${HOST_SH[@]}"; do
     # assertions became false passes and three false failures. Held to the contract now.
     case "$f" in tests/check/shims.sh) ;;
     host/portable.sh | tests/check.sh | tests/check/*.sh)
-        pass "$f (shim home / dev tool — exempt)"
+        skip "$f" "shim home / dev tool — exempt from the contract"
         continue
         ;;
     esac
@@ -71,16 +71,16 @@ for f in "${HOST_BASH[@]}" "${HOST_SH[@]}"; do
 done
 
 # All OS branching lives in host/portable.sh. A `uname` or a Darwin case anywhere else on a
-# host path means a second, un-shimmed code path has appeared. Exempt: portable.sh itself,
-# sleep-guard.sh's documented fallback probe (it must never hard-fail at startup), and this
-# suite, whose own grep pattern would otherwise match itself.
+# host path means a second, un-shimmed code path has appeared. Exempt: portable.sh itself, and
+# this suite, whose own grep pattern would otherwise match itself. sleep-guard.sh used to be
+# exempt too, for a uname fallback that could never fire; with it gone the rule is absolute.
 stray_os="$(grep -ln 'uname -s\|Darwin)\|KIB_OS[^_]*=[[:space:]]*"\{0,1\}darwin' "${HOST_BASH[@]}" \
     2>/dev/null \
-    | grep -vE '^(host/portable\.sh|host/sleep-guard\.sh|tests/check/.*\.sh)$' || true)"
+    | grep -vE '^(host/portable\.sh|tests/check/.*\.sh)$' || true)"
 if [ -n "$stray_os" ]; then
     fail "OS branching outside host/portable.sh" "$(printf '%s' "$stray_os" | tr '\n' ' ')"
 else
-    pass "all OS branching stays in host/portable.sh (sleep-guard's fallback probe excepted)"
+    pass "all OS branching stays in host/portable.sh (no exemptions)"
 fi
 
 # The FUSE sidecar is the one topology on both platforms, and exactly these five functions are

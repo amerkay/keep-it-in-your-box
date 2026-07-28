@@ -7,6 +7,10 @@
 #
 # shellcheck disable=SC2016  # every _mcp_run argument is a script body for the inner shell,
 # so its $vars must survive this shell unexpanded. Single quotes are the point, not a slip.
+#
+# shellcheck disable=SC2030,SC2031  # every probe here runs in its own subshell and points
+# KIB_CONFIG at a throwaway kib dir ON PURPOSE — the containment IS the point, so the real
+# ~/.keep-it-in-your-box is never read or written. Only stdout crosses back.
 
 # shellcheck source=SCRIPTDIR/_guard.sh
 . "${BASH_SOURCE%/*}/_guard.sh" # sourced by tests/check.sh, never run directly
@@ -113,14 +117,12 @@ gen="$(_mcp_run '
   echo "def=$([ -f "$KIB_DIR/providers.d/acme.json" ] && echo yes)"
   echo "listed=$(_broker_list_providers | grep -c "^acme|")"
   grep -q listen_port "$KIB_DIR/providers.d/acme.json" && echo "hasport=yes" || echo "hasport=no"
-  echo "path=$(kib_py broker.cli host-config acme | sed -n "s/KIB_BROKER_MCP_URL_PATH=//p" | tr -d "'"'"'")"
-  echo "url=$(kib_py broker.cli route-url acme)"
+  echo "url=$(kib_py broker.cli route-url acme kib-broker)"
   echo "blob=$(cat "$KIB_DIR/acme-token" 2>/dev/null)"
   grep -q X-API-Key ".mcp.json" && echo leak=yes || echo leak=no')"
 if printf '%s' "$gen" | grep -q "def=yes" \
     && printf '%s' "$gen" | grep -q "listed=1" \
     && printf '%s' "$gen" | grep -q "hasport=no" \
-    && printf '%s' "$gen" | grep -q "path=/mcp/acme/v1/sse" \
     && printf '%s' "$gen" | grep -q "url=http://kib-broker:8100/mcp/acme/v1/sse" \
     && printf '%s' "$gen" | grep -q "blob=AK_LIVE_9" \
     && printf '%s' "$gen" | grep -q "leak=no"; then
@@ -276,3 +278,57 @@ else
 fi
 
 rm -rf "$_mcp_tmp"
+
+# ── the enabled set and the token mounts must be ONE decision ───────────────
+# `_write_broker_config` writes `enabled` + `token_paths`; `start_broker` builds the
+# `-v …:/run/broker/token/<id>:ro` mounts in a SECOND walk carrying its own copy of the delivery
+# filter and the token-present test. One invariant, two spellings: an id in `enabled` whose token
+# is not mounted makes the sidecar report "its credential is missing" — and for the `claude` row
+# that is a FAIL_HARD route, so the launch aborts naming the credential rather than the bug.
+#
+# The mount loop is EXTRACTED from host/broker.sh, never retyped, so this compares the two
+# implementations that actually ship. Fixture: one LLM row with a token, one reverse route with a
+# token, one reverse route WITHOUT (belongs to neither list), one hosted row (its own sidecar, so
+# neither list either). A plain subshell, not _mcp_run: the extracted loop carries a heredoc, and
+# routing that through another layer of eval quoting is what makes this unreadable.
+_tokwalk="$(
+    set +e
+    # KIB_ROOT is already exported by the runner; only the kib dir is redirected, so the real
+    # ~/.keep-it-in-your-box is never read or written.
+    export KIB_CONFIG="$_mcp_tmp/tokwalk/config"
+    # shellcheck source=SCRIPTDIR/../../host/_load.sh
+    . "$KIB_ROOT/host/_load.sh"
+    mkdir -p "$KIB_DIR/providers.d" || exit 1
+    for _r in withtok notok; do
+        printf '{"id":"%s","delivery":"reverse_proxy_mcp","upstream_origin":"https://%s.example","inject_header":"Authorization","inject_template":"Bearer {secret}","mcp_path":"/http"}' \
+            "$_r" "$_r" >"$KIB_DIR/providers.d/$_r.json"
+    done
+    printf '{"id":"hosted","delivery":"hosted_mcp","credential_kind":"file_path","host_run":["uvx","m"],"credential_env":"C","token_basename":"hosted.json"}' \
+        >"$KIB_DIR/providers.d/hosted.json"
+    printf x >"$KIB_DIR/claude-token"
+    printf y >"$KIB_DIR/withtok-token"
+    printf '{}' >"$KIB_DIR/hosted.json"
+    BROKER_DIR="$KIB_DIR/bk"
+    BROKER_OUT="$BROKER_DIR/out"
+    mkdir -p "$BROKER_OUT"
+    _write_broker_config
+    python3 -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+print("enabled=" + ",".join(sorted(d["enabled"])))
+print("paths=" + ",".join(sorted(d["token_paths"])))' "$BROKER_DIR/config.json"
+    eval "$(awk '/^    local id delivery kind basename$/{f=1} f{print} /^EOF$/{if(f) exit}' \
+        "$KIB_ROOT/host/broker.sh" | sed 's/^    //; s/^local -a //; /^local id delivery/d')"
+    # shellcheck disable=SC2154  # tok_mounts is assigned by the loop eval'd just above
+    printf 'mounted=%s\n' "$(printf '%s\n' ${tok_mounts[@]+"${tok_mounts[@]}"} \
+        | sed -n 's#.*/run/broker/token/##p' | sed 's/:ro$//' | sort | paste -sd, -)"
+)"
+_tw_en="$(printf '%s\n' "$_tokwalk" | sed -n 's/^enabled=//p')"
+_tw_pa="$(printf '%s\n' "$_tokwalk" | sed -n 's/^paths=//p')"
+_tw_mo="$(printf '%s\n' "$_tokwalk" | sed -n 's/^mounted=//p')"
+if [ "$_tw_en" = "claude,withtok" ] && [ "$_tw_pa" = "$_tw_en" ] && [ "$_tw_mo" = "$_tw_en" ]; then
+    pass "every enabled broker route gets its token mounted (both walks agree)"
+else
+    fail "the broker's enabled set and its token mounts disagree" \
+        "enabled=[$_tw_en] token_paths=[$_tw_pa] mounted=[$_tw_mo] — all should be claude,withtok"
+fi
+unset _tokwalk _tw_en _tw_pa _tw_mo _r

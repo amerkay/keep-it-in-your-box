@@ -171,14 +171,17 @@ else
     pass "every _scope call passes the argument count cli.dispatch demands"
 fi
 
-# …and the key it passes is the host path on both sides: the sidecar binds the project there,
-# so canonical and the session agree and no translation is left to drift.
-if grep -qE '_scope (scope-in-json|seed-history|merge-out-json|merge-history).*BOX_PWD' \
-    "$KIB_ROOT/host/config.sh"; then
-    fail "config.sh still passes a separate box key to config_scope" \
-        "the sidecar binds the project at its host path; the two keys are one"
-else
+# …and there is exactly ONE project key. The sidecar binds the project at its host path, so
+# canonical and the session agree; a second, re-keying argument would be a translation layer
+# growing back. Asserted on the dispatch table, which is what actually decides.
+if grep -qE '"(scope-in-json|seed-history|merge-out-json|merge-history)": \([a-z_]+, 3\),' \
+    "$KIB_ROOT/kib/host/config_scope.py" \
+    && [ "$(grep -cE '"(scope-in-json|seed-history|merge-out-json|merge-history)": \([a-z_]+, 3\),' \
+        "$KIB_ROOT/kib/host/config_scope.py")" = 4 ]; then
     pass "canonical and the session share one project key (no box-key translation)"
+else
+    fail "config_scope took back a second project key" \
+        "the sidecar binds the project at its host path; the two keys are one"
 fi
 
 # The translation survives for ONE job: finding transcripts the in-container-mount window left

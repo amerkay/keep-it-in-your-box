@@ -63,7 +63,6 @@ esac
 _dir_guard_exempt() {
     case "$VERB" in
         broker | build | sleep-monitor) return 0 ;;
-        mcp) [ "${1:-}" = add ] && return 0 ;;
         claude)
             local -a a=("$@")
             while [ "${a[0]:-}" = claude ]; do a=("${a[@]:1}"); done
@@ -123,9 +122,10 @@ case "$VERB" in
         _sub="${1:-}"
         [ $# -gt 0 ] && shift
         case "$_sub" in
-            add) mcp_add "$@" && exit 0 || exit $? ;;
             adopt) mcp_adopt "${1:-}" && exit 0 || exit $? ;;
-            *) die "usage: kib mcp add <name> …   |   kib mcp adopt <server-name>" ;;
+            # `kib mcp add` is deliberately gone: `kib broker add` is the same write plus name
+            # validation, a proof the def loads, the credential prompt and the agent URL.
+            *) die "usage: kib mcp adopt <server-name>   (to declare one: kib broker add)" ;;
         esac
         ;;
     audit) kib_audit_gate report && exit 0 || exit $? ;;

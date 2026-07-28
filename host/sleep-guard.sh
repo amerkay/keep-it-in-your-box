@@ -31,14 +31,14 @@ DEBUG="${SLEEP_GUARD_DEBUG:-0}"
 LID_SUSPEND="${SLEEP_GUARD_LID_SUSPEND:-1}"
 SETTLE="${SLEEP_GUARD_SETTLE:-15}" # (LINUX) after a resume, stay awake this long before re-suspending
 
-# KIB_OS / is_macos come from host/portable.sh; the fallback keeps the guard starting even if
-# that source fails.
+# KIB_OS / is_macos come from host/portable.sh. Sourced loudly: this used to carry a uname
+# fallback "in case the source fails", but portable.sh sets both before its only failure path
+# (an unreadable $KIB_CONFIG) can be reached, so the fallback only ever redefined them
+# identically — while costing this file an exemption from the all-OS-branching-in-portable.sh
+# check. A genuinely missing portable.sh is already fatal everywhere else (host/_load.sh).
 HOST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=SCRIPTDIR/portable.sh
-. "$HOST_DIR/portable.sh" 2>/dev/null || {
-    case "$(uname -s)" in Darwin) KIB_OS=darwin ;; *) KIB_OS=linux ;; esac
-    is_macos() { [ "$KIB_OS" = darwin ]; }
-}
+. "$HOST_DIR/portable.sh"
 # shellcheck source=SCRIPTDIR/sleep-sample.sh
 . "$HOST_DIR/sleep-sample.sh"
 

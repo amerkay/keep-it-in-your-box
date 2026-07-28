@@ -141,6 +141,11 @@ kill_pgrp() { # <pidfile>
 # ── desktop notification ──────────────────────────────────────────
 # <urgency: normal|critical> <title> <body>. Best-effort no-op with no notifier
 # or no desktop session (ssh, `-p`).
+#
+# The one launch channel that survives claude's TUI clearing the screen milliseconds after kib
+# writes to stderr. For PROBLEMS ONLY — a working launch notifies nothing, so any popup means
+# something needs the user. Never add a launch-succeeded notification.
+# urgency: normal (degraded) | critical (sticky).
 notify_desktop() {
     local urgency="$1" title="$2" body="$3"
     if [ "$KIB_OS" = darwin ]; then
@@ -326,28 +331,18 @@ preflight_platform() {
 # Keys (all optional; the assignments below are the defaults):
 #   broker              = on | off    — start the credential broker. ON by default; disable
 #                                       here or with KIB_BROKER=0. See broker_wanted().
-#   egress              = open | restricted  — restricted activates the future E1 proxy.
-#   allow_host_services = false | true  — under restricted egress, reach host.docker.internal
-#                                         (e.g. a Nuxt dev server on :3000).
-#   allow_lan           = false | true  — under restricted egress, reach RFC1918 LAN HTTP(S).
-#   lan_cidrs           = 10.0.0.0/8, 192.168.0.0/16   — optional narrowing for allow_lan.
-# Link-local / cloud metadata (169.254.0.0/16) is always denied under restricted egress.
+#
+# `broker` is the ONLY key. This parser also used to accept egress/allow_host_services/
+# allow_lan/lan_cidrs for a filtering proxy that was never built (README: "deliberately
+# unscheduled"), so `egress = restricted` was accepted in silence and restricted nothing —
+# a dead knob that read as an armed security control. Unknown keys are ignored, so anyone
+# who already has those lines is unaffected. Re-add the parse WITH the implementation.
 #
 # KIB_CFG_* is the parsed config FILE; bare KIB_* are the env overrides. The two namespaces
 # must stay apart — they once shared the name KIB_BROKER and silently clobbered each other.
 # shellcheck disable=SC2034
 KIB_CONFIG="${KIB_CONFIG:-$HOME/.keep-it-in-your-box/config}"
 KIB_CFG_BROKER=on
-KIB_CFG_EGRESS=open
-KIB_CFG_ALLOW_HOST=false
-KIB_CFG_ALLOW_LAN=false
-KIB_CFG_LAN_CIDRS=""
-
-# How the agent reaches the broker. "bridge" (container→container on a user net) is verified
-# against Portmaster; "hostgw" — broker publishes a host-loopback port, agent reaches it via
-# host.docker.internal — is the swappable fallback if a host firewall blocks that hop.
-# shellcheck disable=SC2034
-KIB_BROKER_ENDPOINT_MODE="${KIB_BROKER_ENDPOINT_MODE:-bridge}"
 
 read_kib_config() {
     [ -f "$KIB_CONFIG" ] || return 0
@@ -365,10 +360,6 @@ read_kib_config() {
         val="${val%"${val##*[![:space:]]}"}" # rtrim val
         case "$key" in
             broker) KIB_CFG_BROKER="$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" ;;
-            egress) KIB_CFG_EGRESS="$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" ;;
-            allow_host_services) KIB_CFG_ALLOW_HOST="$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" ;;
-            allow_lan) KIB_CFG_ALLOW_LAN="$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" ;;
-            lan_cidrs) KIB_CFG_LAN_CIDRS="$val" ;;
         esac
     done <"$KIB_CONFIG"
 }

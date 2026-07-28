@@ -114,3 +114,47 @@ if command -v shellcheck >/dev/null 2>&1; then
 else
     warn "shellcheck not installed — skipping (install it: apt-get install shellcheck)"
 fi
+
+# ── Toolchain pins and the shfmt glob ───────────────────────────────────────
+# The Dockerfile owns the shfmt/shellcheck versions (CONVENTIONS.md), but CI cannot read an
+# ARG — it must install the binaries before any container exists — so .github/workflows/lint.yml
+# restates them. A one-sided bump makes `./dev.sh check` green in the box and red in CI, with
+# the diff blamed on the code rather than the toolchain. Asserted, not trusted.
+_pin_of() { # <file> <name> — the version string, however that file spells the assignment
+    sed -n "s/.*$2[:=][[:space:]]*\(v[0-9][0-9.]*\).*/\1/p" "$1" | head -1
+}
+_pin_bad=""
+for _p in SHFMT_VERSION SHELLCHECK_VERSION; do
+    _d="$(_pin_of "$KIB_ROOT/Dockerfile" "$_p")"
+    _c="$(_pin_of "$KIB_ROOT/.github/workflows/lint.yml" "$_p")"
+    [ -n "$_d" ] || _pin_bad="$_pin_bad $_p(not in Dockerfile)"
+    [ "$_d" = "$_c" ] || _pin_bad="$_pin_bad $_p(image=$_d ci=$_c)"
+done
+if [ -z "$_pin_bad" ]; then
+    pass "the shfmt/shellcheck pins agree between the image and CI"
+else
+    fail "a toolchain pin differs between the Dockerfile and CI:$_pin_bad" \
+        "the same code then passes in one environment and fails in the other"
+fi
+unset _pin_bad _p _d _c
+unset -f _pin_of
+
+# shfmt reads .editorconfig, and matches by FILENAME — an extensionless script missing from the
+# `[{…}]` glob is silently formatted with the defaults (tabs, no switch_case_indent) by
+# `dev.sh format`, and `shfmt -d` then passes on the mangled result. Discovered from the same
+# shebang probe dev.sh uses, so a new script is covered the day it is added.
+_ec_glob="$(sed -n 's/^\[{\(.*\)}\]$/\1/p' "$KIB_ROOT/.editorconfig" | head -1)"
+_ec_missing=""
+for _f in "${HOST_BASH[@]}" "${HOST_SH[@]}" "${LINUX_BASH[@]}" "${CONT_SH[@]}" "${CONT_BASH[@]}"; do
+    [ -f "$_f" ] || continue
+    _b="${_f##*/}"
+    case "$_b" in *.*) continue ;; esac # *.sh is covered by the glob's own pattern
+    case ",$_ec_glob," in *",$_b,"*) ;; *) _ec_missing="$_ec_missing $_b" ;; esac
+done
+if [ -z "$_ec_missing" ]; then
+    pass "every extensionless script is named in .editorconfig's shfmt glob"
+else
+    fail "an extensionless script is missing from .editorconfig's glob:$_ec_missing" \
+        "shfmt would format it with tabs and shfmt -d would still pass"
+fi
+unset _ec_glob _ec_missing _f _b

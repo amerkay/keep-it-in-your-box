@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Messaging, the Python bridge, and the one polling helper. Loaded first — everything
-# else calls die/warn, including at source time.
+# else calls die/warn, including at source time. Desktop alerts are notify_desktop
+# (host/portable.sh) — the only portable notifier, called directly.
 #
 # Reads:  KIB_ROOT
 # Writes: the KIB_STATE_ROOT / BUILD_* paths below, read by the other host units and by
@@ -24,12 +25,6 @@ warn() {
     [ $# -gt 0 ] && printf '   %s\n' "$@" >&2
     return 0
 }
-
-# The one launch channel that survives claude's TUI clearing the screen milliseconds after kib
-# writes to stderr. For PROBLEMS ONLY — a working launch notifies nothing, so any popup means
-# something needs the user. Never add a launch-succeeded notification. Silent no-op without a
-# notifier or a desktop session. urgency: normal (degraded) | critical (sticky).
-notify() { notify_desktop "$1" "$2" "$3"; }
 
 # ── Python bridge ────────────────────────────────────────────────
 # The single way bash reaches the kib package. PYTHONPATH is per-invocation, NEVER exported —

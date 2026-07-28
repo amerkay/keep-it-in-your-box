@@ -31,31 +31,17 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any
 
-from kib.shared import cli
+from kib.shared import cli, dangerous
 
 #: Deep enough for `skills/<name>/references/<file>`, bounded so a pathological tree cannot
 #: turn the walk into unbounded work.
 MAX_DEPTH = 6
 
-
-def commands_in(obj: Any, *, armed: bool = False) -> list[str]:
-    """Every `command` reachable from a `hooks` / `mcpServers` key.
-
-    Armed-then-look, not any `command` anywhere: a skill's own docs may well mention one, and
-    flagging that trains the user to ignore the warning that matters.
-    """
-    out: list[str] = []
-    if isinstance(obj, dict):
-        for key, val in obj.items():
-            if armed and key == "command" and isinstance(val, str) and val.strip():
-                out.append(val.strip())
-            out += commands_in(val, armed=armed or key in ("hooks", "mcpServers"))
-    elif isinstance(obj, list):
-        for item in obj:
-            out += commands_in(item, armed=armed)
-    return out
+#: Keys below which a `command` is the host's to run. The scan starts DISARMED and only reports
+#: under one of these: a skill's own prose may mention a command, and flagging that trains the
+#: user to ignore the warning that matters.
+ARM_KEYS = ("hooks", "mcpServers")
 
 
 def _escaped_target(full: str, root_real: str) -> str | None:
@@ -103,7 +89,9 @@ def scan(root: str) -> int:
             except OSError as e:
                 print(f"{full} — cannot read it ({e.strerror})")
                 return cli.UNREADABLE
-            findings += [f"{full} — {c}" for c in commands_in(cfg)]
+            findings += [
+                f"{full} — {c}" for c in dangerous.json_commands(cfg, arm=ARM_KEYS, armed=False)
+            ]
     if not findings:
         return cli.OK  # print nothing: a clean tree is silent, so callers can test the output
     print("\n".join(findings))

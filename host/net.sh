@@ -32,14 +32,25 @@ host_has_resolved() { [ -r "$RESOLV_SRC_FILE" ]; }
 # topology — a live sandbox→host channel. Shadow each with /dev/null (inert char device,
 # connect() → ENOTSOCK) while the dir mount still tracks resolv.conf across renames. Docker
 # applies mounts parent-first, so nested shadowing works.
+#
+# DISCOVERED, not enumerated: the two sockets shipped today (io.systemd.Resolve and .Monitor)
+# were named literally here and again in the security suite, so a third one a future systemd
+# adds would be an open channel neither side noticed. Globbing fails closed instead. `-S` is
+# required — the same dir holds `netif/`, a DIRECTORY, and `-v /dev/null:…` onto it aborts the
+# whole `docker run`. This shadows by NAME at create time, so it still cannot cover a socket
+# under a different prefix; that residual is recorded in clipboard-and-dns.md.
 add_resolv_sync_args() {
     host_has_resolved || return 0
-    ARGS+=(
-        -v "$RESOLV_SRC_DIR:/run/host-resolve:ro"
-        -v "/dev/null:/run/host-resolve/io.systemd.Resolve:ro"
-        -v "/dev/null:/run/host-resolve/io.systemd.Resolve.Monitor:ro"
-        -v "$KIB_ROOT/guest/bin/resolv-sync.sh:/usr/local/bin/resolv-sync.sh:ro"
-    )
+    ARGS+=(-v "$RESOLV_SRC_DIR:/run/host-resolve:ro")
+    local _s
+    for _s in "$RESOLV_SRC_DIR"/io.systemd.*; do
+        # Skip the unmatched glob, and skip directories — anything else matching the prefix is
+        # shadowed whether or not we recognise it, which is the fail-closed half.
+        [ -e "$_s" ] || continue
+        [ -d "$_s" ] && continue
+        ARGS+=(-v "/dev/null:/run/host-resolve/${_s##*/}:ro")
+    done
+    ARGS+=(-v "$KIB_ROOT/guest/bin/resolv-sync.sh:/usr/local/bin/resolv-sync.sh:ro")
 }
 
 # Start the watcher once, on the create path only (under the boot lock), so exactly one exists
@@ -50,7 +61,7 @@ start_resolv_sync() {
     if ! host_has_resolved; then
         echo "ℹ️  DNS: no systemd-resolved on this host — keeping Docker's default resolv.conf" >&2
         echo "   (frozen at creation; sessions won't follow a wifi/VPN change)." >&2
-        notify normal "kib · DNS not following the host" \
+        notify_desktop normal "kib · DNS not following the host" \
             "No systemd-resolved on this host, so the sandbox keeps Docker's default DNS and won't follow a network change."
         return 0
     fi
@@ -59,7 +70,7 @@ start_resolv_sync() {
         echo "🌐 DNS: syncing resolv.conf to the host live — follows wifi/VPN changes." >&2
     else
         echo "⚠️  DNS: could not start the resolv.conf watcher — DNS is frozen at creation." >&2
-        notify critical "kib · DNS is NOT following the host" \
+        notify_desktop critical "kib · DNS is NOT following the host" \
             "The resolv.conf watcher failed to start; sessions won't follow a wifi/VPN change."
     fi
     return 0

@@ -59,13 +59,13 @@ kib_audit_gate() {
                 echo "   executes them later — a bare \`git status\` is enough." >&2
                 exit 5
             fi
-            [ "$mode" = teardown ] && notify critical "kib · host-executed git config found" \
+            [ "$mode" = teardown ] && notify_desktop critical "kib · host-executed git config found" \
                 "This repo has a git config key the host would execute. Run: kib audit"
             ;;
         *)
             # Warn-class only. Named on stderr by kib.host.gitaudit; never fatal.
             [ "$mode" = launch ] && return 0
-            [ "$mode" = teardown ] && notify normal "kib · tracked paths match $KIB_RULE_FILE" \
+            [ "$mode" = teardown ] && notify_desktop normal "kib · tracked paths match $KIB_RULE_FILE" \
                 "Paths hidden from the sandbox are tracked in git. Run: kib audit"
             ;;
     esac

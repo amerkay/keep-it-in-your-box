@@ -338,118 +338,49 @@ def test_cli_rejects_wrong_arity() -> None:
     assert exc.value.code == cli.USAGE
 
 
-# ── host key vs box key ──────────────────────────────────────────
-# There is no $PWD bind and $HOST_HOME is a symlink to the container home, so Claude's
-# resolved cwd — and therefore every key it writes — is the CONTAINER path, not the host one.
-# Canonical must still only ever hold the host key, or the host's --resume and ↑ history stop
-# seeing the box's sessions and vice versa.
-BOX = "/home/hostuser/proj-a"
-
-
-def test_scope_in_rekeys_the_project_entry_to_the_box_path(
-    tmp_path: Path, write_json: Callable[[str, object], Path]
-) -> None:
-    src = write_json(
-        "canonical.json",
-        {"projects": {PA: {"allowedTools": ["A"]}}, "githubRepoPaths": {"repo": [PA, PB]}},
-    )
-    dst = tmp_path / "session.json"
-    cs.scope_in_json(str(src), PA, str(dst), BOX)
-    out = read(dst)
-    assert list(out["projects"]) == [BOX]
-    assert out["projects"][BOX]["allowedTools"] == ["A"]
-    assert out["githubRepoPaths"] == {"repo": [BOX]}
-
-
-def test_merge_out_writes_the_box_entry_back_under_the_host_key(
-    tmp_path: Path, write_json: Callable[[str, object], Path]
-) -> None:
-    scratch = write_json("session.json", {"projects": {BOX: {"lastSessionId": "NEW"}}})
-    canonical = write_json(
-        "canonical.json", {"projects": {PA: {"lastSessionId": "OLD"}, PB: {"keep": True}}}
-    )
-    assert cs.merge_out_json(str(scratch), PA, str(canonical), BOX) == cli.OK
-    out = read(canonical)
-    assert out["projects"][PA]["lastSessionId"] == "NEW"
-    assert BOX not in out["projects"], "the container path must never reach canonical"
-    assert out["projects"][PB] == {"keep": True}
-
-
-def test_a_fresh_canonical_is_seeded_without_the_box_key(
-    tmp_path: Path, write_json: Callable[[str, object], Path]
-) -> None:
-    """The no-canonical path rebuilds from the session's globals, which are box-keyed."""
-    scratch = write_json(
-        "session.json", {"onboardingComplete": True, "projects": {BOX: {"allowedTools": ["A"]}}}
-    )
-    canonical = tmp_path / "fresh.json"
-    assert cs.merge_out_json(str(scratch), PA, str(canonical), BOX) == cli.OK
-    out = read(canonical)
-    assert list(out["projects"]) == [PA]
-    assert out["onboardingComplete"] is True
-
-
-def test_history_round_trips_through_the_box_key(
-    tmp_path: Path, write_file: Callable[[str, str], Path]
-) -> None:
-    canonical = write_file(
-        "history.jsonl", hline(PA, "mine") + "\n" + hline(PB, "OTHER-PROJECT") + "\n"
-    )
-    seeded = tmp_path / "session-history.jsonl"
-    cs.seed_history(str(canonical), PA, str(seeded), BOX)
-
-    lines = [json.loads(ln) for ln in seeded.read_text().splitlines()]
-    assert [ln["project"] for ln in lines] == [BOX], "the box sees only its own key"
-    assert all(ln["display"] != "OTHER-PROJECT" for ln in lines)
-
-    # The box appends under its own key; the merge must file it under the host's.
-    with open(seeded, "a") as fh:
-        fh.write(hline(BOX, "typed-in-the-box") + "\n")
-    cs.merge_history(str(seeded), PA, str(canonical), BOX)
-
-    back = [json.loads(ln) for ln in canonical.read_text().splitlines()]
-    assert {ln["project"] for ln in back} == {PA, PB}, "no container path in canonical"
-    assert [ln["display"] for ln in back if ln["project"] == PA] == ["mine", "typed-in-the-box"]
+# ── history dedupe ───────────────────────────────────────────────
+# Canonical and the session share ONE key, so seeding is byte-preserving — but canonical's
+# copy is written by Claude with JS `JSON.stringify`, so the merge still has to compare
+# PARSED rather than raw or every launch re-appends the whole seeded history.
 
 
 def test_merge_history_does_not_duplicate_a_seeded_line(
     tmp_path: Path, write_file: Callable[[str, str], Path]
 ) -> None:
-    """Seeding re-keys every line, so the merge must re-key back and still match canonical's
-    copy — otherwise every launch appends the whole history again."""
+    """A seeded line must match canonical's copy on the way back, or every launch appends
+    the whole history again."""
     canonical = write_file("history.jsonl", hline(PA, "mine") + "\n")
     seeded = tmp_path / "session-history.jsonl"
-    cs.seed_history(str(canonical), PA, str(seeded), BOX)
-    cs.merge_history(str(seeded), PA, str(canonical), BOX)
+    cs.seed_history(str(canonical), PA, str(seeded))
+    cs.merge_history(str(seeded), PA, str(canonical))
     assert len(canonical.read_text().splitlines()) == 1
 
 
 def test_dedupe_survives_claudes_own_json_style(
     tmp_path: Path, write_file: Callable[[str, str], Path]
 ) -> None:
-    """Claude writes history with JS `JSON.stringify` — no space after separators. Re-keying a
-    line round-trips it through Python's dumps, so a RAW compare matched nothing and every
-    launch re-appended the entire seeded history."""
+    """Claude writes history with JS `JSON.stringify` — no space after separators, which a
+    Python `dumps` does not reproduce. A RAW compare matched nothing and every launch
+    re-appended the entire seeded history."""
     js_style = f'{{"display":"mine","project":"{PA}"}}'
     canonical = write_file("history.jsonl", js_style + "\n")
     seeded = tmp_path / "session-history.jsonl"
-    cs.seed_history(str(canonical), PA, str(seeded), BOX)
-    cs.merge_history(str(seeded), PA, str(canonical), BOX)
+    cs.seed_history(str(canonical), PA, str(seeded))
+    cs.merge_history(str(seeded), PA, str(canonical))
     assert canonical.read_text() == js_style + "\n", "canonical was appended to, or rewritten"
 
 
-# kib no longer passes a differing box key — the sidecar binds the project at its host path, so
-# `box == path` is the shipping case and the identity rows below are the ones that matter: a
-# key must round-trip byte-for-byte rather than be re-keyed onto itself and re-appended every
-# launch. The translating rows stay because the API still takes both, and because a session dir
-# written during the in-container-mount window is still folded back through them.
+# One key on both sides, so the round trip must be byte-for-byte rather than a re-key onto
+# itself — the failure mode is a project's history being re-appended in full every launch.
+# Both $HOME shapes plus a project outside $HOME, since the container spelling follows the
+# host's own home (macOS and Linux included).
 @pytest.mark.parametrize(
-    ("host", "box"),
+    "host",
     [
-        ("/Users/veronica/proj-a", "/home/hostuser/proj-a"),
-        ("/home/kay/proj-a", "/home/hostuser/proj-a"),
-        ("/home/hostuser/proj-a", "/home/hostuser/proj-a"),
-        ("/opt/work/proj-a", "/opt/work/proj-a"),
+        "/Users/veronica/proj-a",
+        "/home/kay/proj-a",
+        "/home/hostuser/proj-a",
+        "/opt/work/proj-a",
     ],
 )
 def test_round_trip_holds_for_every_host_path_shape(
@@ -457,32 +388,29 @@ def test_round_trip_holds_for_every_host_path_shape(
     write_json: Callable[[str, object], Path],
     write_file: Callable[[str, str], Path],
     host: str,
-    box: str,
 ) -> None:
     canonical = write_json(
         "canonical.json", {"projects": {host: {"lastSessionId": "OLD"}, PB: {"keep": True}}}
     )
     session = tmp_path / "session.json"
-    cs.scope_in_json(str(canonical), host, str(session), box)
-    assert list(read(session)["projects"]) == [box]
+    cs.scope_in_json(str(canonical), host, str(session))
+    assert list(read(session)["projects"]) == [host]
 
-    write_json("session.json", {"projects": {box: {"lastSessionId": "NEW"}}})
-    assert cs.merge_out_json(str(session), host, str(canonical), box) == cli.OK
+    write_json("session.json", {"projects": {host: {"lastSessionId": "NEW"}}})
+    assert cs.merge_out_json(str(session), host, str(canonical)) == cli.OK
     out = read(canonical)
     assert out["projects"][host]["lastSessionId"] == "NEW"
     assert out["projects"][PB] == {"keep": True}, "another project was rewritten"
-    if box != host:
-        assert box not in out["projects"], "the container path must never reach canonical"
 
-    # History: seed, type one line in the box, fold it back — canonical stays host-keyed and
-    # the seeded lines must not come back as duplicates.
+    # History: seed, type one line in the box, fold it back — the seeded lines must not come
+    # back as duplicates, and another project's lines must not be touched.
     hist = write_file("history.jsonl", hline(host, "mine") + "\n" + hline(PB, "OTHER") + "\n")
     seeded = tmp_path / "session-history.jsonl"
-    cs.seed_history(str(hist), host, str(seeded), box)
+    cs.seed_history(str(hist), host, str(seeded))
     with open(seeded, "a") as fh:
-        fh.write(hline(box, "typed-in-the-box") + "\n")
-    cs.merge_history(str(seeded), host, str(hist), box)
+        fh.write(hline(host, "typed-in-the-box") + "\n")
+    cs.merge_history(str(seeded), host, str(hist))
 
     back = [json.loads(ln) for ln in hist.read_text().splitlines()]
-    assert {ln["project"] for ln in back} == {host, PB}, "no container path in canonical"
+    assert {ln["project"] for ln in back} == {host, PB}, "another project leaked in"
     assert [ln["display"] for ln in back if ln["project"] == host] == ["mine", "typed-in-the-box"]

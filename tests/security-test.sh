@@ -508,9 +508,10 @@ rm -rf "$CFG/skills/.sectest" "$CFG/agents/.sectest.md" 2>/dev/null
 # kib assembles each box from only this project's slice; a leak would surface another
 # project's data here. Compared, NEVER printed (other project paths are PII).
 #
-# The key is the path Claude RESOLVES to in here — the container path — which for any project
-# under $HOME is NOT the host path config_scope translates to and from. `pwd -P` is that
-# resolved path by definition; $HOST_PWD is the host's and would compare the wrong string.
+# The key is the path Claude RESOLVES to in here. The sidecar binds the project at its own
+# host path, so that resolved path IS canonical's key and config_scope translates nothing.
+# `pwd -P` is the resolved path by definition — read it, never $HOST_PWD, which is a host
+# spelling that would compare the wrong string if the two ever came apart again.
 MINE="$(pwd -P)"
 
 if command -v python3 >/dev/null 2>&1 && [ -f "$CFG/.claude.json" ]; then
@@ -666,7 +667,7 @@ if [ -f "$KIB_ROOT/host/config.sh" ] && command -v python3 >/dev/null; then
         printf '%s' "$1" >"$d/canonical.json"
         printf '%s' "$2" >"$d/session.json"
         PYTHONPATH="$KIB_ROOT" python3 -m kib.host.config_scope merge-out-json \
-            "$d/session.json" /p "$d/canonical.json" /p >/dev/null 2>&1
+            "$d/session.json" /p "$d/canonical.json" >/dev/null 2>&1
         python3 -c "
 import json,sys
 e = json.load(open(sys.argv[1]))['projects']['/p']
@@ -777,10 +778,21 @@ fi
 section "Host resolver reach (live-DNS mount)"
 
 if [ -d /run/host-resolve ]; then
-    for s in io.systemd.Resolve io.systemd.Resolve.Monitor; do
-        deny "connect() to $s is refused" \
-            python3 -c "import socket,sys; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect('/run/host-resolve/$s')"
+    # DISCOVERED, not enumerated — matching add_resolv_sync_args. Naming the two sockets that
+    # shipped meant a third one a future systemd added would be probed by nobody. If the glob
+    # finds none at all that is itself the regression: the dir mount is there, so the shadows
+    # should be too.
+    _vl=0
+    for s in /run/host-resolve/io.systemd.*; do
+        [ -e "$s" ] || continue
+        [ -d "$s" ] && continue
+        _vl=$((_vl + 1))
+        deny "connect() to ${s##*/} is refused" \
+            python3 -c "import socket,sys; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect('$s')"
     done
+    is "every io.systemd.* control socket in the live-DNS mount is shadowed" "yes" \
+        "$([ "$_vl" -gt 0 ] && echo yes || echo 'none found ***')"
+    unset _vl
     allow "regression: resolv.conf is readable" test -r /run/host-resolve/resolv.conf
 else
     skip "host resolver sockets shadowed" "no live-DNS mount in this container"

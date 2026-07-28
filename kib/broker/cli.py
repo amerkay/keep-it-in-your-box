@@ -12,13 +12,10 @@ Verbs:
     serve --config <f>            run the proxy (PID 1 of the broker sidecar)
     host-config <id>              shell KEY=VALUE facts for the host (single source of truth)
     list-providers                the registry, one route per line
-    match-upstream <url>          `id|token_basename|auth_scheme` for the route serving url
     check-providers               one line per unusable providers.d def (empty = all fine)
     check-name <id>               is this usable as a route name? prints the reason if not
-    route-url <id>                the URL the agent gets for an MCP route
+    route-url <id> <broker-host>  the URL the agent gets for an MCP route
     route-fingerprint             `id|route_path|upstream` per route, for the attach hash
-    placeholder-token <id>        print a fresh placeholder token (never a real one)
-    make-placeholder <out> <id>   mint the synthetic placeholder credential file
     probe <tokenfile> <id>        is this token accepted upstream? 0 yes / 1 no / 2 unknown
 """
 
@@ -31,12 +28,8 @@ import ssl
 import urllib.parse
 
 from kib.broker import helpers, proxy, registry
-from kib.broker.credential import fake, mint_placeholder
+from kib.broker.credential import fake
 from kib.shared import cli
-
-#: The DNS alias the agent reaches the sidecar by. host/broker.sh owns the same string; this
-#: copy exists so `route-url` can answer without bash having to pass it in.
-BROKER_ALIAS = "kib-broker"
 
 
 def _emit(key: str, value: object) -> None:
@@ -60,13 +53,9 @@ def host_config(pid: str) -> int:
     _emit("KIB_BROKER_PLACEHOLDER_CONTAINER_PATH", p.get("placeholder_container_path", ""))
     _emit("KIB_BROKER_TOKEN_BASENAME", p.get("token_basename", ""))
     _emit("KIB_BROKER_DELIVERY", p["delivery"])
-    _emit("KIB_BROKER_CREDENTIAL_KIND", p.get("credential_kind", ""))
-    # MCP wiring (empty for LLM rows): how the host writes this route into the agent's
-    # .claude.json, and — for hosted_mcp — the sidecar port the agent reaches.
-    _emit("KIB_BROKER_MCP_SERVER_NAME", p.get("mcp_server_name", ""))
-    _emit("KIB_BROKER_MCP_PATH", p.get("mcp_path", ""))
-    _emit("KIB_BROKER_MCP_TRANSPORT", p.get("mcp_transport", ""))
-    _emit("KIB_BROKER_MCP_URL_PATH", registry.route_path(pid, p))
+    # The rest of the MCP wiring — server name, path, transport, the agent's URL — is not
+    # emitted: `kib.host.mcp` builds the .claude.json entry in-process and reads the registry
+    # itself. Bash only needs the port, to publish it.
     # One shared port for both MCP deliveries (the hosted one inside its own netns); empty
     # for an LLM row, which is reached by env var and not by URL.
     _emit("KIB_BROKER_MCP_PORT", registry.MCP_PORT if p["delivery"] != "base_url_env" else "")
@@ -105,13 +94,18 @@ def check_name(name: str) -> int:
     return cli.OK
 
 
-def route_url(pid: str) -> int:
-    """The URL the agent gets for an MCP route. Empty (but OK) for an LLM row."""
+def route_url(pid: str, broker_host: str) -> int:
+    """The URL the agent gets for an MCP route. Empty (but OK) for an LLM row.
+
+    `broker_host` is passed in, never held here: host/broker.sh owns that string — it is what
+    `--network-alias` actually creates — and a second copy could only ever drift into printing
+    a URL that resolves to nothing.
+    """
     p = registry.PROVIDERS.get(pid)
     if p is None:
         raise cli.AbortError(f"unknown provider: {pid}", cli.USAGE)
     # A hosted MCP answers on its OWN network alias, which is its id.
-    host = pid if p.get("delivery") == "hosted_mcp" else BROKER_ALIAS
+    host = pid if p.get("delivery") == "hosted_mcp" else broker_host
     print(registry.agent_url(pid, p, host) if registry.route_path(pid, p) else "")
     return cli.OK
 
@@ -124,29 +118,6 @@ def route_fingerprint() -> int:
     """
     for pid, p in registry.PROVIDERS.items():
         print(f"{pid}|{registry.route_path(pid, p)}|{p.get('upstream_origin', '')}")
-    return cli.OK
-
-
-def match_upstream(url: str) -> int:
-    r = registry.match_upstream_route(url)
-    if r:
-        print("{}|{}|{}".format(*r))
-    return cli.OK
-
-
-def placeholder_token(pid: str) -> int:
-    p = registry.PROVIDERS.get(pid)
-    if p is None:
-        raise cli.AbortError(f"unknown provider: {pid}", cli.USAGE)
-    print(fake(p.get("token_prefix", "")))
-    return cli.OK
-
-
-def make_placeholder(out: str, pid: str) -> int:
-    p = registry.PROVIDERS.get(pid)
-    if p is None:
-        raise cli.AbortError(f"unknown provider: {pid}", cli.USAGE)
-    mint_placeholder(out, p)
     return cli.OK
 
 
@@ -228,11 +199,8 @@ TABLE: dict[str, tuple[cli.Command, int]] = {
     "list-providers": (list_providers, 0),
     "check-providers": (check_providers, 0),
     "check-name": (check_name, 1),
-    "route-url": (route_url, 1),
+    "route-url": (route_url, 2),
     "route-fingerprint": (route_fingerprint, 0),
-    "match-upstream": (match_upstream, 1),
-    "placeholder-token": (placeholder_token, 1),
-    "make-placeholder": (make_placeholder, 2),
     "probe": (probe, 2),
 }
 

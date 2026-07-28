@@ -158,11 +158,6 @@ def audit_tracked(top: str) -> list[str]:
 # and a committed config is the user's own; that filter is the cheap proxy for "touched during
 # a session" and takes false positives on a clean checkout to zero.
 
-#: JSON keys whose string value is a command. Walked generically rather than per-schema, so
-#: one function covers `.mcp.json`'s `mcpServers.*.command`, zed's `formatter.external.command`
-#: and `terminal.shell.program`, plus whatever key a future version of either adds.
-JSON_EXEC_KEYS = ("command", "program")
-
 #: Tail-matched, like the FUSE guard's rules — a `.claude/settings.json` in a subdirectory is
 #: the one that loads when the user works there. Value picks the scanner.
 PROJECT_CONFIGS = (
@@ -197,7 +192,7 @@ def _tail_match(rel: str, name: str) -> bool:
     return rel == name or rel.endswith("/" + name)
 
 
-def _dirty(top: str, pathspecs: Sequence[str] = ()) -> list[str]:
+def _dirty(top: str, pathspecs: Sequence[str]) -> list[str]:
     """Paths git reports modified, staged or untracked — the proxy for "changed since commit".
 
     With `pathspecs`, ignored files are included too, and the listing is limited to them:
@@ -223,22 +218,6 @@ def _dirty(top: str, pathspecs: Sequence[str] = ()) -> list[str]:
     return dirty
 
 
-def _json_commands(node: object, trail: str = "") -> list[str]:
-    """Every nested `command`/`program` string in a JSON tree, as `where = value` lines."""
-    found: list[str] = []
-    if isinstance(node, dict):
-        for key, value in node.items():
-            where = f"{trail}.{key}" if trail else str(key)
-            if key in JSON_EXEC_KEYS and isinstance(value, str) and value:
-                found.append(f"{where} = {value}")
-            else:
-                found += _json_commands(value, where)
-    elif isinstance(node, list):
-        for i, value in enumerate(node):
-            found += _json_commands(value, f"{trail}[{i}]")
-    return found
-
-
 def _scan_json(path: str, kind: str) -> list[str]:
     """`settings_findings` for a Claude settings file, the generic walk for anything else.
 
@@ -255,7 +234,9 @@ def _scan_json(path: str, kind: str) -> list[str]:
             cfg = json.load(fh)
         if not isinstance(cfg, dict):
             return []
-        return dangerous.settings_findings(cfg) if kind == "claude" else _json_commands(cfg)
+        return (
+            dangerous.settings_findings(cfg) if kind == "claude" else dangerous.json_commands(cfg)
+        )
     except (OSError, ValueError, RecursionError):
         return []
 

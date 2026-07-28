@@ -30,7 +30,7 @@ _HEX_VAL_RE = re.compile(r"[0-9a-fA-F]{24,}$")
 _ROUTE_ID_RE = re.compile(r"[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$")
 
 
-def validate_route_id(name: str, builtins: Sequence[str] = ()) -> str | None:
+def validate_route_id(name: str, builtins: Sequence[str]) -> str | None:
     """The reason `name` is unusable as a route id, or None if it is fine."""
     if not name:
         return "the name is empty"
