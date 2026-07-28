@@ -116,8 +116,16 @@ def _globals_only(cfg: dict[str, Any]) -> dict[str, Any]:
 #: Flags that widen what the next session may do without being asked. A session may lower one,
 #: never raise it. Prefix-matched as well, so a future `hasTrustDialog*` sibling is covered the
 #: day Claude adds it rather than the day someone notices.
-TRUST_FLAGS = ("hasTrustDialogAccepted", "enableAllProjectMcpServers")
+TRUST_FLAGS = ("enableAllProjectMcpServers",)
 TRUST_FLAG_PREFIX = "hasTrustDialog"
+
+#: Exempt from the guard by the user's decision (2026-07-28): the box reassembles its config from
+#: canonical every cold start, so a folder trusted only inside kib re-prompted and re-raised this
+#: flag every launch — the refusal warned at every teardown and could never converge. Cost
+#: accepted: a session can now pre-trust the folder for the next HOST claude, and
+#: `.claude/settings.json` is box-writable, so that chain is DETECTED (`audit_project_configs`)
+#: rather than refused. Siblings Claude adds later stay guarded by the prefix.
+TRUST_FLAGS_EXEMPT = ("hasTrustDialogAccepted",)
 
 #: List-valued keys that name what the next session may run without asking, clamped to what
 #: canonical already held. `enabledMcpjsonServers` belongs with them, not with the booleans:
@@ -128,6 +136,8 @@ CLAMPED_LISTS = ("allowedTools", "enabledMcpjsonServers")
 
 
 def _is_trust_flag(key: str) -> bool:
+    if key in TRUST_FLAGS_EXEMPT:
+        return False
     return key in TRUST_FLAGS or key.startswith(TRUST_FLAG_PREFIX)
 
 

@@ -671,24 +671,30 @@ if [ -f "$KIB_ROOT/host/config.sh" ] && command -v python3 >/dev/null; then
         python3 -c "
 import json,sys
 e = json.load(open(sys.argv[1]))['projects']['/p']
-print('%s|%s|%s' % (sorted(e.get('mcpServers') or {}),
-                    e.get('hasTrustDialogAccepted'), e.get('allowedTools')))" "$d/canonical.json"
+print('%s|%s|%s|%s' % (sorted(e.get('mcpServers') or {}),
+                       e.get('hasTrustDialogAccepted'), e.get('allowedTools'),
+                       e.get('enableAllProjectMcpServers')))" "$d/canonical.json"
         rm -rf "$d"
     }
-    # A session that adds a local MCP server + raises every trust flag hands the host nothing.
-    is "MAC-H2 an added mcpServers.command is not merged into canonical" "[]|None|None" \
+    # A session that adds a local MCP server, widens allowedTools and raises the guarded trust
+    # flag hands the host none of it. hasTrustDialogAccepted DOES merge — exempted 2026-07-28
+    # (kib/host/config_scope.py TRUST_FLAGS_EXEMPT); it is the one field expected to pass.
+    is "MAC-H2 an added mcpServers.command is not merged into canonical" "[]|True|None|None" \
         "$(mergeout_probe '{"projects":{"/p":{}}}' \
             '{"projects":{"/p":{"mcpServers":{"pwn":{"command":"/bin/sh"}},
-             "hasTrustDialogAccepted":true,"allowedTools":["Bash(*)"]}}}')"
+             "hasTrustDialogAccepted":true,"allowedTools":["Bash(*)"],
+             "enableAllProjectMcpServers":true}}}')"
     # The user's OWN host-side server and flags must survive the round trip untouched —
     # a vet that drops them would quietly delete the project's real config every exit.
     is "regression: the user's own MCP server and trust flags round-trip" \
-        "['mine']|True|['Read']" \
+        "['mine']|True|['Read']|True" \
         "$(mergeout_probe \
             '{"projects":{"/p":{"mcpServers":{"mine":{"command":"/usr/bin/m"}},
-              "hasTrustDialogAccepted":true,"allowedTools":["Read"]}}}' \
+              "hasTrustDialogAccepted":true,"allowedTools":["Read"],
+              "enableAllProjectMcpServers":true}}}' \
             '{"projects":{"/p":{"mcpServers":{"mine":{"command":"/usr/bin/m"}},
-              "hasTrustDialogAccepted":true,"allowedTools":["Read"]}}}')"
+              "hasTrustDialogAccepted":true,"allowedTools":["Read"],
+              "enableAllProjectMcpServers":true}}}')"
 else
     skip "shared settings validator" "host units or python3 unavailable"
 fi

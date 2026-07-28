@@ -203,24 +203,37 @@ def test_merge_out_clamps_the_mcpjson_approval_list(
     assert "enabledMcpjsonServers" not in read(canonical)["projects"][PA]
 
 
-@pytest.mark.parametrize("flag", ["hasTrustDialogAccepted", "enableAllProjectMcpServers"])
+@pytest.mark.parametrize("flag", ["enableAllProjectMcpServers", "hasTrustDialogHooksAccepted"])
 def test_merge_out_refuses_to_raise_a_trust_flag(
     flag: str, write_json: Callable[[str, object], Path]
 ) -> None:
+    """The second is hypothetical on purpose: the prefix must guard a sibling Claude adds later."""
     canonical = write_json("c.json", {"projects": {PA: {}}})
     scratch = write_json("scr.json", {"projects": {PA: {flag: True}}})
     assert cs.merge_out_json(str(scratch), PA, str(canonical)) == cli.OK
     assert flag not in read(canonical)["projects"][PA]
 
 
+def test_merge_out_merges_the_trust_dialog_flag(
+    write_json: Callable[[str, object], Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Exempt (2026-07-28): refusing it warned every teardown and never converged — see
+    TRUST_FLAGS_EXEMPT. Silently, too: a note the user cannot act on is the thing being fixed."""
+    canonical = write_json("c.json", {"projects": {PA: {}}})
+    scratch = write_json("scr.json", {"projects": {PA: {"hasTrustDialogAccepted": True}}})
+    assert cs.merge_out_json(str(scratch), PA, str(canonical)) == cli.OK
+    assert read(canonical)["projects"][PA]["hasTrustDialogAccepted"] is True
+    assert capsys.readouterr().err == ""
+
+
 def test_merge_out_lets_a_session_lower_a_trust_flag(
     write_json: Callable[[str, object], Path],
 ) -> None:
     """One-way only: raising is the escalation, lowering is the user's own call."""
-    canonical = write_json("c.json", {"projects": {PA: {"hasTrustDialogAccepted": True}}})
-    scratch = write_json("scr.json", {"projects": {PA: {"hasTrustDialogAccepted": False}}})
+    canonical = write_json("c.json", {"projects": {PA: {"enableAllProjectMcpServers": True}}})
+    scratch = write_json("scr.json", {"projects": {PA: {"enableAllProjectMcpServers": False}}})
     assert cs.merge_out_json(str(scratch), PA, str(canonical)) == cli.OK
-    assert read(canonical)["projects"][PA]["hasTrustDialogAccepted"] is False
+    assert read(canonical)["projects"][PA]["enableAllProjectMcpServers"] is False
 
 
 def test_merge_out_clamps_allowed_tools_to_what_canonical_had(
