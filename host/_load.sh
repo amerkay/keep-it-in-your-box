@@ -8,7 +8,7 @@
 
 : "${KIB_ROOT:?host/_load.sh: KIB_ROOT must be set by the caller}"
 
-for _kib_unit in core portable image config redaction gitguard broker mcp desktop net lifecycle; do
+for _kib_unit in core portable image config redaction gitguard broker mcp desktop net node lifecycle; do
     # shellcheck source=/dev/null
     . "$KIB_ROOT/host/$_kib_unit.sh" || {
         echo "❌ kib: cannot load host/$_kib_unit.sh — the install is incomplete." >&2

@@ -35,7 +35,7 @@ ensure_user_nvm() {
     [ ! -e "$eun_home/.nvm" ] || return 0
 
     cp -R /opt/nvm "$eun_home/.nvm" 2>/dev/null || return 0
-    # The baked LTS store, shared and read-only, reached by ONE symlink: nvm enumerates versions
+    # The user-level cache, mounted :ro, reached by ONE symlink: nvm enumerates versions
     # with `find … -type d`, which skips symlinks, so per-version symlinks inside a real
     # versions/ dir are invisible to it and only the parent-directory form works.
     if [ -d /opt/nvm-versions ]; then
@@ -45,6 +45,17 @@ ensure_user_nvm() {
     # Root's copy lands root-owned; the already-the-user branch writes as the user already.
     if [ "$(id -u)" = "0" ]; then
         chown -Rh "$HOST_UID:$HOST_GID" "$eun_home/.nvm" 2>/dev/null || true
+    fi
+
+    # Claude Code builds its shell snapshot from ~/.bashrc and replays it on every Bash tool
+    # call, so a definition only in /etc/bash.bashrc reaches a terminal and nothing else. Docker's
+    # pre-created $HOME means /etc/skel never supplied one. First line, ahead of any
+    # non-interactive guard added later (anthropics/claude-code#31437).
+    if [ ! -e "$eun_home/.bashrc" ] && [ -r /etc/kib-nvm.sh ]; then
+        printf '%s\n' '. /etc/kib-nvm.sh' >"$eun_home/.bashrc" 2>/dev/null || true
+        if [ "$(id -u)" = "0" ] && [ -f "$eun_home/.bashrc" ]; then
+            chown "$HOST_UID:$HOST_GID" "$eun_home/.bashrc" 2>/dev/null || true
+        fi
     fi
 }
 
@@ -79,7 +90,7 @@ resolve_node_version() {
         return 0
     fi
 
-    # One build per major is baked, so the single glob match is the answer: `18` lands on
+    # One build per major is cached, so the single glob match is the answer: `18` lands on
     # v18.20.8, and a full `v18.20.8` resolves to the same dir.
     rnv_found=""
     for rnv_dir in "/opt/nvm-versions/v$rnv_major".*; do
@@ -96,21 +107,34 @@ resolve_node_version() {
         return 0
     fi
 
-    echo "✗ kib: node $rnv_want is not baked into this image. Available:" >&2
+    # The host caches a version before starting the session, so reaching here means the fetch
+    # was skipped or failed — not that the image is missing something a rebuild would add.
+    echo "✗ kib: node $rnv_want is not in the cache. Cached:" >&2
     for rnv_dir in /opt/nvm-versions/v*; do
         [ -d "$rnv_dir" ] && echo "    ${rnv_dir##*/}" >&2
     done
     echo "  (plus the system node, $(node --version 2>/dev/null))" >&2
-    echo "  Add it to NODE_LTS_LINES in the Dockerfile and run: kib build" >&2
+    echo "  From a host terminal:  kib --node-version=$rnv_want exec true" >&2
     return 1
 }
 
 # Sets KIB_PREPEND_PATH (consumed by both PATH exports below) for the requested node version.
 apply_node_version() {
-    [ -n "${KIB_NODE_VERSION:-}" ] || return 0
-    anv_bin="$(resolve_node_version "$KIB_NODE_VERSION")" || exit 1
-    [ -n "$anv_bin" ] || return 0
-    KIB_PREPEND_PATH="$anv_bin${KIB_PREPEND_PATH:+:$KIB_PREPEND_PATH}"
+    # ORDER: the flag goes on first so the symlink lands in FRONT of it. Reversed, --node-version's
+    # fixed directory outranks the link and `nvm use` reports success while changing nothing.
+    if [ -n "${KIB_NODE_VERSION:-}" ]; then
+        anv_bin="$(resolve_node_version "$KIB_NODE_VERSION")" || exit 1
+        if [ -n "$anv_bin" ]; then
+            KIB_PREPEND_PATH="$anv_bin${KIB_PREPEND_PATH:+:$KIB_PREPEND_PATH}"
+        fi
+    fi
+
+    # A PATH entry whose TARGET can change is the only way an in-session `nvm use` reaches the
+    # next command: the snapshot's PATH string itself is frozen at session start. Dangling until
+    # something selects a version, which just falls through. Per terminal, like the flag.
+    KIB_NODE_CURRENT="$USER_HOME/.nvm/current.${KIB_SESSION_TAG:-default}"
+    export KIB_NODE_CURRENT
+    KIB_PREPEND_PATH="$KIB_NODE_CURRENT/bin${KIB_PREPEND_PATH:+:$KIB_PREPEND_PATH}"
     export KIB_PREPEND_PATH
 }
 

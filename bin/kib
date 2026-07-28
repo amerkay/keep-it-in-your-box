@@ -30,7 +30,10 @@ kib — run Claude Code in a Docker sandbox, one container per project.
   kib help                    this table
 
 Flags (before the verb):
-  --node-version=NN           run this terminal on a baked Node line (18|20|22|24, or 26=system)
+  --node-version=NN[,NN…]     run this terminal on Node NN, fetched once per machine and cached.
+                              A list caches every one and runs on the first (monorepos), so
+                              `nvm use` reaches the others instantly inside the session.
+                              Remembered per project; =system goes back to the built-in Node.
 
 Verbs win over programs: `kib bash` is an error, `kib exec bash` is what you want.
 USAGE
@@ -41,26 +44,33 @@ USAGE
 # host/_load.sh is sourced much further down, so errors here use the bare printf+exit shape the
 # unknown-verb arm uses. The value is shape-checked in the guest (resolve_node_version), which
 # owns the list of what is actually baked; the launcher only needs it to not be a verb.
-# shellcheck disable=SC2034  # read by host/lifecycle.sh (kib_run_session)
-NODE_VERSION="${KIB_NODE_VERSION:-}"
-# shellcheck disable=SC2034  # same: assigned here, read in host/lifecycle.sh
+#
+# Takes a LIST — `--node-version=18,20`, or the flag repeated. Every version named is cached;
+# the FIRST is the one this terminal's PATH resolves to. That is what a monorepo with packages
+# on two lines needs: both fetched, both instantly reachable by `nvm use` inside the session,
+# one of them the default.
+# shellcheck disable=SC2034  # read by host/node.sh (ensure_node_cached)
+NODE_VERSION_LIST="${KIB_NODE_VERSION:-}"
 while [ $# -gt 0 ]; do
     case "$1" in
-        --node-version=*)
-            NODE_VERSION="${1#*=}"
-            shift
-            ;;
+        --node-version=*) _nv="${1#*=}" && shift ;;
         --node-version)
             if [ $# -lt 2 ]; then
                 printf '❌ kib: --node-version needs a value, e.g. --node-version=20\n' >&2
                 exit 2
             fi
-            NODE_VERSION="$2"
+            _nv="$2"
             shift 2
             ;;
         *) break ;;
     esac
+    NODE_VERSION_LIST="${NODE_VERSION_LIST:+$NODE_VERSION_LIST }$_nv"
 done
+# Commas are just another separator, so 18,20 and "18 20" mean the same thing.
+NODE_VERSION_LIST="$(printf '%s' "$NODE_VERSION_LIST" | tr ',' ' ')"
+# shellcheck disable=SC2034  # read by host/lifecycle.sh (kib_run_session); first wins
+NODE_VERSION="${NODE_VERSION_LIST%% *}"
+unset _nv
 
 # ── Verb ─────────────────────────────────────────────────────────
 if [ $# -gt 0 ]; then
@@ -212,6 +222,13 @@ ensure_claude_home
 preflight_platform # darwin: engine/perl/bind-mount checks; linux: no-op
 build_image_if_missing
 check_for_updates
+
+# --node-version: remember it for this project (or apply what was remembered), then fetch into
+# the user-level cache if this machine has not seen it. After build_image_if_missing, because the
+# fetch runs a sterile container from that image.
+node_versions_resolve
+ensure_node_cached
+node_versions_remember # only after the fetch worked — a failed one must not pin the project
 
 kib_identity
 kib_prepare_session

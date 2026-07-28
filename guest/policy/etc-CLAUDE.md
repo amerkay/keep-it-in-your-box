@@ -102,14 +102,21 @@ verbatim, including what you were attempting.** Do not retry via another path, a
 another config scope (`--global`, `--system`), or by asking the user to disable the guard. A
 legitimate need is a conversation, not a workaround.
 
+## Node versions
+
+- **`nvm use 20` works here and sticks** for the rest of this terminal's session, including your
+  later tool calls — unlike nvm elsewhere. `nvm ls` lists what is cached, `nvm use system` returns
+  to the launch default. The matching `pnpm` comes with each version, so never `npm i -g pnpm`.
+- **Not cached? `nvm install` fails `EROFS` by design** — the cache is shared by every project.
+  Ask the user to run, in a **host terminal**: `kib --node-version=20` (a comma list for a repo
+  needing two, `18,20`). Fetched once per machine, then remembered for this project.
+
 **`EPERM` inside the project is kib refusing, and the path is the whole message** — the reason is
 logged where you cannot see it (the FUSE sidecar's stderr, a different container), so do not
 speculate about the cause beyond the rules above. `EACCES` is an ordinary permission problem:
 check the mode and owner, and treat it as a normal error. `EROFS` is a read-only mount, which
 under `~/.claude-shared/` means the locked tier, and under `~/.nvm/versions/node/` means the
-**baked Node store** — shared, read-only, and deliberately so: `nvm use 18|20|22|24` is instant,
-`nvm install` of anything else is refused. That is not repairable from in here. Say which version
-is missing; adding one is a line in the Dockerfile's `NODE_LTS_LINES` and a host `kib build`.
+shared Node cache above.
 
 ## What persists
 

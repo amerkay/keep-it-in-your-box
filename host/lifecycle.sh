@@ -406,6 +406,11 @@ start_container() {
         fi
     fi
 
+    # The user-level Node cache, :ro. Unconditional and independent of --node-version: the mount
+    # is a live view, so a version cached later by any project appears in THIS container without
+    # recreating it. That is what lets --node-version stay a per-terminal exec setting.
+    add_node_cache_args
+
     # Broker wiring: -e ANTHROPIC_BASE_URL + the placeholder credential that SHADOWS the real
     # .credentials.json (copied into the shared-assembly dir, not mounted). Must follow
     # stage_credential, which clears that path. No-op unless the broker came up.

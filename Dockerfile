@@ -82,12 +82,9 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
 # (e.g. Google Search Console) over the broker network without the credential entering the
 # agent container. Pre-installed so the sidecar needs no runtime npm fetch.
 #
-# These land in the SYSTEM prefix (/usr/lib/node_modules, bins in /usr/bin), which no `nvm use`
-# ever shadows — unlike npm/npx, which ship inside each node tarball and switch with it. That is
-# fine for all of these but pnpm: the rest are `#!/usr/bin/env node` scripts with no real engine
-# floor, so they simply run under whichever node PATH resolves. pnpm 11 declares node >=22.13 and
-# hard-crashes below it, so the baked lines get their own copy — see NODE_LTS_LINES below. This
-# one stays: it is Node ${NODE_MAJOR}'s pnpm, and the fallback for anything not baked.
+# These land in the SYSTEM prefix, which a version switch does not move — unlike npm/npx, which
+# ship inside each node tarball. Only pnpm cares (11.x needs node >=22.13 and CRASHES below),
+# so node-fetch.sh gives an older cached line its own copy; this one is ${NODE_MAJOR}'s.
 RUN npm install -g \
     ts-node \
     tsx \
@@ -95,14 +92,15 @@ RUN npm install -g \
     pnpm \
     supergateway
 
-# nvm, pinned like the other release-binary tools. It is a shell function, not a binary on PATH,
-# so it is sourced from /etc/bash.bashrc beside the direnv hook — interactive shells only.
-# /opt/nvm is the pristine root-owned copy and can never BE $NVM_DIR: `nvm install` writes node
-# builds into $NVM_DIR itself, so the entrypoint seeds a per-session $HOME/.nvm from this one.
-# /etc/skel is not an option — docker pre-creates $HOME as a mountpoint parent, so `useradd -m`
-# finds the home already there and skips the skel copy entirely.
-# Node ${NODE_MAJOR} stays the default: with no $NVM_DIR/alias/default, sourcing nvm.sh leaves
-# PATH alone until a session runs `nvm use`/`nvm install`.
+
+# Mountpoint for the user-level Node cache (host/node.sh) — nothing is baked. Created empty so
+# nvm sees a valid, empty store on a machine that has cached nothing yet.
+RUN mkdir -p /opt/nvm-versions
+
+# nvm, pinned like the other release-binary tools. It is a shell function, so it comes from ONE
+# file with three readers — see the ENV BASH_ENV note below. /opt/nvm is the pristine
+# root-owned copy and can never BE $NVM_DIR (`nvm install` writes into $NVM_DIR itself), so
+# the entrypoint seeds $HOME/.nvm from it; /etc/skel cannot, because docker pre-creates $HOME.
 ARG NVM_VERSION=v0.40.6
 RUN git clone --depth 1 --branch "$NVM_VERSION" https://github.com/nvm-sh/nvm.git /opt/nvm \
     && rm -rf /opt/nvm/.git \
@@ -110,43 +108,31 @@ RUN git clone --depth 1 --branch "$NVM_VERSION" https://github.com/nvm-sh/nvm.gi
     && chmod -R a+rX /opt/nvm \
     && printf '%s\n' \
         'export NVM_DIR="$HOME/.nvm"' \
-        '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' \
+        '# Lazy: nvm.sh defines 118 functions and Claude Code serialises every captured one' \
+        '# into its shell snapshot, replayed on EVERY Bash call (claude-code#31437: ~8s at 199).' \
+        '# `use` also repoints $KIB_NODE_CURRENT, the PATH symlink that makes a switch outlive' \
+        '# the command. Only `use`: NVM_BIN is unset for ls/current, which would read as system.' \
+        'nvm() {' \
+        '  unset -f nvm' \
+        '  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' \
+        '  nvm "$@" || return' \
+        '  [ -n "${KIB_NODE_CURRENT:-}" ] || return 0' \
+        '  case "${1:-}" in' \
+        '    use)' \
+        '      if [ -n "${NVM_BIN:-}" ]; then ln -sfn "${NVM_BIN%/bin}" "$KIB_NODE_CURRENT"' \
+        '      else rm -f "$KIB_NODE_CURRENT"; fi ;;' \
+        '  esac' \
+        '}' \
+        > /etc/kib-nvm.sh \
+    && printf '%s\n' \
+        '. /etc/kib-nvm.sh' \
         '[ -s "$NVM_DIR/bash_completion" ] && . "$NVM_DIR/bash_completion"' \
         >> /etc/bash.bashrc
 
-# Bake the Node LTS lines so `kib --node-version=18` costs nothing at launch. 18–26 is every LTS
-# line in range: 26 is Current until Oct 2026 and is already the system node, so it is free.
-# The store MOVES out of /opt/nvm: the entrypoint copies /opt/nvm per session, and that copy must
-# stay ~3 MB rather than ~755 MB. Sessions reach these through one symlink
-# ($HOME/.nvm/versions/node -> here), which is the only layout nvm accepts — per-version symlinks
-# inside a real versions/node are invisible to its `find … -type d` enumeration.
-# Read-only by design: `nvm install` of an unbaked version is refused, `nvm use` of a baked one
-# is instant. Add a line here and rebuild instead.
-#
-# Each line also gets its OWN pnpm, in that version's prefix, where `nvm use` picks it up. npm
-# installs `latest` regardless of engines, so the tag is chosen by trying pnpm's per-major
-# dist-tags newest-first under --engine-strict and keeping the first one this node satisfies
-# (18/20 -> pnpm 10, 22/24 -> pnpm 11). The list never rots upward — `latest` is always tried
-# first, so a future pnpm 12 is picked up with no edit here.
-ARG NODE_LTS_LINES="18 20 22 24"
-ARG PNPM_TAGS="latest latest-11 latest-10 latest-9"
-RUN export NVM_DIR=/opt/nvm && . /opt/nvm/nvm.sh \
-    && for m in $NODE_LTS_LINES; do \
-        nvm install "$m" \
-        && { for t in $PNPM_TAGS; do npm install -g --engine-strict "pnpm@$t" && break; done; } \
-        && command -v pnpm | grep -q "^$NVM_DIR/versions/node/" \
-        && pnpm --version \
-        || exit 1; \
-    done \
-    && npm cache clean --force \
-    && nvm cache clear \
-    && mv /opt/nvm/versions/node /opt/nvm-versions \
-    && rm -rf /opt/nvm/versions \
-    # nvm's FIRST install writes alias/default. Left in the seeded copy it would silently boot
-    # every interactive shell on Node 18 instead of ${NODE_MAJOR}, with or without the flag.
-    && rm -f /opt/nvm/alias/default \
-    && chmod -R a+rX /opt/nvm-versions \
-    && ls /opt/nvm-versions
+# Three readers, one file: /etc/bash.bashrc (terminals), $BASH_ENV (a non-interactive `bash -c`)
+# and the ~/.bashrc the entrypoint drops. Only that last one reaches Claude's OWN tool calls,
+# which replay a snapshot captured from ~/.bashrc and ignore BASH_ENV entirely (measured).
+ENV BASH_ENV=/etc/kib-nvm.sh
 
 # Shell lint/format tools, PINNED and fail-hard.
 #
