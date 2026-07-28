@@ -604,6 +604,16 @@ kib_run_session() {
         /usr/local/bin/docker-entrypoint.sh "$@"
     )
 
+    # Same reasoning as the tag below: --node-version rides the exec, so two terminals can run
+    # two Node versions against ONE container and no attach has to be refused over it. Empty
+    # unless the flag was given; the bare-"${arr[@]}" form would abort the launch under bash 3.2.
+    # `if`, not `[ … ] && …`: that form returns 1 when the test fails, which aborts the launch
+    # under set -e the day someone moves it to the end of a function.
+    local -a nodeenv=()
+    if [ -n "${NODE_VERSION:-}" ]; then
+        nodeenv=(-e KIB_NODE_VERSION="$NODE_VERSION")
+    fi
+
     # Set on the *exec*, not the container, so the tag is per-terminal and works against a
     # container created before this existed. Claude's tools and subagents inherit it.
     echo >&2 # blank line separating kib's startup diagnostics from the app's own output
@@ -613,5 +623,6 @@ kib_run_session() {
         -e LINES="$(tput lines 2>/dev/null || echo 40)" \
         -e TERM="${TERM:-xterm-256color}" \
         -e KIB_SESSION_TAG="$SESSION_TAG" \
+        ${nodeenv[@]+"${nodeenv[@]}"} \
         "$CNAME" "${incmd[@]}"
 }

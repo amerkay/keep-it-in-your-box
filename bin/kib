@@ -29,9 +29,38 @@ kib — run Claude Code in a Docker sandbox, one container per project.
   kib sleep-monitor [iv] [id] diagnose "why won't it idle-suspend?"
   kib help                    this table
 
+Flags (before the verb):
+  --node-version=NN           run this terminal on a baked Node line (18|20|22|24, or 26=system)
+
 Verbs win over programs: `kib bash` is an error, `kib exec bash` is what you want.
 USAGE
 }
+
+# ── Pre-verb flags ───────────────────────────────────────────────
+# Stripped BEFORE the verb table, which rejects any unknown first token. No `die` yet either:
+# host/_load.sh is sourced much further down, so errors here use the bare printf+exit shape the
+# unknown-verb arm uses. The value is shape-checked in the guest (resolve_node_version), which
+# owns the list of what is actually baked; the launcher only needs it to not be a verb.
+# shellcheck disable=SC2034  # read by host/lifecycle.sh (kib_run_session)
+NODE_VERSION="${KIB_NODE_VERSION:-}"
+# shellcheck disable=SC2034  # same: assigned here, read in host/lifecycle.sh
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --node-version=*)
+            NODE_VERSION="${1#*=}"
+            shift
+            ;;
+        --node-version)
+            if [ $# -lt 2 ]; then
+                printf '❌ kib: --node-version needs a value, e.g. --node-version=20\n' >&2
+                exit 2
+            fi
+            NODE_VERSION="$2"
+            shift 2
+            ;;
+        *) break ;;
+    esac
+done
 
 # ── Verb ─────────────────────────────────────────────────────────
 if [ $# -gt 0 ]; then

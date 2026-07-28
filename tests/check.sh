@@ -14,7 +14,7 @@ cd "$KIB_ROOT" || exit 1
 # shellcheck source=SCRIPTDIR/lib.sh
 . "$KIB_ROOT/tests/lib.sh"
 
-for _unit in syntax portability wiring mcp clipboard assets regressions shims pytest; do
+for _unit in syntax portability wiring nodeversion mcp clipboard assets regressions shims pytest; do
     # shellcheck source=/dev/null
     . "$KIB_ROOT/tests/check/$_unit.sh"
 done

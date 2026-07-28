@@ -88,6 +88,45 @@ RUN npm install -g \
     pnpm \
     supergateway
 
+# nvm, pinned like the other release-binary tools. It is a shell function, not a binary on PATH,
+# so it is sourced from /etc/bash.bashrc beside the direnv hook — interactive shells only.
+# /opt/nvm is the pristine root-owned copy and can never BE $NVM_DIR: `nvm install` writes node
+# builds into $NVM_DIR itself, so the entrypoint seeds a per-session $HOME/.nvm from this one.
+# /etc/skel is not an option — docker pre-creates $HOME as a mountpoint parent, so `useradd -m`
+# finds the home already there and skips the skel copy entirely.
+# Node ${NODE_MAJOR} stays the default: with no $NVM_DIR/alias/default, sourcing nvm.sh leaves
+# PATH alone until a session runs `nvm use`/`nvm install`.
+ARG NVM_VERSION=v0.40.6
+RUN git clone --depth 1 --branch "$NVM_VERSION" https://github.com/nvm-sh/nvm.git /opt/nvm \
+    && rm -rf /opt/nvm/.git \
+    && bash -c '. /opt/nvm/nvm.sh && nvm --version' \
+    && chmod -R a+rX /opt/nvm \
+    && printf '%s\n' \
+        'export NVM_DIR="$HOME/.nvm"' \
+        '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' \
+        '[ -s "$NVM_DIR/bash_completion" ] && . "$NVM_DIR/bash_completion"' \
+        >> /etc/bash.bashrc
+
+# Bake the Node LTS lines so `kib --node-version=18` costs nothing at launch. 18–26 is every LTS
+# line in range: 26 is Current until Oct 2026 and is already the system node, so it is free.
+# The store MOVES out of /opt/nvm: the entrypoint copies /opt/nvm per session, and that copy must
+# stay ~3 MB rather than ~755 MB. Sessions reach these through one symlink
+# ($HOME/.nvm/versions/node -> here), which is the only layout nvm accepts — per-version symlinks
+# inside a real versions/node are invisible to its `find … -type d` enumeration.
+# Read-only by design: `nvm install` of an unbaked version is refused, `nvm use` of a baked one
+# is instant. Add a line here and rebuild instead.
+ARG NODE_LTS_LINES="18 20 22 24"
+RUN export NVM_DIR=/opt/nvm && . /opt/nvm/nvm.sh \
+    && for m in $NODE_LTS_LINES; do nvm install "$m"; done \
+    && nvm cache clear \
+    && mv /opt/nvm/versions/node /opt/nvm-versions \
+    && rm -rf /opt/nvm/versions \
+    # nvm's FIRST install writes alias/default. Left in the seeded copy it would silently boot
+    # every interactive shell on Node 18 instead of ${NODE_MAJOR}, with or without the flag.
+    && rm -f /opt/nvm/alias/default \
+    && chmod -R a+rX /opt/nvm-versions \
+    && ls /opt/nvm-versions
+
 # Shell lint/format tools, PINNED and fail-hard.
 #
 # Both are enforced by ./dev.sh lint and by CI, so a floating version means the same code

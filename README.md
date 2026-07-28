@@ -68,6 +68,9 @@ kib exec python app.py    # run anything else in the sandbox
 kib broker status         # host-side credential management
 kib audit                 # what would the host execute out of this repo?
 kib help                  # the full verb table
+
+kib --node-version=20 claude   # this terminal runs on Node 20 (18|20|22|24 are baked; 26 is
+                               # the system default). Per terminal, no download, no restart.
 ```
 
 Verbs win over programs: `kib bash` is an **error**, not a shell — pass-through is explicit,

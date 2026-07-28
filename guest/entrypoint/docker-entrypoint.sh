@@ -23,6 +23,97 @@ assert_no_sysadmin() {
 
 # Ensure Claude is also available at the native per-user location.
 # POSIX sh has no `local`, so the variables are prefixed to avoid clobbering the caller's.
+# Seed a private nvm per container. $NVM_DIR is both where nvm.sh lives and where `nvm install`
+# writes node builds, so the image's root-owned /opt/nvm cannot serve as it directly, and a
+# world-writable shared one would be sourced into a root `docker exec` shell. Runs from both
+# branches below because $HOME pre-exists (docker creates it as a mountpoint parent), which makes
+# `useradd -m` skip /etc/skel — this is the only seam every session passes through.
+ensure_user_nvm() {
+    eun_home="$1"
+
+    [ -s /opt/nvm/nvm.sh ] || return 0
+    [ ! -e "$eun_home/.nvm" ] || return 0
+
+    cp -R /opt/nvm "$eun_home/.nvm" 2>/dev/null || return 0
+    # The baked LTS store, shared and read-only, reached by ONE symlink: nvm enumerates versions
+    # with `find … -type d`, which skips symlinks, so per-version symlinks inside a real
+    # versions/ dir are invisible to it and only the parent-directory form works.
+    if [ -d /opt/nvm-versions ]; then
+        mkdir -p "$eun_home/.nvm/versions" 2>/dev/null || true
+        ln -s /opt/nvm-versions "$eun_home/.nvm/versions/node" 2>/dev/null || true
+    fi
+    # Root's copy lands root-owned; the already-the-user branch writes as the user already.
+    if [ "$(id -u)" = "0" ]; then
+        chown -Rh "$HOST_UID:$HOST_GID" "$eun_home/.nvm" 2>/dev/null || true
+    fi
+}
+
+# Resolve $KIB_NODE_VERSION (the `kib --node-version=` flag) to a bin dir, or empty for "leave
+# PATH alone". Echoes nothing and exits non-zero when the version is not baked: a session that
+# asked for 18 must not silently get the system node.
+#
+# The value crosses from host argv, so it is shape-checked BEFORE it touches a path and is then
+# resolved by globbing the store — never by concatenating input into a directory name.
+resolve_node_version() {
+    rnv_want="$1"
+
+    case "$rnv_want" in
+        system) return 0 ;;
+        v[0-9]* | [0-9]*) ;;
+        *)
+            echo "✗ kib: --node-version=$rnv_want is not a version." >&2
+            return 1
+            ;;
+    esac
+    case "$rnv_want" in
+        *[!0-9.v]*)
+            echo "✗ kib: --node-version=$rnv_want is not a version." >&2
+            return 1
+            ;;
+    esac
+
+    rnv_major="${rnv_want#v}"
+    rnv_major="${rnv_major%%.*}"
+    # Already the system node: nothing to prepend. Keeps --node-version=26 free of a baked copy.
+    if [ "$rnv_major" = "$(node --version 2>/dev/null | sed 's/^v//; s/\..*//')" ]; then
+        return 0
+    fi
+
+    # One build per major is baked, so the single glob match is the answer: `18` lands on
+    # v18.20.8, and a full `v18.20.8` resolves to the same dir.
+    rnv_found=""
+    for rnv_dir in "/opt/nvm-versions/v$rnv_major".*; do
+        case "$rnv_dir" in
+            *'*') break ;; # no glob match
+        esac
+        case "${rnv_dir##*/}" in
+            "v$rnv_want" | "$rnv_want" | "v$rnv_major".*) rnv_found="$rnv_dir" ;;
+        esac
+    done
+
+    if [ -n "$rnv_found" ] && [ -x "$rnv_found/bin/node" ]; then
+        echo "$rnv_found/bin"
+        return 0
+    fi
+
+    echo "✗ kib: node $rnv_want is not baked into this image. Available:" >&2
+    for rnv_dir in /opt/nvm-versions/v*; do
+        [ -d "$rnv_dir" ] && echo "    ${rnv_dir##*/}" >&2
+    done
+    echo "  (plus the system node, $(node --version 2>/dev/null))" >&2
+    echo "  Add it to NODE_LTS_LINES in the Dockerfile and run: kib build" >&2
+    return 1
+}
+
+# Sets KIB_PREPEND_PATH (consumed by both PATH exports below) for the requested node version.
+apply_node_version() {
+    [ -n "${KIB_NODE_VERSION:-}" ] || return 0
+    anv_bin="$(resolve_node_version "$KIB_NODE_VERSION")" || exit 1
+    [ -n "$anv_bin" ] || return 0
+    KIB_PREPEND_PATH="$anv_bin${KIB_PREPEND_PATH:+:$KIB_PREPEND_PATH}"
+    export KIB_PREPEND_PATH
+}
+
 ensure_user_local_claude() {
     eulc_home="$1"
     eulc_target="$eulc_home/.local/bin/claude"
@@ -140,8 +231,15 @@ if [ "$(id -u)" = "$HOST_UID" ]; then
     fi
     mkdir -p "$USER_HOME/.local/bin" "$USER_HOME/.local/share" "$USER_HOME/.config" "$USER_HOME/.cache" 2>/dev/null || true
     export HOME="$USER_HOME"
-    export PATH="$USER_HOME/.local/bin:$PATH"
     ensure_user_local_claude "$USER_HOME"
+    ensure_user_nvm "$USER_HOME"
+    # Sessions land HERE — `kib_run_session` execs this entrypoint through gosu, already as the
+    # target user — so this is the only branch --node-version has to reach. Deliberately not in
+    # the root branch: an unresolvable version there would abort container creation rather than
+    # one terminal. PATH, not an nvm alias: $HOME is shared, so an alias would leak to every
+    # other terminal, and only PATH reaches non-interactive shells (Claude's tools, npx MCPs).
+    apply_node_version
+    export PATH="$USER_HOME/.local/bin:${KIB_PREPEND_PATH:+$KIB_PREPEND_PATH:}$PATH"
     assert_no_sysadmin
     exec "$@"
 fi
@@ -183,6 +281,7 @@ chown "$HOST_UID:$HOST_GID" "/tmp/claude" "/tmp/claude-$HOST_UID" 2>/dev/null ||
 mkdir -p "$USER_HOME/.cache" "$USER_HOME/.config" "$USER_HOME/.local" "$USER_HOME/.local/bin" "$USER_HOME/.local/share" 2>/dev/null || true
 chown -R "$HOST_UID:$HOST_GID" "$USER_HOME/.cache" "$USER_HOME/.config" "$USER_HOME/.local" 2>/dev/null || true
 ensure_user_local_claude "$USER_HOME"
+ensure_user_nvm "$USER_HOME"
 chown -h "$HOST_UID:$HOST_GID" "$USER_HOME/.local/bin/claude" 2>/dev/null || true
 
 # ── Claude config: per-project session dir + shared assets ────────────────

@@ -89,7 +89,10 @@ legitimate need is a conversation, not a workaround.
 logged where you cannot see it (the FUSE sidecar's stderr, a different container), so do not
 speculate about the cause beyond the rules above. `EACCES` is an ordinary permission problem:
 check the mode and owner, and treat it as a normal error. `EROFS` is a read-only mount, which
-under `~/.claude-shared/` means the locked tier.
+under `~/.claude-shared/` means the locked tier, and under `~/.nvm/versions/node/` means the
+**baked Node store** — shared, read-only, and deliberately so: `nvm use 18|20|22|24` is instant,
+`nvm install` of anything else is refused. That is not repairable from in here. Say which version
+is missing; adding one is a line in the Dockerfile's `NODE_LTS_LINES` and a host `kib build`.
 
 ## What persists
 
