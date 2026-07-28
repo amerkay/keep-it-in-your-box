@@ -19,6 +19,10 @@ mkdir -p "$_mcp_tmp/kib" "$_mcp_tmp/sess" "$_mcp_tmp/proj" "$_mcp_tmp/claude"
 # Run a snippet with the host units loaded and a fake KIB_DIR/SESSION_BASE; cwd is the fake
 # project. CLAUDE_HOME/CLAUDE_JSON are stand-ins — the adopt and warn paths read CANONICAL
 # ~/.claude.json, and must never see the real one.
+#
+# </dev/null is load-bearing: `provider_add` chains an interactive `provider_login` when
+# `[ -t 0 ]`, so run from a terminal (not CI) the suite hung on a hidden credential prompt
+# whose text the command substitution had already swallowed. Nothing here may read stdin.
 _mcp_run() {
     (
         set +e
@@ -29,7 +33,7 @@ _mcp_run() {
         export CLAUDE_HOME="$_mcp_tmp/claude" CLAUDE_JSON="$_mcp_tmp/claude.json"
         cd "$_mcp_tmp/proj" || exit 1
         eval "$1"
-    )
+    ) </dev/null
 }
 
 # No MCP is built in, so enabled/hosted sets come from USER defs in providers.d + a present
