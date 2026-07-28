@@ -282,7 +282,7 @@ not scored.
 
 | Project | Why it matters to `kib` |
 |---|---|
-| [navikt/cplt](https://github.com/navikt/cplt) | **Closest philosophical match.** The same two rare controls — host-config guard *and* in-project secret blocking — kernel-enforced via Landlock instead of FUSE, plus the egress allowlist `kib` lacks. See `COMPARE_TO_CPLT.md`. |
+| [navikt/cplt](https://github.com/navikt/cplt) | **Closest philosophical match.** The same two rare controls — host-config guard *and* in-project secret blocking — kernel-enforced via Landlock instead of FUSE, plus the egress allowlist `kib` lacks. See [`docs/security/compare-to-cplt.md`](../security/compare-to-cplt.md). |
 | [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) | Anthropic's mandatory deny-write list is the most complete enumeration of host-executed config paths in the field. **Diffed 2026-07-27** — twelve paths added to `[protect]`, a warn-class tier added for mixed-use config, and the `extract` masking taken as format-aware `[redact]`. Note their `onExtractNoMatch: warn` default fails *open*; `kib`'s fallback is the stub. |
 | [aicontainer](https://github.com/stefanoginella/aicontainer) | The only other **container** project treating `.git/config`, `.git/hooks` and cross-project config as first-class. Also ships a digest-pinned Docker socket proxy. |
 | [yoloai](https://github.com/kstenerud/yoloai) | The other on-by-default credential broker, and a working audit trail of its own escapes — including a host-RCE via agent-controlled `.git/config` filter drivers. |

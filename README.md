@@ -238,7 +238,7 @@ thin runner over them, and both bash suites share the harness in `tests/lib.sh` 
 identically.
 
 [`tests/security-test.sh`](tests/security-test.sh) is the **in-sandbox** regression suite — one
-check per control the [audit](docs/SECURITY_AUDIT.md) established. Run it **inside** the box:
+check per control the [audit](docs/security/audit.md) established. Run it **inside** the box:
 
 ```bash
 kib exec ./tests/security-test.sh                 # everything
@@ -302,7 +302,7 @@ failed too.
 - **`host.docker.internal` is routable** to the host network stack.
 - **The project directory is writable**, by design — the agent's job is to edit your code.
 
-The full audit, including the controls that *are* closed, is in [`docs/SECURITY_AUDIT.md`](docs/SECURITY_AUDIT.md).
+The full audit, including the controls that *are* closed, is in [`docs/security/audit.md`](docs/security/audit.md).
 
 </details>
 
