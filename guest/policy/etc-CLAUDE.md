@@ -56,6 +56,12 @@
   these later, so writing one is host code execution from in here. `git config` is content-checked:
   ordinary keys pass; `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`, `core.pager`,
   `alias.*`, `filter.*.clean` are refused.
+  - **You may reproduce one, never author one.** A protected file *below* the project root may be
+    written if its bytes are **identical** to the same guarded name at the root — so
+    `git worktree add`, `clone`, a branch switch and `stash pop` all work on a repo that tracks
+    `.vscode/`. One byte different, or no copy at the root to match, and it is refused. The root
+    copy itself can never be written, whatever you do at a nested path. Committing a file first
+    does not make it writable: the check is the bytes, not what git thinks is tracked.
 - **Editable, but watched** — `.claude/settings*.json`, `.mcp.json`, `.zed/settings.json`,
   `.cargo/config.toml`, `mise.toml`, `.pre-commit-config.yaml`. These carry ordinary settings too,
   so you may write them. If you add a key naming a **command** (a hook, an MCP `command`, a

@@ -96,6 +96,25 @@ else
     fail "kib/guest/fuse.py lost its pread/pwrite passthrough" "expected os.pread + os.pwrite"
 fi
 
+# The mirror relaxation must never reach git's own executed paths. _mirror_anchor walks shorter
+# and shorter suffixes looking for one that reads PROTECT, so without the _git_sensitive gate
+# FIRST, a repo carrying a root `config` or `hooks/` twin would make `.git/config` mirrorable —
+# and those fire on an ordinary git command with nobody asking. Pinned on ORDER, not presence.
+# Body only, to the next method — a blank-line terminator would stop inside the docstring.
+_ma="$(awk '/^    def _mirror_anchor\(/ {f=1; next} f && /^    def / {exit} f' \
+    "$KIB_ROOT/kib/guest/fuse.py")"
+if ! printf '%s\n' "$_ma" | grep -q '_git_sensitive'; then
+    fail "_mirror_anchor no longer excludes git's own paths" \
+        ".git/config and .git/hooks/* would become mirrorable — never allow one"
+elif [ "$(printf '%s\n' "$_ma" | grep -n '_git_sensitive' | head -1 | cut -d: -f1)" \
+    -lt "$(printf '%s\n' "$_ma" | grep -n 'for i in range' | head -1 | cut -d: -f1)" ]; then
+    pass "the mirror rule excludes git's own paths before any suffix walk"
+else
+    fail "_mirror_anchor walks suffixes before checking _git_sensitive" \
+        "a root 'config'/'hooks' twin would make .git/config mirrorable"
+fi
+unset _ma
+
 # Every host process backgrounded from the launch path must close fds 200/201. One miss and the
 # child holds the project's SHARED lock, so the last terminal out cannot take it exclusively —
 # teardown never runs and the containers are stranded. Shipped that way in the background image

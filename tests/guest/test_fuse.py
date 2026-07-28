@@ -254,9 +254,9 @@ def test_lookalike_and_mixed_use_paths_are_not_protected(
 )
 def test_a_guarded_path_cannot_be_deleted_either(redact: Callable[..., Any], path: str) -> None:
     """Protection covers unlink/rmdir, not only the write: a delete is half of a REPLACE, and
-    what is deleted here is the file a host `git checkout` puts straight back. The cost is that
-    a guarded path which is also TRACKED cannot be checked out in the box at all — see
-    redaction-config-guard.md."""
+    what is deleted here is the file a host `git checkout` puts straight back. Every path here
+    is an ANCHOR (or git's own), so none of them is mirrorable and the refusal is absolute —
+    see the mirror cases below for the nested form, and redaction-config-guard.md."""
     with pytest.raises(OSError) as exc:
         redact("").unlink(path)
     assert exc.value.errno == errno.EPERM
@@ -287,6 +287,160 @@ def test_a_gitdir_is_recognised_by_layout_not_by_name(
     assert r._is_gitdir("store") is True
     assert r._protected("/store/config") is True
     assert r._protected("/store/hooks/pre-commit") is True
+
+
+# ── mirrors: reproduce, never author ─────────────────────────────
+# A guarded path may be written at a NESTED location only as a byte-identical copy of the same
+# guarded tail at the project ROOT. That is what lets `git worktree add` check out a repo which
+# tracks .vscode/, without ever letting the box author a file the host executes.
+ENVRC = "export FOO=1\n"
+
+
+@pytest.fixture
+def anchored(redact: Callable[..., Any], tmp_path: Path) -> Any:
+    """A Redact whose src carries the root anchors a host would have committed."""
+    src = tmp_path / "src"
+    (src / ".vscode").mkdir(parents=True, exist_ok=True)
+    (src / ".vscode" / "settings.json").write_text('{"a": 1}\n')
+    (src / ".envrc").write_text(ENVRC)
+    (src / "wt").mkdir(exist_ok=True)
+    return redact("")
+
+
+def _put(r: Any, path: str, data: bytes) -> None:
+    """create + write + release, the only route by which a mirror may appear."""
+    fh = r.create(path, 0o644)
+    try:
+        if data:
+            r.write(path, data, 0, fh)
+    finally:
+        r.release(path, fh)
+
+
+def test_a_nested_guarded_path_may_be_written_when_it_matches_the_root_copy(
+    anchored: Any, tmp_path: Path
+) -> None:
+    """The checkout half of `git worktree add`. The root copy is one the box cannot write, so
+    reproducing it grants nothing the host does not already run."""
+    _put(anchored, "/wt/.envrc", ENVRC.encode())
+    assert (tmp_path / "src" / "wt" / ".envrc").read_text() == ENVRC
+
+
+def test_a_nested_guarded_path_is_refused_when_one_byte_differs(anchored: Any) -> None:
+    """The bypass that sank the previous attempt: the box can `git commit`, so it decides what
+    is "tracked" and could check out a payload of its own. Bytes are the boundary, not tracking."""
+    fh = anchored.create("/wt/.envrc", 0o644)
+    with pytest.raises(OSError) as exc:
+        anchored.write("/wt/.envrc", b"export FOO=2\n", 0, fh)
+    assert exc.value.errno == errno.EPERM
+
+
+def test_a_nested_guarded_path_with_no_root_copy_is_refused(anchored: Any) -> None:
+    """The exact payload shape: .vscode/settings.json is tracked, tasks.json is not, and
+    tasks.json is the one VS Code executes on folderOpen."""
+    with pytest.raises(OSError) as exc:
+        anchored.create("/wt/.vscode/tasks.json", 0o644)
+    assert exc.value.errno == errno.EPERM
+
+
+@pytest.mark.parametrize("path", ["/.envrc", "/.vscode/settings.json", "/.vscode"])
+def test_the_root_copy_is_never_its_own_mirror(anchored: Any, path: str) -> None:
+    """An anchor has no shorter guarded suffix than itself, so it stays absolutely immutable —
+    which is the whole reason a mirror of it can be trusted."""
+    assert anchored._mirror_anchor(anchored._rel(path)) is None
+    assert anchored._mirrorable(path) is False
+
+
+def test_a_short_mirror_is_unlinked_at_release(anchored: Any, tmp_path: Path) -> None:
+    """write() cannot catch this: a prefix of the anchor matches byte for byte as far as it
+    goes, and a truncated script is a different script (`rm -rf /tmp/x` cut to `rm -rf /`)."""
+    fh = anchored.create("/wt/.envrc", 0o644)
+    anchored.write("/wt/.envrc", ENVRC.encode()[:6], 0, fh)
+    with pytest.raises(OSError) as exc:
+        anchored.release("/wt/.envrc", fh)
+    assert exc.value.errno == errno.EPERM
+    assert not (tmp_path / "src" / "wt" / ".envrc").exists()  # the unlink IS the enforcement
+
+
+def test_a_read_only_open_of_a_protected_path_is_never_size_checked(
+    anchored: Any, tmp_path: Path
+) -> None:
+    """release() gets no flags. If it inferred one, every ordinary read of .git/config — which
+    has no anchor — would unlink it."""
+    (tmp_path / "src" / ".git").mkdir(exist_ok=True)
+    (tmp_path / "src" / ".git" / "config").write_text(SAFE)
+    anchored.release("/.git/config", anchored.open("/.git/config", os.O_RDONLY))
+    assert (tmp_path / "src" / ".git" / "config").exists()
+
+
+@pytest.mark.parametrize("path", ["/wt/.git/config", "/wt/.git/hooks/pre-commit"])
+def test_git_paths_are_never_mirrorable(anchored: Any, tmp_path: Path, path: str) -> None:
+    """Checked before any suffix walk. These fire on an ordinary git command with nobody
+    asking, so 'the host already runs identical bytes elsewhere' is not a reason to allow one."""
+    (tmp_path / "src" / ".git" / "hooks").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "src" / ".git" / "config").write_text(SAFE)
+    (tmp_path / "src" / ".git" / "hooks" / "pre-commit").write_text("#!/bin/sh\n")
+    assert anchored._mirror_anchor(anchored._rel(path)) is None
+
+
+def test_a_redacted_path_is_never_mirrorable(redact: Callable[..., Any], tmp_path: Path) -> None:
+    """Mirroring is a PROTECT relaxation only: a copy of a secret is still the secret."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / ".env").write_text("A=1\n")
+    r = redact("")
+    assert r._mirror_anchor("wt/.env") is None
+    with pytest.raises(OSError) as exc:
+        r.create("/wt/.env", 0o644)
+    assert exc.value.errno == errno.EPERM
+
+
+def test_a_mirror_cannot_be_laundered_in_by_rename(anchored: Any, tmp_path: Path) -> None:
+    """A rename moves bytes the guard never compared. Without the opt-out, writing the payload
+    to an unguarded name and renaming it onto a guarded one bypasses every content check."""
+    (tmp_path / "src" / "wt" / "payload").write_text("export FOO=2\n")
+    with pytest.raises(OSError) as exc:
+        anchored.rename("/wt/payload", "/wt/.envrc")
+    assert exc.value.errno == errno.EPERM
+
+
+@pytest.mark.parametrize(("op", "source"), [("symlink", "/etc/passwd"), ("link", "/wt/payload")])
+def test_a_mirror_cannot_be_laundered_in_by_a_link(
+    anchored: Any, tmp_path: Path, op: str, source: str
+) -> None:
+    """A symlink's content is a path, and a hardlink's inode keeps changing after the check."""
+    (tmp_path / "src" / "wt" / "payload").write_text("export FOO=2\n")
+    with pytest.raises(OSError) as exc:
+        getattr(anchored, op)("/wt/.envrc", source)
+    assert exc.value.errno == errno.EPERM
+
+
+def test_a_mirror_cannot_be_reshaped_by_truncate(anchored: Any) -> None:
+    """A standalone truncate cannot produce an identical copy, only a short one — and it never
+    passes through release()'s size check."""
+    _put(anchored, "/wt/.envrc", ENVRC.encode())
+    with pytest.raises(OSError) as exc:
+        anchored.truncate("/wt/.envrc", 6)
+    assert exc.value.errno == errno.EPERM
+
+
+def test_a_guarded_directory_may_be_created_when_the_root_one_exists(
+    anchored: Any, tmp_path: Path
+) -> None:
+    """`git worktree add` makes .vscode/ before it writes into it. An empty directory executes
+    nothing, and what goes inside is checked file by file."""
+    anchored.mkdir("/wt/.vscode", 0o755)
+    assert (tmp_path / "src" / "wt" / ".vscode").is_dir()
+
+
+def test_a_mirror_may_be_deleted_but_its_anchor_may_not(anchored: Any, tmp_path: Path) -> None:
+    """`git worktree remove` has to work. Deleting is safe precisely because recreating is
+    constrained: the only thing that can come back is the anchor's own bytes."""
+    _put(anchored, "/wt/.envrc", ENVRC.encode())
+    anchored.unlink("/wt/.envrc")
+    assert not (tmp_path / "src" / "wt" / ".envrc").exists()
+    with pytest.raises(OSError) as exc:
+        anchored.unlink("/.envrc")
+    assert exc.value.errno == errno.EPERM
 
 
 # ── git config write validation ──────────────────────────────────

@@ -155,6 +155,12 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   is *detected* by `audit_project_configs`. Don't promote one: rename-validation only works for
   temp+rename writers, so a `[protect]` on `.claude/settings.json` breaks Claude's own "always
   allow" with nothing to replace it. (`redaction-config-guard.md`)
+- **A nested `[protect]` write is allowed only as a byte-identical copy of the same guarded tail
+  at the project ROOT — never carve out a worktree dir or an "editor config" tier.** That was
+  tried (`feat/worktree-editor-carveout`, reverted) and is bypassable with zero detection: the box
+  can `git commit`, so it decides what "tracked" means, and a committed `.vscode/tasks.json`
+  checks out pristine past a dirty-file detector. The anchor stays immutable; that is what makes a
+  copy of it safe. (`redaction-config-guard.md`)
 - **Don't add a `[mask]` section — `[redact]` is format-aware** — JSON and `.env*` read as keys
   with values replaced, everything else keeps the stub. Making it a policy choice needs a third
   verdict, a precedence table and an enable path, and lets a hostile repo pick the leakier

@@ -5,6 +5,10 @@ with every value redacted (JSON and dotenv) or as a flat stub (anything else —
 paths the guard PROTECTS read through untouched and refuse writes, since stubbing
 `.git/config` would break in-container git outright.
 
+One relaxation, and only for PROTECT: a guarded path may be written at a NESTED location if
+its bytes reproduce the same guarded tail at the project ROOT exactly (`_mirror_anchor`).
+Reproducing what the host already executes grants nothing; authoring is still refused.
+
 Rule parsing lives in `kib.shared.rules` and the host-executed-value tables in
 `kib.shared.dangerous`. This module owns the filesystem translation, plus the one guard needing
 depth-aware logic no tail rule can express: git's executed paths nest arbitrarily under
@@ -51,6 +55,9 @@ REFUSED = errno.EPERM
 # `--separate-git-dir` and a `gitdir:` redirect all put config+hooks somewhere other than a
 # directory called '.git'.
 GITDIR_MARKERS = ("HEAD", "objects", "refs")
+
+#: Any flag that makes an open able to modify the file.
+WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
 
 # ── format-aware redaction ───────────────────────────────────────
 # A redacted file whose *shape* is known reads as its key names with every value replaced.
@@ -157,6 +164,10 @@ class Redact(Operations):  # type: ignore[misc]
         # one size and serve another, splicing two versions across a partial read. Keyed on
         # identity+mtime+size, capped because a project can hold any number of redacted files.
         self._rendered: dict[tuple[str, int, int, int], bytes] = {}
+        # fds opened for WRITING at a protected path — the mirror candidates. release() is
+        # handed no flags, and a read-only open of .git/config reaching its size check would
+        # unlink the file.
+        self._mirroring: set[int] = set()
 
     def _render(self, rel: str) -> bytes:
         """Cached bytes for a redacted file. A cache miss on a racing write just recomputes."""
@@ -210,6 +221,81 @@ class Redact(Operations):  # type: ignore[misc]
         """True if writes to this path must be refused but reads pass through."""
         rel = self._rel(path)
         return rel != "" and (self._verdict(rel) == rules.PROTECT or self._git_sensitive(rel))
+
+    # ── mirrors: reproduce, never author ─────────────────────────
+    # A guarded path may be written at a NESTED location iff its bytes are identical to the same
+    # guarded tail at the project ROOT — which the box cannot write, so those bytes are the
+    # host's own. Reproducing what the host already executes grants no capability; a payload
+    # differs from the anchor, or has none, and is refused. This is what lets `git worktree add`,
+    # `clone`, a branch switch and `stash pop` check out a repo that tracks `.vscode/`.
+    #
+    # NOT scoped to worktrees, deliberately: the box can `git commit`, so it decides what
+    # "tracked" means, and any carve-out keyed on a location or a file type is bypassable by
+    # committing the payload first (redaction-config-guard.md).
+    def _mirror_anchor(self, rel: str) -> str | None:
+        """The root-anchored twin a nested guarded path may reproduce, byte for byte.
+
+        Guard rules are TAIL-anchored, so the shortest suffix that still reads PROTECT is the
+        rule's own tail — the matcher already answers this, no rule identity needed.
+        """
+        if self._git_sensitive(rel) or self._verdict(rel) != rules.PROTECT:
+            return None  # git's own paths and [redact]: never mirrorable
+        parts = rel.split("/")
+        for i in range(len(parts) - 1, 0, -1):  # shortest first; i is never 0, so never itself
+            if self._verdict("/".join(parts[i:])) == rules.PROTECT:
+                return "/".join(parts[i:])
+        return None
+
+    def _mirrorable(self, path: str) -> bool:
+        """True if this path may be written as a copy of an anchor that exists.
+
+        `lexists` covers both shapes at once: `mkdir …/w/.vscode` resolves to `.vscode`, a real
+        directory (and an empty directory executes nothing), while `…/w/.vscode/tasks.json`
+        resolves to a `tasks.json` the host never wrote — absent, so refused.
+        """
+        anchor = self._mirror_anchor(self._rel(path))
+        return anchor is not None and os.path.lexists(self._real(anchor))
+
+    def _anchor_bytes(self, path: str, offset: int, size: int) -> bytes:
+        """The anchor's bytes at this offset. b'' when there is no readable anchor, which makes
+        any non-empty write mismatch and be refused."""
+        anchor = self._mirror_anchor(self._rel(path))
+        if anchor is None:
+            return b""
+        try:
+            fd = os.open(self._real(anchor), os.O_RDONLY)
+        except OSError:
+            return b""
+        try:
+            return os.pread(fd, size, offset)
+        finally:
+            os.close(fd)
+
+    def _track_mirror(self, path: str, fd: int) -> None:
+        """Record an fd opened for writing at a protected path, for release()'s size check."""
+        if self._protected(path):
+            self._mirroring.add(fd)
+
+    def _deny_unless_whole_mirror(self, path: str) -> None:
+        """Refuse, and leave nothing behind, unless the finished file matches the anchor's size.
+
+        Size is the one thing write() cannot check: a SHORT mirror matches its anchor byte for
+        byte as far as it goes, and a truncated script is a different script (`rm -rf /tmp/x`
+        cut to `rm -rf /`). The UNLINK is the enforcement here — the kernel does not reliably
+        surface a release() error to close(), so the errno is only a courtesy.
+        """
+        real = self._real(path)
+        anchor = self._mirror_anchor(self._rel(path))
+        try:
+            if anchor is not None and os.path.getsize(real) == os.path.getsize(self._real(anchor)):
+                return
+        except OSError:
+            pass
+        try:
+            os.unlink(real)
+        except OSError:
+            pass
+        raise FuseOSError(REFUSED)
 
     def _classify(self, path: str) -> tuple[str, str]:
         """Return `('pass'|'file'|'dir'|'inside', masked_rel_root)`.
@@ -325,14 +411,17 @@ class Redact(Operations):  # type: ignore[misc]
     # ── reads ────────────────────────────────────────────────────
     def open(self, path: str, flags: int) -> int:
         kind, _ = self._classify(path)
-        if flags & (os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC):
-            # Protected paths are writable only through the validated rename below;
-            # nothing legitimate writes .git/config in place (git uses config.lock).
-            if kind != "pass" or self._protected(path):
-                raise FuseOSError(REFUSED)
+        if flags & WRITE_FLAGS:
+            # A protected path opens for writing only as a mirror, or through the validated
+            # rename below; nothing legitimate writes .git/config in place (git uses
+            # config.lock).
+            self._deny_if_masked(path)
         if kind != "pass":
             return 0  # virtual fd; reads served from the render/STUB
-        return os.open(self._real(path), flags)
+        fd = os.open(self._real(path), flags)
+        if flags & WRITE_FLAGS:
+            self._track_mirror(path, fd)
+        return fd
 
     # pread/pwrite, NEVER lseek+read. With nothreads=False several workers serve one open file
     # and share the fd's single offset; racing lseeks let one read from another's offset, and a
@@ -349,12 +438,24 @@ class Redact(Operations):  # type: ignore[misc]
     def release(self, path: str, fh: int) -> int:
         if fh and fh != 0:
             os.close(fh)
+        if fh in self._mirroring:
+            self._mirroring.discard(fh)
+            if self._protected(path):
+                self._deny_unless_whole_mirror(path)
         return 0
 
     # ── writes (passthrough for unmasked paths) ──────────────────
-    def _deny_if_masked(self, path: str) -> None:
+    def _deny_if_masked(self, path: str, *, mirror_ok: bool = True) -> None:
+        """Refuse a write to a masked path.
+
+        `mirror_ok=False` refuses even an exact copy of an anchor, for the ops that move bytes
+        the guard never compared (rename, symlink, link) or reshape a mirror without writing
+        one (truncate). A mirror is creatable through create+write only.
+        """
         kind, _ = self._classify(path)
-        if kind != "pass" or self._protected(path):
+        if kind != "pass":
+            raise FuseOSError(REFUSED)
+        if self._protected(path) and not (mirror_ok and self._mirrorable(path)):
             raise FuseOSError(REFUSED)
 
     # ── .git/config: validated writes ────────────────────────────
@@ -431,13 +532,20 @@ class Redact(Operations):  # type: ignore[misc]
         self._deny_if_masked(path)
         fd = os.open(self._real(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
         self._adopt(fd=fd)
+        self._track_mirror(path, fd)
         return fd
 
     def write(self, path: str, data: bytes, offset: int, fh: int) -> int:
+        # A mirror may only REPRODUCE: every byte is compared with the anchor's at the same
+        # offset before it lands, so a payload is refused at its first differing byte and
+        # nothing partial ever reaches the disk.
+        if self._protected(path) and data != self._anchor_bytes(path, offset, len(data)):
+            raise FuseOSError(REFUSED)
         return os.pwrite(fh, data, offset)  # same offset race as read(), same fix
 
     def truncate(self, path: str, length: int, fh: int | None = None) -> None:
-        self._deny_if_masked(path)
+        # No mirror: a standalone truncate cannot produce an identical copy, only a short one.
+        self._deny_if_masked(path, mirror_ok=False)
         with open(self._real(path), "r+b") as f:
             f.truncate(length)
 
@@ -456,12 +564,14 @@ class Redact(Operations):  # type: ignore[misc]
         self._adopt(real)
 
     def rename(self, old: str, new: str) -> None:
-        self._deny_if_masked(old)
+        # No mirror at either end: a rename moves bytes the guard never compared, so it would
+        # launder an unchecked payload onto a host-executed name in one op.
+        self._deny_if_masked(old, mirror_ok=False)
         if self._is_git_config(self._rel(new)):
             if not self._git_config_write_ok(self._real(old), self._real(new)):
                 raise FuseOSError(REFUSED)
         else:
-            self._deny_if_masked(new)
+            self._deny_if_masked(new, mirror_ok=False)
         os.rename(self._real(old), self._real(new))
 
     def chmod(self, path: str, mode: int) -> None:
@@ -484,18 +594,22 @@ class Redact(Operations):  # type: ignore[misc]
         os.utime(self._real(path), times=times)
 
     def symlink(self, target: str, source: str) -> None:
-        self._deny_if_masked(target)
+        # No mirror: a symlink's content is a path, never the anchor's bytes — it could point
+        # anywhere while occupying a host-executed name.
+        self._deny_if_masked(target, mirror_ok=False)
         real = self._real(target)
         os.symlink(source, real)
         self._adopt(real, deref=False)  # the link itself, never what it points at
 
     def link(self, target: str, source: str) -> None:
-        self._deny_if_masked(target)
+        self._deny_if_masked(target, mirror_ok=False)
         # The source matters as much as the name: a hardlink is a second directory entry
         # for the *same inode*, and the VFS does not re-resolve it (a symlink does, which
         # is why the symlink form is already blocked). Without this, an unmasked alias
         # launders a protected inode past every path-based check — readable and writable.
-        self._deny_if_masked(source)
+        # No mirror either way: the inode's bytes are whatever the source holds, and it
+        # keeps changing after the check.
+        self._deny_if_masked(source, mirror_ok=False)
         os.link(self._real(source), self._real(target))
 
     def flush(self, path: str, fh: int) -> int:

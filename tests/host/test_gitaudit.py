@@ -20,6 +20,19 @@ def git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
 
 
+def nested_hooks(path: Path) -> Path:
+    """Init a nested repo and return its hooks dir, created.
+
+    The container sets `GIT_TEMPLATE_DIR=` (so a `git clone` in the box does not have to create
+    a `.git/hooks` the guard refuses), which means git makes no hooks dir at all — and these
+    tests are about what the audit finds in one.
+    """
+    subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True)
+    hooks = path / ".git" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    return hooks
+
+
 def test_a_clean_repo_has_no_findings(git_repo: Callable[..., Path]) -> None:
     repo = git_repo("clean")
     assert not gitaudit.audit(str(repo)).any
@@ -77,9 +90,7 @@ def test_an_executable_hook_in_a_nested_git_dir_is_refuse_class(
     git_repo: Callable[..., Path],
 ) -> None:
     top = git_repo("outer")
-    inner = top / "sub"
-    subprocess.run(["git", "init", "-q", str(inner)], check=True, capture_output=True)
-    hook = inner / ".git" / "hooks" / "pre-commit"
+    hook = nested_hooks(top / "sub") / "pre-commit"
     hook.write_text("#!/bin/sh\necho hi\n")
     hook.chmod(0o755)
     findings = gitaudit.audit(str(top))
@@ -100,9 +111,7 @@ def test_the_top_level_hooks_dir_is_left_alone(git_repo: Callable[..., Path]) ->
 
 def test_sample_hooks_are_ignored(git_repo: Callable[..., Path]) -> None:
     top = git_repo("outer2")
-    inner = top / "sub"
-    subprocess.run(["git", "init", "-q", str(inner)], check=True, capture_output=True)
-    sample = inner / ".git" / "hooks" / "pre-commit.sample"
+    sample = nested_hooks(top / "sub") / "pre-commit.sample"
     sample.write_text("#!/bin/sh\n")
     sample.chmod(0o755)
     assert gitaudit.audit_nested_hooks(str(top)) == []
@@ -227,9 +236,7 @@ def test_a_renamed_path_does_not_shift_the_rest(git_repo: Callable[..., Path]) -
 def test_prune_dirs_are_not_walked(git_repo: Callable[..., Path]) -> None:
     """node_modules is thousands of directories and can hold nothing we care about."""
     top = git_repo("pruned")
-    junk = top / "node_modules" / "pkg"
-    subprocess.run(["git", "init", "-q", str(junk)], check=True, capture_output=True)
-    hook = junk / ".git" / "hooks" / "pre-commit"
+    hook = nested_hooks(top / "node_modules" / "pkg") / "pre-commit"
     hook.write_text("#!/bin/sh\n")
     hook.chmod(0o755)
     assert gitaudit.audit_nested_hooks(str(top)) == []

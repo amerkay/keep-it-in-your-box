@@ -291,6 +291,12 @@ start_container() {
     # resolver, so there is nothing to sync.
     is_macos || add_resolv_sync_args
 
+    # An empty template dir, so `git init`/`clone` create no .git/hooks at all. Git copies the
+    # sample hooks from /usr/share/git-core/templates otherwise, and the guard rightly refuses
+    # to let the box create a directory the host executes — which failed the whole clone. The
+    # samples are all disabled examples, so nothing is lost. (redaction-config-guard.md)
+    ARGS+=(-e GIT_TEMPLATE_DIR=)
+
     local git_name git_email
     git_name="$(git config --global user.name 2>/dev/null || true)"
     git_email="$(git config --global user.email 2>/dev/null || true)"

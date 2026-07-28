@@ -326,12 +326,58 @@ for p in .cursor/rules/style.md .claude/commands/deploy.md .claude/settings.json
         bash -c "mkdir -p \"\$(dirname '$ARTIFACTS/$p')\" 2>/dev/null; echo '{}' > '$ARTIFACTS/$p'"
 done
 
-# Protection covers DELETION too, everywhere and without exception — a delete is half of a
-# replace, and what is removed here is what a host `git checkout` puts straight back. Probed on
-# a FIXTURE .git/config: if the guard ever regressed the only casualty is one the next run
-# rebuilds. (Consequence worth knowing: a guarded path that is also tracked cannot be checked
-# out in the box at all, so `git worktree add`/`clone` of such a repo fails — by design.)
+# Protection covers DELETION too — a delete is half of a replace, and what is removed here is
+# what a host `git checkout` puts straight back. Probed on a FIXTURE .git/config: if the guard
+# ever regressed the only casualty is one the next run rebuilds. A NESTED guarded path whose
+# root twin exists is deletable (see the mirror section below); an anchor never is.
 deny "a guarded path cannot be DELETED, only read" rm -f "$REPO/.git/config"
+
+# ═════════════════════════════════════════════════════════════════
+section "Mirrors — reproduce, never author"
+
+# A guarded path may be written at a NESTED location iff its bytes reproduce the same guarded
+# tail at the project ROOT, which the box cannot write. That is what makes `git worktree add`
+# work on a repo tracking .vscode/ without ever letting the box author a file the host executes.
+# NOT keyed on the location or the file type: the box can `git commit`, so it decides what
+# "tracked" means, and any carve-out resting on that is bypassable by committing the payload.
+#
+# The anchor has to be a real one the HOST wrote, so this uses kib's own tracked .vscode/ —
+# every write below is nested under tests/.state/, which resolves to it.
+ANCHOR="$KIB_ROOT/.vscode/settings.json"
+WT="$ARTIFACTS/mirror/wt"
+if [ ! -f "$ANCHOR" ]; then
+    skip "mirror semantics" "this checkout has no .vscode/settings.json to anchor against"
+else
+    rm -rf "$WT" 2>/dev/null
+    allow "a nested guarded dir may be created when the root one exists" mkdir -p "$WT/.vscode"
+    allow "a nested guarded file may reproduce the root copy" \
+        cp "$ANCHOR" "$WT/.vscode/settings.json"
+    allow "…and what landed is byte-identical" cmp -s "$ANCHOR" "$WT/.vscode/settings.json"
+    deny "one appended byte is refused" bash -c "printf x >> '$WT/.vscode/settings.json'"
+    deny "a nested guarded file with NO root copy (the folderOpen payload)" \
+        bash -c "echo '{}' > '$WT/.vscode/tasks.json'"
+    deny "a payload cannot be RENAMED onto a guarded name" \
+        bash -c "echo evil > '$WT/spare'; mv '$WT/spare' '$WT/.vscode/settings.json'"
+    deny "a symlink cannot occupy a guarded name" \
+        ln -sfn /etc/passwd "$WT/.vscode/settings.json"
+    deny "a hardlink cannot alias a payload onto one" \
+        bash -c "echo evil > '$WT/spare2'; ln -f '$WT/spare2' '$WT/.vscode/settings.json'"
+    deny "a mirror cannot be TRUNCATED to a shorter script" \
+        bash -c ": > '$WT/.vscode/settings.json'"
+    # Deleting a mirror is deliberate: git worktree remove needs it, and the only thing that
+    # can come back is the anchor's own bytes. Re-made first, because the probe above is
+    # refused by unlinking what it produced — and SKIPPED if there is no mirror to delete,
+    # since `rm -f` of a missing file succeeds and would report a pass for nothing.
+    cp "$ANCHOR" "$WT/.vscode/settings.json" 2>/dev/null || true
+    if [ -f "$WT/.vscode/settings.json" ]; then
+        allow "regression: a mirror can be deleted (git worktree remove)" \
+            rm -f "$WT/.vscode/settings.json"
+    else
+        skip "a mirror can be deleted" "no mirror could be created to delete"
+    fi
+fi
+deny "the ROOT copy stays immutable — a mirror never unlocks its anchor" \
+    bash -c "printf x >> '$ANCHOR'"
 
 # ═════════════════════════════════════════════════════════════════
 section "Redaction — .env and .kibignore"
