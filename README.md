@@ -91,7 +91,7 @@ Measured against six other agent sandboxes on the controls that decide whether a
 <sub>✅ enforced · ◑ partial or caveated · ✕ none / exposed · — not applicable.
 ¹ The only sandbox whose redaction also covers files created *after* launch. ² `/dev/null` mask, but `.env` is `denyWrite`, not `denyRead`, in the shipped template. ³ Files are copied in honouring `.gitignore`, so gitignored secrets never enter — not masked, but not present. ⁴ On by default; a launch with no stored token and no interactive login falls back to mounting the real credential, with a warning.</sub>
 
-No project here does everything. `kib` is the only one that **validates `.git/config`** instead of blocking it, and the only one that **mediates the clipboard** rather than granting or withholding it wholesale — and one of the few that redacts secrets *created after launch*. Egress is the one column it deliberately concedes; see [Accepted risks](#accepted-risks) for why a default-deny allowlist is the wrong trade here. Full matrix, sources, and per-project caveats: [`docs/competitive-review/`](docs/competitive-review/).
+No project here does everything. `kib` is the only one that **validates `.git/config`** instead of blocking it, and the only one that **mediates the clipboard** rather than granting or withholding it wholesale — and one of the few that redacts secrets *created after launch*. Egress is the one column it deliberately concedes; see [Accepted risks](#accepted-risks) for why a default-deny allowlist is the wrong trade here. Full matrix, sources, and per-project caveats: [`docs/competitive-review.md`](docs/competitive-review.md).
 
 <h2 id="hood"><img src="docs/assets/readme/section-hood.svg" width="100%" alt="Under the hood"></h2>
 

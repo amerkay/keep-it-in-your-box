@@ -398,7 +398,7 @@ editor / pastes into a terminal on that Mac — that is where every chain below 
 
 Static reading of every host- and guest-side control, then **live exploitation from inside a
 running sandbox**, then a structured multi-agent sweep: three research agents compiled a candidate
-list from `docs/competitive-review/`, the prior audit's prior-art set, and 2024–2026 CVEs; six test
+list from `docs/competitive-review.md`, the prior audit's prior-art set, and 2024–2026 CVEs; six test
 agents each drove one category live. **Non-destructive throughout** — payloads proven *unresolvable*
 (`git config --get` → nothing), writes proven *refused* (EPERM), the clipboard exercised only with
 **benign printable markers** (never a real `ESC[201~`), symlink proofs pointed at benign targets
