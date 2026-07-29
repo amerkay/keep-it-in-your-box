@@ -622,3 +622,27 @@ elif [ "${rm_calls:-0}" -eq 0 ]; then
 else
     pass "the project container survives a startup crash long enough to be logged"
 fi
+
+# The npx shim has to OUTRANK the node version cache, not merely exist. Every cached node ships
+# its own npx and $KIB_PREPEND_PATH sits ahead of /usr/local/bin, where the shim used to live —
+# so on any project with a Node pin it was shadowed, chrome-devtools-mcp launched Chrome with the
+# inner sandbox on, and the browser SIGTRAP'd at startup once per tool call. Both PATH exports
+# must therefore LEAD with the shim dir, and the shim's self-skip must name that same dir: the
+# heredoc is quoted, so the path in it is a literal that nothing else keeps honest.
+_ep="$KIB_ROOT/guest/entrypoint/docker-entrypoint.sh"
+_shim_dir="$(sed -n 's/^KIB_SHIM_DIR=//p' "$_ep")"
+_path_exports="$(grep -c '^[[:space:]]*export PATH=' "$_ep" || true)"
+# shellcheck disable=SC2016  # literal grep pattern: it must match the source text verbatim
+_shim_first="$(grep -c '^[[:space:]]*export PATH="\$KIB_SHIM_DIR:' "$_ep" || true)"
+if [ -z "$_shim_dir" ]; then
+    fail "the entrypoint no longer defines KIB_SHIM_DIR" \
+        "the npx shim needs a directory of its own to be first on PATH"
+elif [ "${_path_exports:-0}" -eq 0 ] || [ "$_path_exports" != "$_shim_first" ]; then
+    fail "a PATH export does not lead with \$KIB_SHIM_DIR ($_shim_first of $_path_exports do)" \
+        "a pinned node's bin then shadows the npx shim and Chrome launches sandboxed"
+else
+    # shellcheck disable=SC2016  # ditto: \$d is the shim's variable, not this script's
+    is "the npx shim skips itself by its own dir" "$_shim_dir/npx" \
+        "$(sed -n 's|.*\[ "\$d/npx" != \([^ ]*\) \].*|\1|p' "$_ep")"
+fi
+unset _ep _shim_dir _path_exports _shim_first

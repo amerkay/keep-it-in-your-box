@@ -5,6 +5,11 @@ set -e
 HOST_UID="${HOST_UID:-1000}"
 HOST_GID="${HOST_GID:-1000}"
 
+# kib's own shims (the npx wrapper below). Its own directory, FIRST in both PATH exports: every
+# node in the version cache ships an npx, and $KIB_PREPEND_PATH puts that bin ahead of
+# /usr/local/bin — which is where this used to live, silently shadowed on every pinned project.
+KIB_SHIM_DIR=/opt/kib-shims
+
 # Fail-closed cap check. This container is created with no CAP_SYS_ADMIN at all — the redacted
 # view is mounted by the FUSE sidecar, in its own container — so seeing it here means the launch
 # path regressed to the shape where the agent could mount. Baked into the image, so a sandboxed
@@ -263,7 +268,7 @@ if [ "$(id -u)" = "$HOST_UID" ]; then
     # one terminal. PATH, not an nvm alias: $HOME is shared, so an alias would leak to every
     # other terminal, and only PATH reaches non-interactive shells (Claude's tools, npx MCPs).
     apply_node_version
-    export PATH="$USER_HOME/.local/bin:${KIB_PREPEND_PATH:+$KIB_PREPEND_PATH:}$PATH"
+    export PATH="$KIB_SHIM_DIR:$USER_HOME/.local/bin:${KIB_PREPEND_PATH:+$KIB_PREPEND_PATH:}$PATH"
     assert_no_sysadmin
     exec "$@"
 fi
@@ -495,19 +500,26 @@ ln -sf "$(readlink -f /usr/local/bin/google-chrome-stable)" /opt/google/chrome/c
 # with "Target.setDiscoverTargets: Target closed". (The rejected image-wide wrapper is in
 # docs/design-notes/terminal-and-security.md.)
 #
-# In /usr/local/bin, ahead of /usr/bin, so it is container-only and the plugin's STOCK manifest
-# keeps working across updates. Conservative: fires for that one package, and only appends what
-# the caller did not pass, so a custom --executable-path/--channel/--browser-url still wins.
-# KIB_CHROME_MCP_ARGS=0 disables it.
-cat >/usr/local/bin/npx <<'NPXWRAPPER'
+# In $KIB_SHIM_DIR, which both PATH exports put FIRST — not /usr/local/bin, where it lived until
+# a pinned project proved that dead: $KIB_PREPEND_PATH's node bins carry their own npx and won,
+# so the MCP launched Chrome sandboxed, it SIGTRAP'd at startup once per tool call, and the
+# host's crash reporter popped a notification for each (core_pattern is global, not per-namespace).
+# Container-only either way, and the plugin's STOCK manifest keeps working across updates.
+# Conservative: fires for that one package, and only appends what the caller did not pass, so a
+# custom --executable-path/--channel/--browser-url still wins. KIB_CHROME_MCP_ARGS=0 disables it.
+mkdir -p "$KIB_SHIM_DIR"
+cat >"$KIB_SHIM_DIR/npx" <<'NPXWRAPPER'
 #!/bin/sh
 # Find the real npx by walking PATH (no `which`: Debian is retiring it, and a bare `command -v`
-# would just find this shim again). Fail loudly rather than exec'ing "".
+# would just find this shim again). Now that the shim is PATH's first entry, the walk is what
+# hands the pinned node version its own npx. Fail loudly rather than exec'ing "".
+# The self-path is a literal — the heredoc is quoted — and must equal $KIB_SHIM_DIR/npx;
+# tests/check/regressions.sh holds the two in step.
 real_npx=""
 IFS=:
 for d in $PATH; do
   [ -n "$d" ] || d=.
-  if [ "$d/npx" != /usr/local/bin/npx ] && [ -x "$d/npx" ]; then real_npx="$d/npx"; break; fi
+  if [ "$d/npx" != /opt/kib-shims/npx ] && [ -x "$d/npx" ]; then real_npx="$d/npx"; break; fi
 done
 unset IFS
 [ -n "$real_npx" ] || { echo "kib: npx shim found no real npx on PATH" >&2; exit 127; }
@@ -541,7 +553,7 @@ fi
 # $extra unquoted on purpose — it is a word list built only from the space-free literals above.
 exec "$real_npx" "$@" $extra
 NPXWRAPPER
-chmod +x /usr/local/bin/npx
+chmod +x "$KIB_SHIM_DIR/npx"
 
 # macOS clipboard bridge shims (once, at container creation — `docker exec` sessions take
 # the already-target-user branch above and never reach here).
@@ -551,7 +563,7 @@ fi
 
 # Set up environment for the target user
 export HOME="$USER_HOME"
-export PATH="$USER_HOME/.local/bin:${KIB_PREPEND_PATH:+$KIB_PREPEND_PATH:}$PATH"
+export PATH="$KIB_SHIM_DIR:$USER_HOME/.local/bin:${KIB_PREPEND_PATH:+$KIB_PREPEND_PATH:}$PATH"
 
 # Switch to the host project directory — which is the sidecar's redacted view, propagated in.
 # kib refuses to start the container at all if that mount is not up, so there is nothing to

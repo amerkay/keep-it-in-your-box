@@ -32,3 +32,22 @@ config. It appends nothing the caller already passed, so `--headless=false` / a 
 shim (verified: the shim alone makes the stock plugin launch a page), needs a full image rebuild,
 and silently disarms every *other* Chrome caller too. `/dev/shm` is 64 MB here, but
 chrome-devtools-mcp's vendored puppeteer already passes `--disable-dev-shm-usage`.
+
+**Where the shim sits is load-bearing.** It lives in `$KIB_SHIM_DIR` (`/opt/kib-shims`), which both
+of the entrypoint's `export PATH=` lines put **first** — ahead of `$KIB_PREPEND_PATH`. It used to
+live in `/usr/local/bin`, reasoning about `/usr/bin`; but every node in the version cache ships its
+own `npx`, and `--node-version` puts that bin ahead of `/usr/local/bin`, so on any project with a
+Node pin the shim never ran. The stock manifest then launched Chrome by *channel* resolution
+(`/opt/google/chrome/chrome`, no `--executable-path`, no `--no-sandbox`), the sandbox init failed a
+`CHECK`, and the browser died of `SIGTRAP` at startup — retried once per tool call, so the MCP had
+no target and the agent read it as "Chrome is broken in this box". Regression-guarded, both the
+ordering and the shim's self-skip literal.
+
+Two things made that hard to see. Container crashes surface on the **host's** desktop crash
+reporter — `kernel.core_pattern` is global, not per-namespace, so the host's systemd-coredump
+handles them and records `COREDUMP_EXE` as the in-container path; on Plasma, DrKonqi then names
+`/opt/playwright-browsers/…/chrome` in a notification for a binary the host does not have. And the
+obvious probe lies: `google-chrome --headless=new --no-sandbox --dump-dom` hangs here whatever the
+shim did (GCM registration retries — same reason headless Chrome is not a usable rasterizer, see
+[architecture.md](architecture.md)), so it reads as a startup failure. Probe with
+`--remote-debugging-port` and `curl …/json/version` instead; a healthy box answers.
