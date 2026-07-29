@@ -246,8 +246,13 @@ t_notify_desktop() {
 
     # Without it, the osascript path still fires — and the AppleScript string literals stay
     # escaped, so a quote in the body cannot truncate the notification.
+    #
+    # `hash -r` is load-bearing: older bash (5.2.21, the CI runner) caches the stub we just ran,
+    # so `command -v terminal-notifier` keeps answering the deleted path and the fallback never
+    # runs — a green suite here, an empty log and a failure there.
     : >"$d/log"
     rm -f "$d/terminal-notifier"
+    hash -r
     PATH="$d:$PATH" notify_desktop normal "kib · t" 'body "quoted" \ back'
     case "$(cat "$d/log" 2>/dev/null)" in
         *osa*display\ notification*\\\"quoted\\\"*) pass "notify_desktop: falls back to escaped osascript" ;;

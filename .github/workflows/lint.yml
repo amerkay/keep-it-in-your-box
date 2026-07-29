@@ -23,9 +23,11 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Keep both on a major whose `runs.using` is node24 — the runner force-runs a node20
+      # action on node24 anyway and warns; node20 support is going away.
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
 
