@@ -161,6 +161,12 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
 - **FUSE passthrough I/O is `os.pread`/`os.pwrite`, never `lseek`+`read`** — the shared fd offset
   truncates reads at a chunk boundary, and it surfaces as unexplained lint/test flakiness rather
   than an I/O error. Regression-guarded. (`redaction-config-guard.md`)
+- **The FUSE view's speed rests on three things — don't undo one.** `auto_cache` (never
+  `kernel_cache`: the host edits this tree), the memoised `_verdict` (cache the RULE verdict only,
+  never `_classify` — its `lexists` must stay live), and a `flush()` that does not `fsync`. Together
+  they took a small file from 2.31 ms to 0.067 ms. **`FUSE_PASSTHROUGH` is not the next step**: it
+  needs kernel 6.9+ (Ubuntu 24.04 GA is 6.8, WSL2 is 5.15/6.6) and libfuse 3.17 low-level, and
+  fusepy is ctypes over libfuse **2**. Regression-guarded. (`redaction-config-guard.md`)
 - **Never `kill -TERM "-$pid"` from a pidfile — call `kill_pgrp`**, and never require `KIB_ROOT`
   from the environment in an *executed* host script (`detach_pgrp` gives it a fresh env; derive it
   from `$0`). A dead detached child's pid gets recycled into the next launch's own process group,

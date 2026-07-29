@@ -317,6 +317,35 @@ else
         "a passthrough enforces no POSIX permission at all without it"
 fi
 
+# Page caching, and the ONE safe spelling of it. Without auto_cache libfuse leaves keep_cache=0
+# and the kernel drops a file's pages on every open, so a re-read never gets faster — that cost
+# a Nuxt cold build 7 minutes against 20 seconds on the host. kernel_cache is the trap: it never
+# revalidates, and the project is bind-mounted from the host, so it would serve the user their
+# own stale bytes after an edit in their editor.
+# Code only: the comment above `auto_cache=True` names kernel_cache to warn against it.
+_fu="$(sed 's/#.*$//' "$KIB_ROOT/kib/guest/fuse.py")"
+if printf '%s\n' "$_fu" | grep -q 'kernel_cache'; then
+    fail "kib/guest/fuse.py mounts with kernel_cache" \
+        "the host edits this tree — use auto_cache, which revalidates mtime+size at open"
+elif printf '%s\n' "$_fu" | grep -q 'auto_cache=True'; then
+    pass "the FUSE mount page-caches with open-time revalidation (auto_cache)"
+else
+    fail "kib/guest/fuse.py no longer mounts with auto_cache=True" \
+        "every re-read of an unchanged file goes back to crossing userspace in full"
+fi
+
+# libfuse calls flush on EVERY close(2), so an fsync there is a forced writeback per file —
+# on read-only opens too. It bought nothing: writes are os.pwrite straight to the backing fd
+# with no userspace buffer, and release()'s mirror size check reads the same kernel's view
+# either way. fsync() proper is still there for callers that mean durability.
+_fl="$(awk '/^    def flush\(/ {f=1; next} f && /^    def / {exit} f' "$KIB_ROOT/kib/guest/fuse.py")"
+if printf '%s\n' "$_fl" | grep -qE '^\s*os\.(f|fdata)sync\('; then
+    fail "kib/guest/fuse.py fsyncs in flush()" \
+        "that is a forced writeback on every close, including read-only opens"
+else
+    pass "flush() does not fsync (libfuse calls it on every close)"
+fi
+
 # (Inode adoption — that every path creating an inode hands it to the caller — is guarded
 # behaviourally in tests/guest/test_fuse.py: test_a_created_file_is_given_to_the_caller,
 # test_a_created_directory_is_given_to_the_caller, test_an_adopted_symlink_is_not_dereferenced

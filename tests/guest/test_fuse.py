@@ -211,6 +211,56 @@ def test_the_render_cache_follows_the_file(redact: Callable[[str], Any], tmp_pat
     assert r.read("/.env", 4096, 0, 0) == b"A=<redacted>\nB=<redacted>\n"
 
 
+# ── the verdict memo: free, and never stale ──────────────────────
+# _classify re-asks _verdict for every ancestor of every getattr/open/read, which at
+# node_modules depth was ~0.3 ms of fnmatch per op recomputing an answer that cannot change.
+def test_the_verdict_cache_agrees_with_an_uncached_lookup(redact: Callable[..., Any]) -> None:
+    """Memoised or not, the answer is the rule list's — including on the second ask."""
+    project = "secret.pem\nbuild/*\n!build/keep.txt\n"
+    r = redact(project)
+    for rel in (
+        ".env",
+        ".env.example",
+        "deep/node_modules/pkg/dist/index.js",
+        "sub/.git/config",
+        "a/b/.vscode/tasks.json",
+        "secret.pem",
+        "nested/secret.pem",
+        "build/x",
+        "build/keep.txt",
+    ):
+        want = rules.verdict(r.rules, rel)
+        assert r._verdict(rel) == want, rel
+        assert r._verdict(rel) == want, rel  # the cached hit, not just the cold one
+
+
+def test_the_verdict_cache_does_not_freeze_the_filesystem_view(
+    redact: Callable[..., Any], tmp_path: Path
+) -> None:
+    """Cache the RULE verdict, never `_classify` — the difference is a shipped bug.
+
+    `_classify` asks the filesystem whether the masked path is actually there, and that answer
+    changes under us. Freezing it would restore the phantom `.env.local` that drove `nuxi dev`
+    into an endless restart loop (see the 'absent' test above).
+    """
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    r = redact("")
+    assert r._classify("/.env") == ("absent", ".env")
+    (src / ".env").write_text("A=1\n")
+    assert r._classify("/.env") == ("file", ".env")  # seen at once, no cache to evict
+    (src / ".env").unlink()
+    assert r._classify("/.env") == ("absent", ".env")
+
+
+def test_the_verdict_cache_is_bounded(redact: Callable[..., Any]) -> None:
+    """A project can hold any number of paths; the sidecar's memory cannot."""
+    r = redact("")
+    for i in range(fuse.VERDICT_CACHE_MAX + 5):
+        r._verdict(f"d{i}/f.js")
+    assert len(r._verdicts) <= fuse.VERDICT_CACHE_MAX
+
+
 # ── protection: what a write is refused ──────────────────────────
 @pytest.mark.parametrize(
     "path",

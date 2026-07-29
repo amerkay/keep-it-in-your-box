@@ -59,6 +59,10 @@ GITDIR_MARKERS = ("HEAD", "objects", "refs")
 #: Any flag that makes an open able to modify the file.
 WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
 
+#: Cap on the path→verdict memo. A hit can never be stale (see `_verdict`), so the bound exists
+#: only to keep a tree with a million paths from growing the sidecar without limit.
+VERDICT_CACHE_MAX = 1 << 16
+
 # ── format-aware redaction ───────────────────────────────────────
 # A redacted file whose *shape* is known reads as its key names with every value replaced.
 # The whole-file stub hid which settings even exist, so the agent's next move was to ask the
@@ -164,6 +168,7 @@ class Redact(Operations):  # type: ignore[misc]
         # one size and serve another, splicing two versions across a partial read. Keyed on
         # identity+mtime+size, capped because a project can hold any number of redacted files.
         self._rendered: dict[tuple[str, int, int, int], bytes] = {}
+        self._verdicts: dict[str, str | None] = {}
         # fds opened for WRITING at a protected path — the mirror candidates. release() is
         # handed no flags, and a read-only open of .git/config reaching its size check would
         # unlink the file.
@@ -215,7 +220,23 @@ class Redact(Operations):  # type: ignore[misc]
         return path.lstrip("/")
 
     def _verdict(self, rel: str) -> str | None:
-        return rules.verdict(self.rules, rel)
+        """Memoised, because it is a pure function of the path: the rule list is frozen for the
+        container's lifetime, and a `.kibignore` edited mid-session refuses the next attach
+        rather than reloading (host/redaction.sh). So a hit cannot be stale by construction.
+
+        This is THE hot path. `_classify` re-asks it for every ancestor of every getattr, open
+        and read, which at node_modules depth was ~0.3 ms of fnmatch per op recomputing an
+        answer that never changes. Only the rule verdict is cached — `_classify`'s own
+        lexists/isdir stay live, so a file appearing or vanishing is still seen at once.
+        """
+        try:
+            return self._verdicts[rel]
+        except KeyError:
+            if len(self._verdicts) >= VERDICT_CACHE_MAX:
+                self._verdicts.clear()
+            v = rules.verdict(self.rules, rel)
+            self._verdicts[rel] = v
+            return v
 
     def _protected(self, path: str) -> bool:
         """True if writes to this path must be refused but reads pass through."""
@@ -624,8 +645,11 @@ class Redact(Operations):  # type: ignore[misc]
         os.link(self._real(source), self._real(target))
 
     def flush(self, path: str, fh: int) -> int:
-        if fh and fh != 0:
-            os.fsync(fh)
+        # Deliberately NOT an fsync. libfuse calls flush on every close(2), so fsyncing here
+        # cost a forced writeback per file — on read-only opens too — and bought nothing: our
+        # writes are `os.pwrite` straight to the backing fd with no userspace buffer, and
+        # release()'s mirror size check reads the same kernel's view either way. Callers that
+        # mean durability get fsync() below.
         return 0
 
     def fsync(self, path: str, datasync: int, fh: int) -> int:
@@ -677,6 +701,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         # a handler's own refusal still stands, so the stubs (0444/0555) and the write denials
         # are unaffected.
         default_permissions=True,
+        # Without this libfuse leaves keep_cache=0 and the kernel drops a file's page cache on
+        # EVERY open, so re-reading an unchanged file crosses userspace in full and a build tool
+        # rereading the same module never gets faster. auto_cache keeps the cache but revalidates
+        # mtime+size at open — which is what makes it safe here, since the project is bind-mounted
+        # from the host and the user edits it there. `kernel_cache` (never revalidate) would serve
+        # them their own stale bytes, and a masked path is covered too: _stub_attr reports the
+        # real file's mtime, so a changed .env invalidates the stub alongside `_render`'s key.
+        auto_cache=True,
     )
 
 
