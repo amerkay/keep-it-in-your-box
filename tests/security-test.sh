@@ -414,6 +414,18 @@ else
 fi
 allow "regression: .env.example is not redacted" \
     bash -c "echo 'KEY=placeholder' > '$ARTIFACTS/.env.example'"
+# An exemption on the target alone is readable but not EDITABLE: no atomic writer touches the
+# target, so the refusal landed on a path the caller never named. Both write siblings, and the
+# rename that finishes the job, are the carve-out's real shape.
+allow "regression: a placeholder's temp+rename write sibling is not redacted" \
+    bash -c "t='$ARTIFACTS/.env.example.tmp.\$\$.e4cc80fbd4d5'
+             echo 'KEY=placeholder' >\"\$t\" && mv \"\$t\" '$ARTIFACTS/.env.example'"
+allow "regression: a placeholder's editor backup sibling is not redacted" \
+    bash -c "echo 'KEY=placeholder' > '$ARTIFACTS/.env.example~'"
+deny "the write-sibling shape does not carve out .env itself" \
+    bash -c "echo 'X=1' > '$ARTIFACTS/.env.tmp.\$\$.e4cc80fbd4d5'"
+deny "the write-sibling shape does not carve out .env.local" \
+    bash -c "echo 'X=1' > '$ARTIFACTS/.env.local~'"
 
 # ═════════════════════════════════════════════════════════════════
 section "Shared config surface — cross-project pivot (H5, H6)"

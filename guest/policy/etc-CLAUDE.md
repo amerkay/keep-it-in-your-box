@@ -46,9 +46,10 @@
   you the **key names with every value replaced** (`KEY=<redacted>`) for JSON and `.env*` files, a
   flat stub for anything else. So you can see which settings exist — you can add a key, or tell
   the user which one is missing — but never a value. Need one? Ask. Exactly three placeholder
-  spellings are exempt and work normally: `.env.example`, `.env.sample`, `.env.template`. Any
-  other `.env.*` is redacted, including `.env.defaults` and `.env.dist` — they hold real values
-  often enough that the exemption was withdrawn.
+  spellings are exempt and work normally — `.env.example`, `.env.sample`, `.env.template` — each
+  along with the write siblings an editor makes *of it* (`<name>.tmp.*`, `<name>~`), so Edit and
+  vim can save one. Any other `.env.*` is redacted, including `.env.defaults`, `.env.dist` and
+  `.env.example.local` — they hold real values often enough that the exemption was withdrawn.
   - **Writing a `.kibignore`: the syntax is gitignore-*shaped*, not gitignore.** A **bare name**
     is the match-anywhere form — `*.pem` covers every depth, `_dev_data` seals that directory
     wherever it appears. A rule containing `/` is anchored at the project **root** and matches

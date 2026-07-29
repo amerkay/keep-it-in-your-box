@@ -56,6 +56,14 @@ def test_load_of_a_missing_file_is_an_empty_rule_set() -> None:
         ".env.template",
         "newd/.env.example",
         "a/b/c/.env.sample",
+        # The sibling an atomic writer actually creates. Without these the carve-out is
+        # unusable: Edit/Write open `<target>.tmp.<pid>.<rand>` and rename, vim's writebackup
+        # opens `<target>~`, and both fell back through into `.env.*` as EPERM.
+        ".env.example.tmp.170.e4cc80fbd4d5",
+        ".env.example.tmp.170.1753142400.1",
+        ".env.example~",
+        ".env.sample.tmp.4.beef",
+        "a/b/.env.template~",
     ],
 )
 def test_env_placeholders_are_readable(path: str) -> None:
@@ -71,6 +79,14 @@ def test_env_placeholders_are_readable(path: str) -> None:
         ".env.production",
         "newd/.env",
         ".env.example.local",
+        # The write-sibling carve-out is the temp SHAPE, never a prefix: `.env.example*` would
+        # have re-admitted `.env.example.local` above, and the same shape on a secret-bearing
+        # name stays redacted — a rename onto the real target is refused at the target anyway.
+        ".env.tmp.170.abc",
+        ".env.local.tmp.170.abc",
+        ".env.local~",
+        ".env.examples",
+        ".env.example.bak",
         # Carried as placeholders and withdrawn (2026-07-27). Both spellings also hold real
         # per-environment values in the wild, and the exemption is a full-content read: a
         # wrong guess leaks a secret, where the other way costs one "ask the user".

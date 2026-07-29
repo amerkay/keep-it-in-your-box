@@ -68,3 +68,19 @@
 !.env.example
 !.env.sample
 !.env.template
+
+# The carve-out has to cover how a placeholder is actually WRITTEN. No atomic writer touches
+# the target: it writes a sibling named after it and renames — Claude Code's Edit/Write use
+# `<target>.tmp.<pid>.<rand>`, vim's `writebackup` (on by default) uses `<target>~`. Those
+# names fall straight back through the three rules above into `.env.*`, so "add the new key to
+# .env.example" failed with EPERM on a path nobody named. Only a copy of the placeholder can
+# ever live at one of them, which is why they carry no read risk of their own.
+#
+# NOT `.env.example*`: that also re-admits `.env.example.local`, a real per-environment
+# spelling — the `.env.dist` argument again, an open-ended prefix for a closed-set problem.
+!.env.example.tmp.*
+!.env.example~
+!.env.sample.tmp.*
+!.env.sample~
+!.env.template.tmp.*
+!.env.template~

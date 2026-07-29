@@ -77,6 +77,39 @@ def test_a_placeholder_is_not_redacted(redact: Callable[[str], Any]) -> None:
     assert redact("")._classify("/.env.example")[0] == "pass"
 
 
+@pytest.mark.parametrize("temp", [".env.example.tmp.170.e4cc80fbd4d5", ".env.example~"])
+def test_a_placeholder_can_be_edited_through_its_write_sibling(
+    redact: Callable[[str], Any], tmp_path: Path, temp: str
+) -> None:
+    """The whole temp+rename sequence, because that is the only way the target is ever written.
+
+    An exemption on the target alone is unusable: Edit/Write open `<target>.tmp.<pid>.<rand>`
+    and rename, vim's writebackup opens `<target>~`, and both matched `.env.*` — so editing a
+    placeholder returned EPERM on a path the caller never named.
+    """
+    src = tmp_path / "src"
+    src.mkdir(exist_ok=True)
+    (src / ".env.example").write_text("OLD=placeholder\n")
+    r = redact("")
+    assert r._classify("/" + temp) == ("pass", "")
+    fd = r.create("/" + temp, 0o644)
+    r.write("/" + temp, b"NEW=placeholder\n", 0, fd)
+    r.release("/" + temp, fd)
+    r.rename("/" + temp, "/.env.example")
+    assert (src / ".env.example").read_text() == "NEW=placeholder\n"
+
+
+@pytest.mark.parametrize("temp", [".env.tmp.170.abc", ".env.local~"])
+def test_the_write_sibling_carve_out_does_not_reach_a_secret_bearing_name(
+    redact: Callable[[str], Any], tmp_path: Path, temp: str
+) -> None:
+    """The carve-out is the temp shape applied to a placeholder, not the shape on its own."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    with pytest.raises(OSError) as e:
+        redact("").create("/" + temp, 0o644)
+    assert e.value.errno == fuse.REFUSED
+
+
 def test_a_redacted_directory_serves_a_single_marker(
     redact: Callable[[str], Any], tmp_path: Path
 ) -> None:
