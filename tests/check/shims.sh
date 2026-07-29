@@ -230,14 +230,20 @@ t_wait_until() {
 # osascript is attributed to Script Editor and dropped without that grant — and the caller that
 # matters most, shared-watch.sh ("a shared prompt asset now loads in every project"), is detached.
 # Stubs on PATH record which binary ran; no real notification is raised on this Linux box.
+_notify_stub() { # <dir> <name> <tag>: a notifier stub that records that it, and not the other, ran
+    printf '#!/bin/sh\necho "%s $*" >>"%s/log"\n' "$3" "$1" >"$1/$2"
+    chmod +x "$1/$2"
+}
+
 t_notify_desktop() {
     local d
     d="$(mktemp -d)"
-    printf '#!/bin/sh\necho "tn $*" >>"%s/log"\n' "$d" >"$d/terminal-notifier"
-    printf '#!/bin/sh\necho "osa $*" >>"%s/log"\n' "$d" >"$d/osascript"
-    chmod +x "$d/terminal-notifier" "$d/osascript"
+    _notify_stub "$d" terminal-notifier tn
+    _notify_stub "$d" osascript osa
 
-    PATH="$d:$PATH" notify_desktop critical "kib · t" 'body "quoted" \ back'
+    # PATH is the stub dir ALONE — with the host's own PATH appended, whatever the machine
+    # happens to have installed under either name answers first and the assertion means nothing.
+    PATH="$d" notify_desktop critical "kib · t" 'body "quoted" \ back'
     case "$(cat "$d/log" 2>/dev/null)" in
         tn*) pass "notify_desktop: prefers terminal-notifier on darwin" ;;
         *) fail "notify_desktop ignores terminal-notifier" \
@@ -247,16 +253,18 @@ t_notify_desktop() {
     # Without it, the osascript path still fires — and the AppleScript string literals stay
     # escaped, so a quote in the body cannot truncate the notification.
     #
-    # `hash -r` is load-bearing: older bash (5.2.21, the CI runner) caches the stub we just ran,
-    # so `command -v terminal-notifier` keeps answering the deleted path and the fallback never
-    # runs — a green suite here, an empty log and a failure there.
-    : >"$d/log"
-    rm -f "$d/terminal-notifier"
+    # A second dir holding the one stub, never a `rm` from the first: bash caches an executed
+    # command's path, so a deleted terminal-notifier can go on resolving. `hash -r` drops the
+    # cache this run filled, and the fresh dir means a survivor points at nothing.
+    rm -rf "$d"
+    d="$(mktemp -d)"
+    _notify_stub "$d" osascript osa
     hash -r
-    PATH="$d:$PATH" notify_desktop normal "kib · t" 'body "quoted" \ back'
+    PATH="$d" notify_desktop normal "kib · t" 'body "quoted" \ back'
     case "$(cat "$d/log" 2>/dev/null)" in
         *osa*display\ notification*\\\"quoted\\\"*) pass "notify_desktop: falls back to escaped osascript" ;;
-        *) fail "notify_desktop fallback" "got: $(cat "$d/log" 2>/dev/null)" ;;
+        *) fail "notify_desktop fallback" \
+            "got: [$(cat "$d/log" 2>/dev/null)] resolved: [$(PATH="$d" command -v osascript)]" ;;
     esac
     rm -rf "$d"
 }
