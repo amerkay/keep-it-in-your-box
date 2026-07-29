@@ -67,7 +67,9 @@ def test_a_protected_path_reads_through(redact: Callable[[str], Any]) -> None:
     assert redact("")._classify("/.git/config")[0] == "pass"
 
 
-def test_a_redacted_file_serves_the_stub(redact: Callable[[str], Any]) -> None:
+def test_a_redacted_file_serves_the_stub(redact: Callable[[str], Any], tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / ".env").write_text("K=v\n")
     assert redact("")._classify("/.env")[0] == "file"
 
 
@@ -97,9 +99,36 @@ def test_read_of_a_masked_path_with_no_known_shape_returns_the_stub(
     assert redact("secret.pem\n").read("/secret.pem", 4096, 0, 0) == fuse.STUB
 
 
-def test_a_missing_masked_file_still_serves_the_stub(redact: Callable[[str], Any]) -> None:
-    """Nothing on disk to render, and the path must stay masked rather than 404 into a create."""
-    assert redact("").read("/.env", 4096, 0, 0) == fuse.STUB
+def test_a_masked_path_the_host_does_not_have_is_enoent(
+    redact: Callable[[str], Any], tmp_path: Path
+) -> None:
+    """Redaction hides values, it does not conjure files.
+
+    A synthesised stub made `.env.local` and `.env.development` stat successfully in a project
+    holding only `.env`; `nuxi dev` watches that whole set, so the phantoms drove an endless
+    restart loop (and leaked an inotify instance per restart, which then read as EMFILE).
+    """
+    (tmp_path / "src").mkdir(exist_ok=True)
+    r = redact("")
+    assert r._classify("/.env.local") == ("absent", ".env.local")
+    with pytest.raises(OSError) as e:
+        r.getattr("/.env.local")
+    assert e.value.errno == errno.ENOENT
+    with pytest.raises(OSError) as e:
+        r.open("/.env.local", os.O_RDONLY)
+    assert e.value.errno == errno.ENOENT
+
+
+def test_a_masked_path_the_host_does_not_have_still_refuses_writes(
+    redact: Callable[[str], Any], tmp_path: Path
+) -> None:
+    """ENOENT on read must not become a create: 'absent' is not 'pass'."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    r = redact("")
+    with pytest.raises(OSError) as e:
+        r.create("/.env.local", 0o644)
+    assert e.value.errno == fuse.REFUSED
+    assert not (tmp_path / "src" / ".env.local").exists()
 
 
 # ── format-aware redaction: names visible, values never ──────────
@@ -516,15 +545,19 @@ def test_the_project_owner_is_reported_as_the_agent(
     assert (attr["st_uid"], attr["st_gid"]) == (501, 20)
 
 
-def test_the_remap_covers_the_redaction_stub(redact: Callable[..., Any]) -> None:
+def test_the_remap_covers_the_redaction_stub(redact: Callable[..., Any], tmp_path: Path) -> None:
     """A stubbed path is synthesised, not stat'd — it needs the same owner or `ls` of a
     redacted file disagrees with its directory."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / ".env").write_text("K=v\n")
     attr = redact("", uid=501, gid=20).getattr("/.env")
     assert (attr["st_uid"], attr["st_gid"]) == (501, 20)
 
 
-def test_the_remap_does_not_change_the_verdict(redact: Callable[..., Any]) -> None:
+def test_the_remap_does_not_change_the_verdict(redact: Callable[..., Any], tmp_path: Path) -> None:
     """Redaction is presentation-independent: the remap must not open a masked path."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / ".env").write_text("K=v\n")
     assert redact("", uid=501, gid=20)._classify("/.env")[0] == "file"
 
 

@@ -298,12 +298,14 @@ class Redact(Operations):  # type: ignore[misc]
         raise FuseOSError(REFUSED)
 
     def _classify(self, path: str) -> tuple[str, str]:
-        """Return `('pass'|'file'|'dir'|'inside', masked_rel_root)`.
+        """Return `('pass'|'file'|'dir'|'inside'|'absent', masked_rel_root)`.
 
         - 'pass': not masked
         - 'file': the path itself is a masked file → serve the stub
         - 'dir': the path itself is a masked directory → serve a single REDACTED.md
         - 'inside': the path is inside a masked dir → REDACTED.md or ENOENT
+        - 'absent': masked, but nothing is there on the host → reads must behave exactly as
+          outside the box (ENOENT); writes are still refused, since 'absent' is not 'pass'
 
         Only a 'redact' verdict reaches here. 'protect' deliberately returns 'pass' so
         every read stays a plain passthrough; protection is enforced on the write paths,
@@ -319,19 +321,28 @@ class Redact(Operations):  # type: ignore[misc]
             anc = "/".join(parts[:i])
             if self._verdict(anc) == rules.REDACT:
                 real = self._real(anc)
+                # Redaction hides VALUES, it does not conjure files. Stubbing a path the host
+                # does not have made `.env.local`/`.env.development` stat successfully in a
+                # project that has only `.env`, and a dev-server watcher over the dotenv set
+                # then restarted forever on entries that appear and vanish.
+                if not os.path.lexists(real):
+                    return ("absent", anc)
                 is_dir = os.path.isdir(real)
                 if i == len(parts):
                     return ("dir" if is_dir else "file", anc)
-                # Proper ancestor: a real dir (or a non-existent path, so creation stays
-                # denied) shrouds what is beneath it.
-                if is_dir or not os.path.lexists(real):
-                    return ("inside", anc)
-                return ("file", anc)
+                # Proper ancestor: a real dir shrouds what is beneath it.
+                return ("inside", anc) if is_dir else ("file", anc)
         return ("pass", "")
 
-    def _stub_attr(self, mode: int, nlink: int, size: int) -> dict[str, Any]:
-        """Synthetic stat for a masked path, timestamped from the project root."""
-        st = os.lstat(self.src)
+    def _stub_attr(self, root: str, mode: int, nlink: int, size: int) -> dict[str, Any]:
+        """Synthetic stat for a masked path, timestamped from the masked root itself.
+
+        NOT from the project root: that mtime moves whenever any entry is added or removed
+        there, so every redacted file in the tree appeared to change at once and a watcher
+        (`nuxi dev`, chokidar) restarted on each one. `root` always exists — 'absent' is
+        classified before any stub is served — and a race that deletes it ENOENTs, correctly.
+        """
+        st = os.lstat(self._real(root))
         uid, gid = self._own(st.st_uid, st.st_gid)
         return {
             "st_mode": mode,
@@ -348,13 +359,13 @@ class Redact(Operations):  # type: ignore[misc]
     def getattr(self, path: str, fh: int | None = None) -> dict[str, Any]:
         kind, root = self._classify(path)
         if kind == "file":
-            return self._stub_attr(0o100444, 1, len(self._render(root)))
+            return self._stub_attr(root, 0o100444, 1, len(self._render(root)))
         if kind == "dir":
-            return self._stub_attr(0o040555, 2, 0)
+            return self._stub_attr(root, 0o040555, 2, 0)
         if kind == "inside":
             rel = self._rel(path)
             if PurePosixPath(rel).name == REDACTED_NAME and os.path.dirname(rel) == root:
-                return self._stub_attr(0o100444, 1, len(STUB))
+                return self._stub_attr(root, 0o100444, 1, len(STUB))
             raise FuseOSError(errno.ENOENT)
         st = os.lstat(self._real(path))
         attr = {
@@ -416,9 +427,9 @@ class Redact(Operations):  # type: ignore[misc]
             # rename below; nothing legitimate writes .git/config in place (git uses
             # config.lock).
             self._deny_if_masked(path)
-        if kind != "pass":
+        if kind not in ("pass", "absent"):
             return 0  # virtual fd; reads served from the render/STUB
-        fd = os.open(self._real(path), flags)
+        fd = os.open(self._real(path), flags)  # 'absent' ENOENTs here, as it would outside
         if flags & WRITE_FLAGS:
             self._track_mirror(path, fd)
         return fd
