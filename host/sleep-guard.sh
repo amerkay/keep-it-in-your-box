@@ -1,35 +1,48 @@
 #!/usr/bin/env bash
-# Holds a sleep inhibitor while a Claude session produces output; releases when idle. On
-# Linux, going idle with the lid already shut also suspends the machine — see
+# Holds a sleep inhibitor while a Claude session is working; releases when it is waiting on the
+# user. On Linux, going idle with the lid already shut also suspends the machine — see
 # suspend_if_lid_shut(). macOS re-evaluates sleep when caffeinate releases, so needs no such
 # re-trigger. (docs/design-notes/sleep-guard.md)
 #
-# Activity = growth in `wchar` (bytes written) of the BUSIEST SINGLE PROCESS in this
-# terminal's session — never a sum, see host/sleep-sample.sh, which host/sleep-monitor.sh
-# sources too so the diagnostic computes the identical number. Measured per 3s poll: idle
-# 218-374B, spinner 1.4-2.4KB, streaming 3.5KB+; MIN_BYTES sits in that gap.
+# Activity comes from CLAUDE'S OWN STATE MACHINE and from NOTHING ELSE: the hooks in
+# guest/policy/managed-settings.json → guest/policy/sleep-hook.py, read by host/sleep-state.sh.
+# It replaced a sampler that measured `wchar` (bytes written to the terminal) and inferred
+# "working" from the volume. That inference had two holes no threshold could close: a
+# BACKGROUND SUBAGENT writes almost nothing to the terminal, so N agents grinding read as idle
+# and the machine slept mid-work; and a question waiting on the user looks exactly like a long
+# think, so it either pinned the machine awake or slept mid-turn depending on the threshold.
 #
-# Scoped to one terminal's session by KIB_SESSION_TAG (inherited across fork/exec, matched on
-# /proc/<pid>/environ), not to the container: one container serves every terminal, so a
-# container-wide sample would have three tabs take three locks for one session's work.
-# `docker logs` is useless here — PID 1 is `sleep infinity`, sessions are `docker exec`.
+# The poll costs one stat of a marker tree — no subprocess, no `docker exec`, no CLI call. That
+# is deliberate and load-bearing: byte sampling, transcript mtime and `claude agents --json`
+# were each tried and each dropped (sleep-guard.md), and a power-saving daemon that forks every
+# 3s is working against itself. There is no fallback: markers or nothing.
 #
-# Usage: sleep-guard.sh <container-name> <session-tag>
-#   SLEEP_GUARD_GRACE=30        seconds of quiet before releasing the inhibitor
-#   SLEEP_GUARD_MIN_BYTES=1024  bytes per poll, by one process, that count as "active"
+# Scoped to one terminal's session by KIB_SESSION_TAG, which the hook inherits from the
+# session's environ: one container serves every terminal, so a container-wide state would have
+# three tabs take three locks for one tab's work.
+#
+# Usage: sleep-guard.sh <container-name> <session-tag> <state-root>
+#   SLEEP_GUARD_GRACE=1        seconds of quiet before releasing the inhibitor
 #   SLEEP_GUARD_DEBUG=1         print every sample
 #   SLEEP_GUARD_LID_SUSPEND=1   (LINUX) suspend on going idle with the lid shut; 0 disables
-#   SLEEP_GUARD_SETTLE=15       (LINUX) seconds after a resume before a re-suspend is allowed;
+#   SLEEP_GUARD_SETTLE=1       (LINUX) seconds after a resume before a re-suspend is allowed;
 #                               a tighter cycle wedges AMD s2idle
 
-CONTAINER="${1:?Usage: sleep-guard.sh <container-name> <session-tag>}"
-TAG="${2:?Usage: sleep-guard.sh <container-name> <session-tag>}"
+CONTAINER="${1:?Usage: sleep-guard.sh <container-name> <session-tag> <state-root>}"
+TAG="${2:?Usage: sleep-guard.sh <container-name> <session-tag> <state-root>}"
+STATE_ROOT="${3:?Usage: sleep-guard.sh <container-name> <session-tag> <state-root>}"
+# Names this box in the desktop's "blocking sleep" popup. The guard is backgrounded from
+# kib_run_session, so $PWD is the project — the same directory the box is mounted at.
+PROJECT_NAME="$(basename "$PWD")"
 POLL=3
 GRACE="${SLEEP_GUARD_GRACE:-30}"
-MIN_BYTES="${SLEEP_GUARD_MIN_BYTES:-1024}"
 DEBUG="${SLEEP_GUARD_DEBUG:-0}"
 LID_SUSPEND="${SLEEP_GUARD_LID_SUSPEND:-1}"
 SETTLE="${SLEEP_GUARD_SETTLE:-15}" # (LINUX) after a resume, stay awake this long before re-suspending
+# The guard is launched BEFORE the session it watches, so the markers are legitimately absent
+# for the first few seconds of every launch. Warn only once that window has passed, or the
+# warning fires on every single launch and means nothing.
+UNKNOWN_WARN=90
 
 # KIB_OS / is_macos come from host/portable.sh. Sourced loudly: this used to carry a uname
 # fallback "in case the source fails", but portable.sh sets both before its only failure path
@@ -41,14 +54,15 @@ HOST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # `|| exit 1`: this script has no `set -e`, so an unguarded source of a missing portable.sh
 # would carry on with is_macos undefined and die mid-poll instead of at startup.
 . "$HOST_DIR/portable.sh" || exit 1
-# shellcheck source=SCRIPTDIR/sleep-sample.sh
-. "$HOST_DIR/sleep-sample.sh"
+# shellcheck source=SCRIPTDIR/sleep-state.sh
+. "$HOST_DIR/sleep-state.sh" || exit 1
 
 INHIBIT_PID=""
 LAST_ACTIVE=0
-PREV=""       # previous "<pid> <bytes>" sample, one line per pid
 AWAKE_SINCE=0 # epoch of the last resume (or 0 = never suspended since start); gates re-suspend
 LAST_LOOP=0   # epoch of the previous loop iteration; a jump >> POLL means we were suspended
+STARTED=$(date +%s)
+WARNED=0
 
 release_lock() {
     if [ -n "$INHIBIT_PID" ] && kill -0 "$INHIBIT_PID" 2>/dev/null; then
@@ -60,13 +74,20 @@ release_lock() {
 
 # Linux: a systemd-inhibit block held by a background sleep. macOS: `caffeinate -is`. Both
 # release by killing the child; macOS then re-evaluates sleep itself.
+#
+# WHO stays the bare token `claude-code`, WITH NO SPACES — host/sleep-monitor.sh finds the
+# field equal to it and reads the PID three fields further on, so any space here shifts that
+# offset and the diagnostic silently stops finding our locks. The identity goes in WHY, which
+# is the part desktops render in parentheses ("<who> is blocking sleep. (<why>)") — so the
+# popup names the project and the tag, and that tag is the same one `sleep-monitor` prints.
 acquire_lock() {
     if [ -z "$INHIBIT_PID" ] || ! kill -0 "$INHIBIT_PID" 2>/dev/null; then
         if is_macos; then
             caffeinate -is &
         else
             systemd-inhibit --what=sleep --who="claude-code" \
-                --why="Claude Code is producing output" sleep infinity &
+                --why="kib sandbox $PROJECT_NAME — session $TAG" \
+                sleep infinity &
         fi
         INHIBIT_PID=$!
     fi
@@ -135,19 +156,27 @@ while docker inspect "$CONTAINER" &>/dev/null; do
     fi
     LAST_LOOP=$NOW
 
-    CUR="$(kib_sample_wchar "$CONTAINER" "$TAG")"
-    BUSIEST="$(kib_busiest_delta "$PREV" "$CUR")"
+    STATE="$(kib_sleep_state "$STATE_ROOT" "$TAG")"
 
-    if [ "$DEBUG" = 1 ]; then
-        # awk, not `grep -c . || echo 0`: on an empty sample grep prints 0 *and* exits 1, so
-        # the fallback fires too and NPIDS becomes "0\n0".
-        NPIDS="$(printf '%s' "$CUR" | awk 'NF{n++} END{print n+0}')"
-        echo "[sleep-guard] busiest process in session +${BUSIEST}B this poll (active if ≥${MIN_BYTES}B, ${NPIDS} pids), inhibit=${INHIBIT_PID:-none}" >&2
+    # `unknown` reads as idle. There is no fallback and nothing to cross-check by design: a
+    # guard that cannot see state must let the machine sleep, never pin it awake on a tree it
+    # knows nothing about. It costs nothing at launch, where LAST_ACTIVE is still 0 and the
+    # release branch below cannot fire anyway.
+    if [ "$STATE" = unknown ]; then
+        if [ "$WARNED" = 0 ] && [ $((NOW - STARTED)) -ge "$UNKNOWN_WARN" ]; then
+            WARNED=1
+            echo "[sleep-guard] still no hook state ${UNKNOWN_WARN}s after launch — the" \
+                "managed-settings hooks are not loading, so this machine may sleep while" \
+                "Claude is working. Check /status inside the box for a 'Managed' setting" \
+                "source, and that /etc/claude-code/managed-settings.json is mounted." >&2
+        fi
+        STATE=idle
     fi
 
-    # With no baseline yet BUSIEST is 0 and LAST_ACTIVE=0 blocks the release branch, so a
-    # fresh guard neither inhibits on a stale lifetime total nor releases a lock it never took.
-    if [ "$BUSIEST" -ge "$MIN_BYTES" ]; then
+    [ "$DEBUG" = 1 ] \
+        && echo "[sleep-guard] state=${STATE} inhibit=${INHIBIT_PID:-none}" >&2
+
+    if [ "$STATE" = busy ]; then
         acquire_lock
         LAST_ACTIVE=$NOW
     elif [ "$LAST_ACTIVE" -gt 0 ] && [ $((NOW - LAST_ACTIVE)) -ge "$GRACE" ]; then
@@ -159,10 +188,6 @@ while docker inspect "$CONTAINER" &>/dev/null; do
             echo "[sleep-guard] idle + lid shut, but only $((NOW - AWAKE_SINCE))s since resume (<${SETTLE}s) — deferring suspend" >&2
         fi
     fi
-
-    # An empty sample (session gone, docker hiccup) reads as quiet and releases after GRACE —
-    # erring towards letting the machine sleep, never towards pinning it awake.
-    PREV="$CUR"
 
     sleep "$POLL"
 done

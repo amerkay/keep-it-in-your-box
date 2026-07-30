@@ -193,18 +193,49 @@ t_kill_pgrp() {
     rm -rf "$d"
 }
 
-# The sleep guard's metric, called through the SHARED implementation both it and
-# host/sleep-monitor.sh source — so this covers the diagnostic's copy too, which is the whole
-# reason the sampler was extracted.
-t_busiest() {
-    # shellcheck source=SCRIPTDIR/../../host/sleep-sample.sh
-    . "$KIB_ROOT/host/sleep-sample.sh"
-    is "busiest_delta: max over pids in both samples" 300 \
-        "$(kib_busiest_delta "$(printf '100 1000\n200 2000\n')" "$(printf '100 1300\n200 2050\n300 9999\n')")"
-    is "busiest_delta: ignores a pid with no baseline" 10 \
-        "$(kib_busiest_delta "$(printf '100 1000\n')" "$(printf '100 1010\n999 500000\n')")"
-    is "busiest_delta: empty prev → 0" 0 "$(kib_busiest_delta '' '100 5000')"
-    is "busiest_delta: empty cur → 0" 0 "$(kib_busiest_delta '100 5000' '')"
+# The metric that REPLACED the byte sampler, called through the same shared implementation the
+# guard and the diagnostic both source. Each case here is a failure the old sampler actually
+# had, so they are regressions, not illustrations.
+t_sleep_state() {
+    # shellcheck source=SCRIPTDIR/../../host/sleep-state.sh
+    . "$KIB_ROOT/host/sleep-state.sh"
+    local d
+    d="$(mktemp -d)"
+
+    is "sleep_state: no dir at all → unknown" unknown "$(kib_sleep_state "$d" nosuch)"
+    mkdir -p "$d/tag"
+    is "sleep_state: dir but no SessionStart marker → unknown" unknown "$(kib_sleep_state "$d" tag)"
+
+    : >"$d/tag/live"
+    is "sleep_state: hooks live, nothing running → idle" idle "$(kib_sleep_state "$d" tag)"
+
+    : >"$d/tag/turn"
+    is "sleep_state: turn in flight → busy" busy "$(kib_sleep_state "$d" tag)"
+
+    # The AskUserQuestion / permission case: a turn is open but Claude is blocked on a human, so
+    # the machine must be allowed to sleep. Byte sampling could never separate this from a think.
+    : >"$d/tag/wait"
+    is "sleep_state: turn + waiting on the user → idle" idle "$(kib_sleep_state "$d" tag)"
+
+    # …unless a background subagent is still working, which outlives the parent's turn and is
+    # the case that let the machine sleep mid-work.
+    mkdir -p "$d/tag/agents"
+    : >"$d/tag/agents/agent-1"
+    is "sleep_state: waiting on the user but a subagent runs → busy" busy "$(kib_sleep_state "$d" tag)"
+
+    rm -f "$d/tag/turn"
+    is "sleep_state: turn over, subagent still running → busy" busy "$(kib_sleep_state "$d" tag)"
+    rm -f "$d/tag/agents/agent-1"
+    is "sleep_state: last subagent finished → idle" idle "$(kib_sleep_state "$d" tag)"
+
+    # The tree is bind-mounted rw into the box, so a hostile session can replace its own dir
+    # with a link. Refusing it costs that session its inhibitor and nothing else.
+    rm -rf "$d/tag"
+    ln -s /etc "$d/tag"
+    is "sleep_state: session dir is a symlink → unknown" unknown "$(kib_sleep_state "$d" tag)"
+
+    is "sleep_state: empty tag → unknown" unknown "$(kib_sleep_state "$d" '')"
+    rm -rf "$d"
 }
 
 # wait_until is the one polling helper the four hand-rolled loops collapsed into.
@@ -274,7 +305,7 @@ t_lockfd
 t_detach
 t_detach_fds
 t_kill_pgrp
-t_busiest
+t_sleep_state
 t_wait_until
 t_notify_desktop
 

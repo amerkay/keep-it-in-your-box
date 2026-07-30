@@ -7,13 +7,13 @@
 #
 # Each sample reports: the KDE idle clock and KDE idle inhibitors (systemd-invisible); every
 # block-sleep lock with PID and WHY; per claude-code lock the guard process (TTY/PPID/elapsed,
-# whether ORPHANED, its SLEEP_GUARD_* environ); the top wchar writers system-wide; AC/battery/
-# lid/kernel suspend counter; and matching journal lines interleaved.
+# whether ORPHANED, its hook state); phantom input; AC/battery/lid/kernel suspend counter; and
+# matching journal lines interleaved.
 #
-# The verdict line is the point. It RECONSTRUCTS THE GUARD'S OWN METRIC — kib_sample_wchar
-# from host/sleep-sample.sh, `docker exec`d into the container twice SUBSAMPLE apart, since
-# host /proc cannot read the container's tagged processes — and says whether a real writer
-# justifies the lock (naming it) or the guard is holding with none (stuck/orphaned = the bug).
+# The verdict line is the point. It RECONSTRUCTS THE GUARD'S OWN METRIC — kib_sleep_state from
+# host/sleep-state.sh, reading the same hook markers the guard acts on — and says whether a
+# session really is busy (turn in flight, or a background subagent running) or the guard is
+# holding with every session idle (stuck/orphaned = the bug).
 #
 # Usage: kib sleep-monitor [interval_s] [idle_flag_s]    e.g. kib sleep-monitor 10 55
 # Set Suspend to "After 1 minute", leave it idle / close the lid, wait. Ctrl-C stops.
@@ -39,14 +39,15 @@ if is_macos; then
     echo "so the equivalent diagnostic is:  pmset -g assertions" >&2
     exit 2
 fi
-# SOURCED, never copied — a second copy of the metric would drift from the guard's.
-# shellcheck source=SCRIPTDIR/sleep-sample.sh
-. "$HOST_DIR/sleep-sample.sh"
+# shellcheck source=SCRIPTDIR/sleep-state.sh
+# The guard's metric — SOURCED, never copied, so this diagnostic cannot drift into judging the
+# guard against a different verdict than the one it acts on.
+. "$HOST_DIR/sleep-state.sh"
 
-INTERVAL="${1:-10}"                        # seconds between samples (min effective = SUBSAMPLE)
-IDLE_FLAG="${2:-55}"                       # flag if idle exceeds this (s) but still awake (< your 60s suspend)
-SUBSAMPLE=3                                # wchar sampling window — matches sleep-guard.sh's 3s poll
-MIN_BYTES="${SLEEP_GUARD_MIN_BYTES:-1024}" # guard's default threshold; overridden per-guard if readable
+INTERVAL="${1:-10}"                   # seconds between samples (min effective = INPUT_WINDOW)
+IDLE_FLAG="${2:-55}"                  # flag if idle exceeds this (s) but still awake (< your 60s suspend)
+INPUT_WINDOW=3                        # how long each sample listens on /dev/input for phantom events
+GRACE_HINT="${SLEEP_GUARD_GRACE:-30}" # guard's release delay, for the verdict wording only
 # Logs land in the state root: a diagnostic must not drop artefacts into the repo it is run in.
 mkdir -p "$KIB_LOG_DIR" 2>/dev/null || true
 LOG="$KIB_LOG_DIR/sleep-inhibition-$(date +%Y%m%d-%H%M%S).log"
@@ -111,9 +112,9 @@ logind_idle() {
     fi
 }
 
-# Phantom-input detection: read every readable /dev/input/event* for the subsample window (in
-# parallel, overlapping the wchar wait) and name the devices that fired. If you are touching
-# nothing and a device fires, THAT is why the machine never goes idle.
+# Phantom-input detection: read every readable /dev/input/event* for INPUT_WINDOW, in parallel,
+# and name the devices that fired. If you are touching nothing and a device fires, THAT is why
+# the machine never goes idle.
 INPUT_DEVS=()
 for _e in /dev/input/event*; do [ -r "$_e" ] && INPUT_DEVS+=("$_e"); done
 INPUT_TMP=""
@@ -127,7 +128,7 @@ input_capture_start() { # launch background readers; returns immediately
     }
     local e
     for e in "${INPUT_DEVS[@]}"; do
-        (timeout "$SUBSAMPLE" cat "$e" 2>/dev/null | wc -c >"$INPUT_TMP/$(basename "$e")") &
+        (timeout "$INPUT_WINDOW" cat "$e" 2>/dev/null | wc -c >"$INPUT_TMP/$(basename "$e")") &
         INPUT_PIDS+=($!) # track only OUR readers — `wait` w/o args would also block on the journal follower
     done
 }
@@ -149,21 +150,17 @@ input_capture_report() { # wait for readers, name devices that fired
     [ -n "$out" ] && echo "FIRED: $out" || echo "silent"
 }
 
-# One VAR=... out of a process's environ (same-uid only). The redirect is wrapped in a group
-# so a ptrace-gated environ is silent, not a "Permission denied" leaking to the terminal.
-env_val() { # $1=pid $2=VARNAME
-    { tr '\0' '\n' <"/proc/$1/environ"; } 2>/dev/null | grep -m1 "^$2=" | cut -d= -f2-
+# The two things we need out of a guard's argv, `sleep-guard.sh <container> <tag> <state-root>`.
+# Both redirects are wrapped in a group so an unreadable cmdline is silent rather than leaking
+# "Permission denied" into the log.
+#
+# The tag is the LAST kib- token (the container name is the first, and is no longer needed).
+# The state root is the last /-leading one — absolute, so the ^kib- filter steps over it.
+guard_tag() { # $1 = guard pid
+    { tr '\0' '\n' <"/proc/$1/cmdline"; } 2>/dev/null | grep '^kib-' | tail -1
 }
-
-container_cmd() { # $1=container $2=pid -> short cmdline of that in-container pid
-    # tr maps BOTH NUL and newline to space: an argv with literal newlines (a multi-line
-    # `bash -c`) would wrap the guard_sees line and corrupt the log. cut caps the length.
-    docker exec --user "$(id -u)" "$1" sh -c 'tr "\0\n" "  " < /proc/'"$2"'/cmdline 2>/dev/null | cut -c1-70' 2>/dev/null
-}
-# container name (head) or session tag (tail) from a guard's argv: `sleep-guard.sh
-# <container> <tag>`, both starting kib-, container first.
-guard_arg() { # $1=guard pid $2=head|tail
-    { tr '\0' '\n' <"/proc/$1/cmdline"; } 2>/dev/null | grep '^kib-' | "$2" -1
+guard_state_root() { # $1 = guard pid
+    { tr '\0' '\n' <"/proc/$1/cmdline"; } 2>/dev/null | grep '^/' | tail -1
 }
 
 # PIDs of claude-code *sleep block* inhibitors. WHO="claude-code" is a single token, so PID is
@@ -173,28 +170,7 @@ cc_inhibitor_pids() {
         | awk '/claude-code/ && /sleep/ { for(i=1;i<=NF;i++) if($i=="claude-code") print $(i+3) }'
 }
 
-# ---- wchar snapshots (reconstruct the guard's own measurement) -------------
-declare -A IO1 IO2 PTAG PCMD
 declare -A FIRSTSEEN # claude-code inhibitor pid -> epoch first seen (lifetime tracking)
-
-snapshot() { # $1 = target array name (IO1 or IO2). On IO2 also records tag+cmdline.
-    local -n _io=$1
-    _io=()
-    local d pid w
-    for d in /proc/[0-9]*; do
-        [ -O "$d" ] || continue # same-uid: io/environ are ptrace-gated otherwise
-        pid=${d#/proc/}
-        w=$(awk '/^wchar:/{print $2; exit}' "$d/io" 2>/dev/null) || continue
-        [ -n "$w" ] || continue
-        # shellcheck disable=SC2004  # _io namerefs an ASSOCIATIVE array: a bare subscript
-        # would key on the literal string "pid", not its value.
-        _io[$pid]=$w
-        if [ "$1" = IO2 ]; then
-            PTAG[$pid]=$(tr '\0' '\n' <"$d/environ" 2>/dev/null | grep -m1 '^KIB_SESSION_TAG=' | cut -d= -f2-)
-            PCMD[$pid]=$(tr '\0\n' '  ' <"$d/cmdline" 2>/dev/null | cut -c1-70) # NUL+newline -> space, so a multi-line argv can't wrap the line
-        fi
-    done
-}
 
 # ---- background journal follower, tagged into the same log ----------------
 (journalctl -f -o short-iso --since now 2>/dev/null \
@@ -215,7 +191,7 @@ trap cleanup INT TERM
 SESSION_ID="$(graphical_session)"
 say "=== kib sleep-monitor — started $(date '+%F %T') ==="
 say "log:        $LOG"
-say "interval:   ${INTERVAL}s   idle-flag: ${IDLE_FLAG}s   subsample: ${SUBSAMPLE}s   min_bytes: ${MIN_BYTES}   qdbus: ${QDBUS:-NONE}"
+say "interval:   ${INTERVAL}s   idle-flag: ${IDLE_FLAG}s   input_window: ${INPUT_WINDOW}s   qdbus: ${QDBUS:-NONE}"
 say "session:    logind graphical session=${SESSION_ID:-UNKNOWN}   input_devs=${#INPUT_DEVS[@]} readable"
 [ ${#INPUT_DEVS[@]} -eq 0 ] && say "            (no readable /dev/input — phantom-input detection OFF; sudo usermod -aG input $USER then re-login to enable)"
 say "reminder:   set Suspend to 'After 1 minute' now, then leave it idle / close the lid."
@@ -243,48 +219,16 @@ while true; do
     lid=$(lid_state)
     susp=$(susp_count)
 
-    # --- map every live claude-code guard to its (container,tag) to sample as the guard does -
-    declare -A GTAG_CONT=()
     cc_pids=$(cc_inhibitor_pids)
-    while read -r ip; do
-        [ -n "$ip" ] || continue
-        guard=$(awk '{print $4}' "/proc/$ip/stat" 2>/dev/null) # ppid = the sleep-guard.sh shell
-        [ -n "${guard:-}" ] || continue
-        ct=$(guard_arg "$guard" head)
-        tg=$(guard_arg "$guard" tail)
-        [ -n "$ct" ] && [ -n "$tg" ] && GTAG_CONT["$tg"]="$ct"
-    done <<<"$cc_pids"
 
-    # container-side wchar sample #1 (mirrors the guard's own sampler)
-    declare -A CIO1=()
-    for tg in "${!GTAG_CONT[@]}"; do
-        while read -r cpid cbytes; do
-            [ -n "$cpid" ] && CIO1["$tg,$cpid"]="$cbytes"
-        done <<<"$(kib_sample_wchar "${GTAG_CONT[$tg]}" "$tg")"
-    done
-
-    # --- guard-equivalent wchar measurement + phantom-input capture, both over SUBSAMPLE ---
-    snapshot IO1
-    input_capture_start # background /dev/input readers for SUBSAMPLE
-    sleep "$SUBSAMPLE"
+    # --- phantom-input capture over INPUT_WINDOW ---
+    # This used to also bracket two container-side wchar samples, because the guard's metric was
+    # bytes written. It no longer is, and byte volume never held an inhibitor by itself — only a
+    # lock does — so the whole sampler went with it. What is left is the one thing here that
+    # genuinely keeps a machine awake on its own: a device firing when nobody is touching it.
+    input_capture_start # background /dev/input readers for INPUT_WINDOW
+    sleep "$INPUT_WINDOW"
     input=$(input_capture_report) # waits on the readers, names any device that fired
-    snapshot IO2
-
-    # container-side wchar sample #2 -> per-tag max single-process delta (== guard's metric)
-    declare -A TAGMAX=() TAGPID=()
-    for tg in "${!GTAG_CONT[@]}"; do
-        while read -r cpid cbytes; do
-            [ -n "$cpid" ] || continue
-            prev="${CIO1["$tg,$cpid"]:-}"
-            [ -n "$prev" ] || continue # only pids in BOTH samples
-            d=$((cbytes - prev))
-            ((d < 0)) && continue
-            if ((d > ${TAGMAX[$tg]:-0})); then
-                TAGMAX[$tg]=$d
-                TAGPID[$tg]=$cpid
-            fi
-        done <<<"$(kib_sample_wchar "${GTAG_CONT[$tg]}" "$tg")"
-    done
 
     # PRIMARY idle clock = seconds since the last real input event, which is what PowerDevil's
     # timer keys off — ground truth for "should it have suspended?", unlike the D-Bus clocks.
@@ -297,16 +241,6 @@ while true; do
         is=$hint_idle
         isrc="loginhint"
     fi
-
-    # global top writers (host-side): names a chatty process system-wide for context
-    tops=""
-    for pid in "${!IO2[@]}"; do
-        w1=${IO1[$pid]:-}
-        [ -n "$w1" ] || continue # only pids in BOTH samples
-        d=$((${IO2[$pid]} - w1))
-        ((d < 0)) && continue
-        ((d > 0)) && tops+="$d $pid"$'\n'
-    done
 
     say "[$ts] idle=${is}s(${isrc}) hint=${hint}/${hint_idle}s ss=${ss}s ac=${ac} lid=${lid:-?} suspend_count=${susp} $(batt)"
     say "        input_events   : ${input:-n/a}$([[ ${input:-} == FIRED* ]] && printf '   <-- if you are NOT touching anything, THIS keeps it awake')"
@@ -333,42 +267,20 @@ while true; do
             gtty=$(ps -o tty= -p "${guard:-0}" 2>/dev/null | tr -d ' ')
             gppid=$(awk '{print $4}' "/proc/${guard:-0}/stat" 2>/dev/null)
             getime=$(ps -o etime= -p "${guard:-0}" 2>/dev/null | tr -d ' ')
-            # the guard's argv is `sleep-guard.sh <container> <tag>` — container first, tag last
-            gtag=$(guard_arg "${guard:-0}" tail)
-            gcont=$(guard_arg "${guard:-0}" head)
-            gmin=$(env_val "${guard:-0}" SLEEP_GUARD_MIN_BYTES)
-            gmin=${gmin:-$MIN_BYTES}
+            gtag=$(guard_tag "${guard:-0}")
+            groot=$(guard_state_root "${guard:-0}")
+            # THE guard's metric, read from the same markers it acts on.
+            ghook=$(kib_sleep_state "${groot:-/nonexistent}" "${gtag:-none}")
             orphan=""
             { [ "${gppid:-1}" = "1" ] || [ -z "$gtty" ] || [ "$gtty" = "?" ]; } && orphan="  <<< ORPHANED (ppid=$gppid tty=${gtty:-?})"
-            # what does THIS guard see? per-tag max measured INSIDE its container (as the guard does)
-            mx=0
-            mxpid=""
-            mxcmd=""
-            if [ -n "$gtag" ]; then
-                mx=${TAGMAX[$gtag]:-0}
-                mxpid=${TAGPID[$gtag]:-}
-            fi
-            [ -n "$mxpid" ] && [ -n "$gcont" ] && mxcmd=$(container_cmd "$gcont" "$mxpid")
-            verdict="justified"
-            ((mx < gmin)) && verdict="UNJUSTIFIED (max ${mx} < ${gmin}) — riding 30s grace tail or stuck"
-            say "        cc-lock pid=$ip held=${held}s guard=$guard etime=${getime:-?} tag=${gtag:-?} min_bytes=${gmin}${orphan}"
-            say "                guard_sees: max_writer=${mx}B/${SUBSAMPLE}s pid=${mxpid:-none} ${mxcmd} => ${verdict}"
+            case "$ghook" in
+                busy) verdict="justified (hook state: busy — a turn is in flight, or a subagent is running)" ;;
+                idle) verdict="UNJUSTIFIED (hook state: idle) — riding the ${GRACE_HINT}s grace tail, or stuck" ;;
+                *) verdict="UNKNOWN hook state — markers missing; the guard treats this as idle, so it is NOT what is holding the lock" ;;
+            esac
+            say "        cc-lock pid=$ip held=${held}s guard=$guard etime=${getime:-?} tag=${gtag:-?} hook=${ghook}${orphan}"
+            say "                guard_sees: ${verdict}"
         done <<<"$cc_pids"
-    fi
-
-    # --- per-tag guard metric summary + top writers ---
-    if [ ${#TAGMAX[@]} -gt 0 ]; then
-        for tag in "${!TAGMAX[@]}"; do
-            _cmd=""
-            [ -n "${TAGPID[$tag]:-}" ] && _cmd=$(container_cmd "${GTAG_CONT[$tag]:-}" "${TAGPID[$tag]}")
-            say "        tag=${tag} max_writer=${TAGMAX[$tag]}B/${SUBSAMPLE}s pid=${TAGPID[$tag]:-none} ${_cmd}"
-        done
-    fi
-    if [ -n "$tops" ]; then
-        say "        top_writers (B/${SUBSAMPLE}s):"
-        printf '%s' "$tops" | sort -rn | head -5 | while read -r d pid; do
-            say "          d=${d} pid=${pid} tag=${PTAG[$pid]:-} ${PCMD[$pid]:-}"
-        done
     fi
 
     # --- anomaly / event detection ---
@@ -381,13 +293,32 @@ while true; do
     # blocking the suspend that should have fired. Name the blocker.
     if [ "$is" -ge "$IDLE_FLAG" ]; then
         if [ -n "$cc_pids" ]; then
-            biggest=0
-            for tag in "${!TAGMAX[@]}"; do ((${TAGMAX[$tag]} > biggest)) && biggest=${TAGMAX[$tag]}; done
-            if ((biggest >= MIN_BYTES)); then
-                say "  >>> SMOKING GUN: no input for ${is}s but a claude-code lock is held and JUSTIFIED — a process writes ${biggest}B/${SUBSAMPLE}s (>= ${MIN_BYTES}). See top_writers; that process pins sleep."
-            else
-                say "  >>> SMOKING GUN: no input for ${is}s, claude-code lock HELD with NO qualifying writer (max=${biggest}B < ${MIN_BYTES}). => sleep-guard STUCK/ORPHANED or riding its 30s grace. Check cc-lock lines for held=Ns / ORPHANED."
-            fi
+            # Judged on the guard's OWN metric — the hook markers. A lock held with every
+            # session idle is the guard misbehaving; held with one busy is simply correct,
+            # however quiet the terminal is (a background subagent writes almost nothing, which
+            # is exactly what the retired byte threshold got wrong).
+            anyhook=idle
+            while read -r ip; do
+                [ -n "$ip" ] || continue
+                g=$(awk '{print $4}' "/proc/$ip/stat" 2>/dev/null)
+                st=$(kib_sleep_state "$(guard_state_root "${g:-0}")" "$(guard_tag "${g:-0}")")
+                if [ "$st" = busy ]; then
+                    anyhook=busy
+                    break
+                fi
+                if [ "$st" = unknown ]; then anyhook=unknown; fi
+            done <<<"$cc_pids"
+            case "$anyhook" in
+                busy)
+                    say "  >>> no input for ${is}s but a claude-code lock is held and JUSTIFIED — a session's hook state is busy (a turn is in flight, or a background subagent is running). Not a fault."
+                    ;;
+                unknown)
+                    say "  >>> SMOKING GUN: no input for ${is}s, claude-code lock HELD but NO hook markers exist. The guard reads unknown as idle and should have released, so this lock is ORPHANED — check the cc-lock lines. Separately: the managed-settings hooks are not loading, so look for a 'Managed' source in /status inside the box."
+                    ;;
+                *)
+                    say "  >>> SMOKING GUN: no input for ${is}s, claude-code lock HELD with every session's hook state idle. => sleep-guard STUCK/ORPHANED or riding its ${GRACE_HINT}s grace. Check cc-lock lines for held=Ns / ORPHANED."
+                    ;;
+            esac
         elif [ "$kde" != "(none)" ]; then
             say "  >>> SMOKING GUN: no input for ${is}s, no claude-code lock, but a KDE idle-inhibitor is held: ${kde}"
         else
@@ -395,7 +326,7 @@ while true; do
         fi
     fi
 
-    # sleep the remainder of the interval (we already spent SUBSAMPLE sampling)
-    rest=$((INTERVAL - SUBSAMPLE))
+    # sleep the remainder of the interval (we already spent INPUT_WINDOW listening)
+    rest=$((INTERVAL - INPUT_WINDOW))
     ((rest > 0)) && sleep "$rest"
 done

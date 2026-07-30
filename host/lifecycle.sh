@@ -10,7 +10,7 @@
 #
 # Reads:  KIB_ROOT IMAGE_NAME UNLOCK_SHARED and the globals host/config.sh sets
 # Writes: PROJ_HASH CNAME FUSE_CNAME FUSE_ROOT WL_CNAME WL_ROOT PATTERNS_STATE PASSWD_STATE
-#         GROUP_STATE CLIP_STATE
+#         GROUP_STATE CLIP_STATE SLEEP_STATE SLEEP_STATE_CPATH
 #         CRED_WITNESS LOCK_WITNESS ASSET_WATCH_PID SESSION_CDIR SHARED_CDIR SHARED_ASSET_CDIR
 #         LOCK_WITNESS_CPATH TRANSCRIPTS_CPATH BROKER_CNAME BROKER_NET BROKER_DIR BROKER_OUT
 #         BROKER_HASH BROKER_ENABLED REDACTION_ARGS ARGS
@@ -50,6 +50,11 @@ kib_identity() {
     PASSWD_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.passwd"
     GROUP_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.group"
     CLIP_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.clip"
+    # The sleep guard's marker tree: written by the in-box hook, read by host/sleep-guard.sh.
+    # Host-side state like the rest here, NOT under a bind the session already owns — but this
+    # one is bind-mounted rw (the hook has to write it), so the guard only ever tests EXISTENCE
+    # of a marker, never reads content. (sleep-guard.md)
+    SLEEP_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.sleep"
     # Written at creation when the box got the REAL credential. A host-side FILE, not a shell
     # variable: the last terminal out often merely ATTACHED and never ran stage_credential, so
     # a per-process flag would skip merge_out_credential and leave canonical holding a token
@@ -95,6 +100,9 @@ SHARED_ASSET_CDIR=/run/kib/shared
 LOCK_WITNESS_CPATH=/run/kib/shared/.kib-shared-locked
 TRANSCRIPTS_CPATH=/run/kib/transcripts
 PLACEHOLDER_CRED_CPATH=/run/kib/placeholder-cred
+# A SIBLING of the binds above, never nested inside one — Docker Desktop aborts the whole
+# `docker run` on a bind whose destination sits inside another's. (macos.md)
+SLEEP_STATE_CPATH=/run/kib/sleep
 
 container_running() { [ -n "$(docker ps -q -f "name=^${CNAME}$" 2>/dev/null)" ]; }
 broker_running() { [ -n "$(docker ps -q -f "name=^${BROKER_CNAME}$" 2>/dev/null)" ]; }
@@ -234,6 +242,11 @@ start_container() {
         # or the real one copied in) and one symlink per shared asset (below). A real dir, so
         # Claude's atomic credential rename works.
         -v "$SHARED_BASE:$SHARED_CDIR"
+
+        # The sleep guard's marker tree, rw: the in-box hook writes it, the host guard reads it.
+        # rw is the whole point and is safe here because the guard only tests marker EXISTENCE —
+        # it never opens one, so there is nothing for a planted symlink to redirect into.
+        -v "$SLEEP_STATE:$SLEEP_STATE_CPATH"
 
         # config (+ .claude.json) resolve to the per-project session dir; the credential store
         # to the shared-assembly dir.
@@ -452,6 +465,9 @@ stop_asset_watch() { kill_pgrp "${ASSET_WATCH_PID:-}"; }
 kib_prepare_session() {
     mkdir -p "$LOCK_DIR" && chmod 700 "$LOCK_DIR"
     mkdir -p "$STATE_DIR" && chmod 700 "$STATE_DIR"
+    # Must exist before the container is created: docker would otherwise make the mountpoint
+    # itself, ROOT-owned, and the hook (running as the host uid) could never write a marker.
+    mkdir -p "$SLEEP_STATE" && chmod 700 "$SLEEP_STATE"
     validate_shared_settings
     validate_shared_assets launch
     report_shared_asset_writes
@@ -583,13 +599,22 @@ kib_cleanup() {
 # Re-entering through the entrypoint (rather than calling claude directly) reuses its
 # "already the target user" branch, which sets HOME and PATH correctly.
 kib_run_session() {
-    # Stamps this terminal's processes so the sleep guard samples only pids that are ours —
-    # without it, one working session makes every terminal's guard inhibit.
+    # Stamps this terminal's processes so the sleep guard reads only the state that is ours —
+    # without it, one working session makes every terminal's guard inhibit. The in-box hook
+    # inherits this from the session's environ and names its marker dir after it.
     SESSION_TAG="kib-$$-$(date +%s)"
+
+    # A `kill -9` fires neither Stop nor SessionEnd, so a previous run can leave markers behind.
+    # The tag embeds pid+epoch and so never repeats, but clear ours anyway: a guard that starts
+    # by trusting a directory it did not write is one stale `turn` away from pinning the machine
+    # awake all night.
+    # ${var:?} on BOTH halves: this is an `rm -rf`, and an unset SLEEP_STATE with an unset tag
+    # expands to `/`. Fail the launch instead — there is nothing to clean if either is missing.
+    rm -rf "${SLEEP_STATE:?}/${SESSION_TAG:?}" 2>/dev/null || true
 
     # 200>&- / 201>&-: the guard must not inherit our lock fds. A guard outliving kib would
     # keep holding the project's shared lock and stop the container from ever being torn down.
-    "$KIB_ROOT/host/sleep-guard.sh" "$CNAME" "$SESSION_TAG" 200>&- 201>&- &
+    "$KIB_ROOT/host/sleep-guard.sh" "$CNAME" "$SESSION_TAG" "$SLEEP_STATE" 200>&- 201>&- &
     SLEEP_GUARD_PID=$!
 
     trap kib_cleanup EXIT

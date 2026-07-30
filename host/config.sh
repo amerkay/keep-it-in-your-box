@@ -78,12 +78,35 @@ ensure_claude_home() {
 KIB_POLICY_FILE_HOST="$KIB_ROOT/guest/policy/etc-CLAUDE.md"
 KIB_POLICY_CPATH="/etc/claude-code/CLAUDE.md"
 
+# The sleep guard's hooks, in the SAME managed-policy directory and for the same reason: it is
+# the one settings scope the session cannot edit (bound :ro) and the one that never folds back
+# out to canonical. `hooks[].command` in ~/.claude/settings.json is host code execution and
+# validate_shared_settings refuses it — correctly, since the box can write that file and it
+# loads in every project AND a host `claude`. Managed settings are outside that path entirely:
+# highest precedence, unwritable from in here, and never merged anywhere.
+KIB_SLEEP_HOOK_FILE_HOST="$KIB_ROOT/guest/policy/sleep-hook.py"
+KIB_SLEEP_HOOK_CPATH="/etc/claude-code/sleep-hook.py"
+KIB_MANAGED_FILE_HOST="$KIB_ROOT/guest/policy/managed-settings.json"
+KIB_MANAGED_CPATH="/etc/claude-code/managed-settings.json"
+
 add_policy_args() {
     # Fail closed: a box whose agent never sees the sandbox rules is the one case where
     # launching anyway is worse than not launching.
     [ -f "$KIB_POLICY_FILE_HOST" ] \
         || die "missing $KIB_POLICY_FILE_HOST — refusing to launch a box with no sandbox policy."
     ARGS+=(-v "$KIB_POLICY_FILE_HOST:$KIB_POLICY_CPATH:ro")
+
+    # WARN, not die, unlike the policy above: the session itself is fine without these, and
+    # nothing is left unguarded — only the machine's sleep behaviour degrades. The guard has no
+    # fallback by design, so be explicit about what that costs rather than implying it copes.
+    if [ -f "$KIB_SLEEP_HOOK_FILE_HOST" ] && [ -f "$KIB_MANAGED_FILE_HOST" ]; then
+        ARGS+=(-v "$KIB_SLEEP_HOOK_FILE_HOST:$KIB_SLEEP_HOOK_CPATH:ro")
+        ARGS+=(-v "$KIB_MANAGED_FILE_HOST:$KIB_MANAGED_CPATH:ro")
+    else
+        warn "missing the sleep-guard hook files under $KIB_ROOT/guest/policy —" \
+            "this session publishes no activity state, so the machine may go to sleep while" \
+            "Claude is still working."
+    fi
 }
 
 # Attach-path check: the mount is fixed at creation, so a container an older kib left running

@@ -53,7 +53,8 @@ Four gates. A substrate that violates one is **DISQUALIFIED**, not low-rated:
 Each of these is a host↔container seam a VM boundary severs or reroutes: the Wayland clipboard
 proxy and the macOS pbpaste bridge (unix sockets do not cross a hypervisor — need a vsock relay),
 live DNS sync, the `kib-broker` network alias and dual-homing (both Docker embedded-DNS features),
-`host.docker.internal`, the sleep guard's `docker top` sampling, bind mounts becoming virtiofs, and
+`host.docker.internal`, `docker top` readiness detection, the sleep guard's rw marker bind (the box
+writes it, the host reads it), bind mounts becoming virtiofs, and
 `docker exec` as the whole many-terminals-one-container attach model. Adopting any option is a
 re-platforming, not a flag.
 

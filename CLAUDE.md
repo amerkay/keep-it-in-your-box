@@ -145,10 +145,15 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
 - **Don't wrap `google-chrome` image-wide with `--no-sandbox`** — the entrypoint's `npx` shim
   already makes the stock `chrome-devtools-mcp` plugin launch a browser; a Dockerfile wrapper is
   redundant, needs a rebuild, and disarms every other Chrome caller. (`terminal-and-security.md`)
-- **Sleep guard: busiest single process, never a sum; only pids in both samples** — any sum
-  scales with N and pinned sleep overnight. Don't switch the inhibitor to `--what=idle` (kills
-  lid-shut tasks); keep the post-resume SETTLE window (re-suspend wedged s2idle). The sampler is
-  SOURCED by both the guard and the diagnostic — never copy it. (`sleep-guard.md`)
+- **Sleep guard: Claude's own hook state, never a measurement of output** — byte sampling
+  (`wchar`), transcript mtime and `claude agents --json` were each tried and each removed. A
+  background subagent writes almost nothing to the terminal, so any output-volume metric sleeps
+  the machine mid-work, and a question waiting on the user is indistinguishable from a long
+  think. The verdict is `kib_sleep_state`, SOURCED by both the guard and the diagnostic — never
+  copy it. Keep the poll free of subprocesses: no `docker exec`, no CLI, markers or nothing.
+  Don't switch the inhibitor to `--what=idle` (kills lid-shut tasks); keep the post-resume
+  SETTLE window (re-suspend wedged s2idle); keep `--who` a space-free `claude-code` token (the
+  diagnostic reads the PID by field offset). (`sleep-guard.md`)
 - **Don't re-enable `leftArrowOpensAgents`, and don't re-investigate the ←-key data loss** — the
   sandbox is exonerated; it's the binary's abort-then-fork. Keep the pin. (`terminal-and-security.md`)
 - **Don't re-pin the box's config dir to a fixed `/home/hostuser` spelling** — it mounts at the
