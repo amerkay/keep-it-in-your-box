@@ -186,6 +186,36 @@ else
 fi
 unset kp_bad
 
+# Mashing ^C to quit Claude must not strand containers. A tty ^C signals the whole foreground
+# process group, so every press after `docker exec` restored cooked mode lands on kib itself:
+# bash enters the EXIT trap on the first and the NEXT one killed it mid-`docker stop`, leaving the
+# main container, the FUSE sidecar and the broker running with the session gone. Teardown must
+# therefore disarm the three before it touches docker, and by IGNORING them — SIG_IGN survives
+# fork+exec, so the `docker` children are covered too.
+cu_first="$(sed -n '/^kib_cleanup()/,/^}$/p' "$KIB_ROOT/host/lifecycle.sh" \
+    | sed -n '2,$p' | grep -vE '^[[:space:]]*(#|$)' | head -1)"
+case "$cu_first" in
+    *"trap ''"*INT*HUP*TERM*)
+        pass "teardown ignores INT/HUP/TERM first, so ^C-mashing cannot orphan containers"
+        ;;
+    *)
+        fail "kib_cleanup does not open with \`trap '' INT HUP TERM\`: ${cu_first:-<empty>}" \
+            "a second ^C then kills teardown mid-docker-stop and strands every container"
+        ;;
+esac
+unset cu_first
+
+# The paired half: an INT handler that `exit`s is NOT the fix and actively breaks the one above —
+# while it is armed, a ^C arriving inside the EXIT trap fires it and aborts teardown. A ^C already
+# reaches that trap on its own (it kills the foreground child and bash propagates).
+# shellcheck disable=SC2016  # a literal grep pattern: it must match the source text verbatim
+if grep -qE "^[[:space:]]*trap '[^']*exit[^']*' .*INT" "$KIB_ROOT/host/lifecycle.sh"; then
+    fail "an exiting INT handler is installed in host/lifecycle.sh" \
+        "it fires inside kib_cleanup and aborts teardown — ignoring INT there is the fix"
+else
+    pass "no exiting INT handler competes with the teardown's signal ignore"
+fi
+
 # A script started BY detach_pgrp is a separate process, and bin/kib never exports KIB_ROOT — so
 # requiring it from the environment makes the script exit instantly on every launch. It shipped
 # that way in shared-watch.sh: the notifier never ran once, and the dead pid it recorded is what

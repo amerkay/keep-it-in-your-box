@@ -563,6 +563,14 @@ kib_bring_up() {
 
 # ── Exit path ────────────────────────────────────────────────────
 kib_cleanup() {
+    # Uninterruptible from here. A tty ^C signals the whole foreground process group, so mashing
+    # it to quit Claude lands the later presses on kib itself, once `docker exec` has restored
+    # cooked mode: bash enters this trap on the first and a second one kills it mid-`docker stop`,
+    # stranding the main container, the FUSE sidecar and the broker. Ignore rather than trap —
+    # SIG_IGN survives fork+exec, so every `docker` child below is covered too, and a handler that
+    # `exit`s would abort this trap exactly like the default did. (container-lifecycle.md)
+    trap '' INT HUP TERM
+
     kill "$SLEEP_GUARD_PID" 2>/dev/null || true
 
     if [ "$EPHEMERAL" = 1 ]; then
@@ -621,6 +629,10 @@ kib_run_session() {
     # Bash dies on SIGHUP (window closed) and SIGTERM *without* running the EXIT trap, which
     # orphans the sleep guard still holding an inhibitor and strands the container if this was
     # the last terminal. Route both through a normal exit so cleanup runs.
+    # No INT here on purpose: a tty ^C already reaches the EXIT trap (it kills the foreground
+    # child, and bash propagates), so an `exit 130` handler adds nothing — and while it is still
+    # armed a second ^C fires it *inside* the trap and aborts teardown. kib_cleanup's `trap ''`
+    # is what makes ^C-mashing safe. (container-lifecycle.md)
     trap 'exit 129' HUP
     trap 'exit 143' TERM
 
