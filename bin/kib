@@ -238,6 +238,7 @@ kib_prepare_session
 # since either can change between sessions.
 warn_inline_mcp_secrets
 sync_kibignore_gitignore
+report_kibignore_optouts
 
 kib_bring_up
 kib_run_session ${CMD[@]+"${CMD[@]}"}

@@ -441,7 +441,7 @@ group 4 the long tail.
 | **Non-`.git` git dirs** | ✅ by layout | ❌ name, depth 3 | ❌ name, depth 3 | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Submodule / worktree** | ✅ | ❌ `SkipDir` | ❌ **deny skipped** | ❌ conceded | ✅ gitlinks severed | ⚠️ doctor fails | ❌ **main `.git` rw** | ❌ |
 | **`include` / `includeIf`** | ✅ refused + host-side resolve | ❌ | ❌ | ⚠️ motive only | ❓ | ✅ excluded | ❌ | ❌ **re-opened** |
-| **`.vscode/` `.idea/`** | ✅ | ✅ | ✅ | ❌ non-goal | ❌ writes them | ❌ | ❌ verified | ❌ verified |
+| **`.vscode/`** (`.idea/` withdrawn) | ✅ | ✅ | ✅ | ❌ non-goal | ❌ writes them | ❌ | ❌ verified | ❌ verified |
 | **`.envrc`** | ✅ | ❌ | ❌ | ❓ | ❌ | ❌ | ❌ verified | ❌ verified |
 | **`.devcontainer/`** | ✅ | ❌ | ❌ | ❓ | ⚠️ filtered input | ✅ + host validation | ❌ verified | ✅ `:ro` + guard |
 | **Shell rc** | n/a not mounted | ✅ mandatory | ✅ | ✅ | ❌ | ✅ root-managed | ✅ opt-in read | ❌ |
@@ -495,7 +495,7 @@ group 4 the long tail.
 | **Non-`.git` git dirs** | ✅ by layout | ❓ | ❓ | ❓ | ⚠️ blocked, opt-in override | ❌ | ❓ | ❓ literal `.git` only |
 | **Submodule / worktree** | ✅ | ❓ | ❓ | ❓ | ❌ **auto-granted rw** | ❌ | ❓ | ✅ explicit handling |
 | **`include` / `includeIf`** | ✅ refused | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ | ❓ |
-| **`.vscode/` `.idea/`** | ✅ | ❓ | ❓ | ❓ | ❓ | ❌ verified | ✅ write-deny | ❌ verified |
+| **`.vscode/`** (`.idea/` withdrawn) | ✅ | ❓ | ❓ | ❓ | ❓ | ❌ verified | ✅ write-deny | ❌ verified |
 | **`.envrc`** | ✅ | ❓ | ❓ | ❓ | ❓ | ❌ verified | ❓ | ❌ verified |
 | **`.devcontainer/`** | ✅ | ❓ | ❓ | ❓ | ❓ | ❌ verified | ❓ | ❌ verified |
 | **Shell rc** | n/a not mounted | ❓ | ❓ | ❓ | ❓ | ⚠️ readable, not writable | ✅ 10 rules | ❓ |
@@ -549,7 +549,7 @@ group 4 the long tail.
 | **Non-`.git` git dirs** | ✅ by layout | ❓ | ❌ | ❓ | ❓ | ❓ | ❓ | ❓ |
 | **Submodule / worktree** | ✅ | ⚠️ inferred from flag | ❌ | ❓ | ❓ | ❓ | ❓ worktree `.git` is a file | ⚠️ main root also mounted |
 | **`include` / `includeIf`** | ✅ refused | ❓ | ❓ | ❌ verified absent | ❓ | ❓ | ❓ | ❓ |
-| **`.vscode/` `.idea/`** | ✅ | ⚠️ opt-in flags | ❌ | ❌ | ❓ | ❓ | ❓ | ❌ |
+| **`.vscode/`** (`.idea/` withdrawn) | ✅ | ⚠️ opt-in flags | ❌ | ❌ | ❓ | ❓ | ❓ | ❌ |
 | **`.envrc`** | ✅ | ❌ | ❌ | ❌ | ❓ | ❓ | ❓ | ❌ |
 | **`.devcontainer/`** | ✅ | ⚠️ devcontainer mode only | ❌ | ❌ | ⚠️ consumed as input | ❌ **executes it** | ❓ | ❌ |
 | **Shell rc** | n/a not mounted | ❌ | ❌ not mounted | ⚠️ guest-side only | ❓ | ❓ | ✅ guest builds fresh | ❌ not mounted |
@@ -603,7 +603,7 @@ group 4 the long tail.
 | **Non-`.git` git dirs** | ✅ by layout | ❓ | ❓ | ❌ verified | ❓ | ❌ | ❓ | ❓ |
 | **Submodule / worktree** | ✅ | ❓ | ❓ | ❌ verified | ❓ | ❌ | ❓ | ❓ |
 | **`include` / `includeIf`** | ✅ refused | ❓ | ❓ | ❓ | ❓ | ❌ | ❓ | ❓ |
-| **`.vscode/` `.idea/`** | ✅ | ❓ | ❓ | ❌ verified | ❌ under WORKDIR | ❌ | ❓ | ❓ |
+| **`.vscode/`** (`.idea/` withdrawn) | ✅ | ❓ | ❓ | ❌ verified | ❌ under WORKDIR | ❌ | ❓ | ❓ |
 | **`.envrc`** | ✅ | ❓ | ❓ | ❌ verified | ❌ under WORKDIR | ❌ | ❓ | ❓ |
 | **`.devcontainer/`** | ✅ | ❓ | ❓ | ❌ verified | ❌ under WORKDIR | ❌ | ❓ | ❓ |
 | **Shell rc** | n/a not mounted | ❌ not bound | ❓ | n/a env stripped | ⚠️ incidental only | ❌ not mounted | ❓ | ❓ |

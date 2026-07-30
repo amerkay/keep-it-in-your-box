@@ -311,7 +311,7 @@ allow "regression: ordinary hardlink" bash -c "echo x > '$ARTIFACTS/hl-src'; ln 
 # ═════════════════════════════════════════════════════════════════
 section "Host-executed config guard — non-git paths"
 
-for p in .vscode/tasks.json .devcontainer/devcontainer.json .idea/workspace.xml .envrc \
+for p in .vscode/tasks.json .devcontainer/devcontainer.json .envrc \
     .githooks/pre-commit .gitmodules .claude/hooks/notify.sh .cursor/mcp.json \
     .zed/tasks.json .zed/debug.json .run/app.run.xml .mvn/jvm.config \
     .exrc .nvim.lua .ripgreprc .yarnrc.yml; do
@@ -321,7 +321,11 @@ done
 # The guard is pure-exec files ONLY. A rule on a file ordinary work edits would refuse an
 # everyday write, and the policy text tells the session to stop — so mixed-use config stays
 # writable and is warned about host-side (audit_project_configs). Prompt text is not execution.
-for p in .cursor/rules/style.md .claude/commands/deploy.md .claude/settings.json .mcp.json mise.toml; do
+# .idea/ is here, not above, since 2026-07-30: the [protect] rule broke `pnpm install`, whose
+# EPERM under .idea/ ends the session over an unrelated command. Residual risk (run configs,
+# File Watchers) is stated in guest/policy/global.kibignore.
+for p in .cursor/rules/style.md .claude/commands/deploy.md .claude/settings.json .mcp.json \
+    mise.toml .idea/workspace.xml; do
     allow "regression: $p stays writable (detected host-side, not refused)" \
         bash -c "mkdir -p \"\$(dirname '$ARTIFACTS/$p')\" 2>/dev/null; echo '{}' > '$ARTIFACTS/$p'"
 done

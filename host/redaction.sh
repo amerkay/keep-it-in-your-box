@@ -31,7 +31,7 @@ sync_kibignore_gitignore() {
     fi
 
     local patterns
-    patterns="$(kib_py shared.rules to-gitignore "$PWD/$KIB_RULE_FILE")" || {
+    patterns="$(kib_py shared.rules to-gitignore "$KIB_GUARD_FILE_HOST" "$PWD/$KIB_RULE_FILE")" || {
         warn "could not translate $KIB_RULE_FILE to .gitignore patterns; left .gitignore alone."
         return 0
     }
@@ -54,6 +54,21 @@ sync_kibignore_gitignore() {
             printf '%s\n' "$e"
         fi
     } >"$gi.kib.tmp" && mv "$gi.kib.tmp" "$gi"
+}
+
+# ── The [redact] opt-out, named at every launch ──────────────────
+# `!.env` in a project .kibignore cancels the guard's redaction (kib.shared.rules), so the
+# session reads that file in full. The box can write .kibignore, so the user seeing the rule is
+# the only control there is — but keep it to one line per rule: this is a deliberate setting on
+# the projects that use it, and an alarm printed at every launch stops being read.
+report_kibignore_optouts() {
+    [ -f "$PWD/$KIB_RULE_FILE" ] || return 0
+    have_python || return 0
+    local optouts
+    optouts="$(kib_py shared.rules optouts "$KIB_GUARD_FILE_HOST" "$PWD/$KIB_RULE_FILE")" || return 0
+    [ -n "$optouts" ] || return 0
+    echo "ℹ️  $KIB_RULE_FILE un-redacts these for the sandbox — Claude reads them in full:" >&2
+    printf '%s\n' "$optouts" | sed 's/^/   !/' >&2
 }
 
 # ── The redaction layer ──────────────────────────────────────────

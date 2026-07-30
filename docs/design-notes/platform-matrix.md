@@ -78,7 +78,7 @@ creation. What differs is only *where the propagation root lives*, and how it is
 ## Identical on both platforms
 
 `.kibignore` rules and the FUSE server/matcher behind them · the host-executed-config guard
-(`.git/config`, hooks, `.vscode/`, `.devcontainer/`, `.idea/`, `.envrc`) · the git audit gate at cold
+(`.git/config`, hooks, `.vscode/`, `.devcontainer/`, `.envrc`) · the git audit gate at cold
 start, teardown and `kib audit` · per-launch config assembly and subtree merge-out · the credential
 broker and MCP interception · the verb CLI · `cap-drop=ALL` + `no-new-privileges` + seccomp on the
 agent's own process · one container per project with the same lock protocol.

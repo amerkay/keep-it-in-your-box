@@ -100,16 +100,58 @@ def test_secret_bearing_env_files_are_redacted(path: str) -> None:
 
 
 @pytest.mark.parametrize(
-    ("project_rule", "path", "expected"),
+    ("project_rule", "path"),
     [
-        ("!.env", ".env", rules.REDACT),
-        ("!.env.local", ".env.local", rules.REDACT),
-        ("!.vscode", ".vscode/tasks.json", rules.PROTECT),
+        ("!.vscode", ".vscode/tasks.json"),
+        ("!.vscode/tasks.json", ".vscode/tasks.json"),
+        ("!.envrc", ".envrc"),
+        ("!.gitmodules", ".gitmodules"),
     ],
 )
-def test_a_project_cannot_un_protect_itself(project_rule: str, path: str, expected: str) -> None:
-    """Guard rules are immune to a project's '!' — that immunity is the whole guarantee."""
-    assert rules.verdict(guarded(project_rule), path) == expected
+def test_a_project_cannot_un_protect_itself(project_rule: str, path: str) -> None:
+    """[protect] is immune to a project's '!' — it guards what the HOST later runs."""
+    assert rules.verdict(guarded(project_rule), path) == rules.PROTECT
+
+
+# ── the [redact] opt-out ─────────────────────────────────────────
+# Unlike [protect], this tier withholds the user's own secrets from their own session, so the
+# user may waive it per file. Every opt-out is printed at launch (report_kibignore_optouts).
+@pytest.mark.parametrize(
+    ("project_rule", "path"),
+    [
+        ("!.env", ".env"),
+        ("!.env.local", ".env.local"),
+        ("!.env.*", ".env.production"),
+        ("!config/.env", "config/.env"),
+    ],
+)
+def test_a_project_may_opt_out_of_redaction(project_rule: str, path: str) -> None:
+    assert rules.verdict(guarded(project_rule), path) is None
+
+
+@pytest.mark.parametrize(
+    ("project_rule", "path"),
+    [
+        # The opt-out is per component, not a blanket switch: naming one .env file must not
+        # hand over the rest of the family.
+        ("!.env", ".env.local"),
+        ("!.env.local", ".env"),
+        # A '!' on an ancestor is about that directory, not about a guarded file inside it —
+        # otherwise `!secrets` (or a bare `!*`) would un-redact every .env in the tree.
+        ("!secrets", "secrets/.env"),
+        ("!config", "config/.env"),
+    ],
+)
+def test_an_opt_out_does_not_spill_past_the_rule(project_rule: str, path: str) -> None:
+    assert rules.verdict(guarded(project_rule), path) == rules.REDACT
+
+
+def test_redact_optouts_names_the_rules_the_launch_prints() -> None:
+    guard = rules.load(str(GUARD), guard=True)
+    project = rules.parse(["!.env", "!.vscode", "!build", "secrets"])
+    # [protect] and unguarded names are inert, so reporting them would teach the user that
+    # every negation un-guards something.
+    assert rules.redact_optouts(guard, project) == [".env"]
 
 
 def test_a_project_may_still_add_redaction_over_a_placeholder() -> None:
@@ -123,11 +165,20 @@ def test_a_project_may_still_add_redaction_over_a_placeholder() -> None:
         "deep/.vscode/settings.json",
         ".envrc",
         "a/b/.devcontainer/devcontainer.json",
-        ".idea/workspace.xml",
+        ".claude/hooks/pre.sh",
     ],
 )
 def test_guard_patterns_are_tail_matched_at_any_depth(path: str) -> None:
     assert rules.verdict(guarded(), path) == rules.PROTECT
+
+
+@pytest.mark.parametrize("path", [".idea/workspace.xml", "sub/.idea/watcherTasks.xml"])
+def test_idea_is_no_longer_guarded(path: str) -> None:
+    """Withdrawn 2026-07-30: a [protect] EPERM under .idea/ broke `pnpm install` outright.
+
+    The residual risk (run configurations, File Watchers) is stated in the guard file.
+    """
+    assert rules.verdict(guarded(), path) is None
 
 
 @pytest.mark.parametrize("path", ["src/main.py", "README.md", ".github/workflows/ci.yml", "envrc"])
@@ -182,9 +233,17 @@ def test_to_gitignore_drops_the_unsafe_rules_the_matcher_drops() -> None:
     assert rules.to_gitignore(rules.parse(["/abs", "../up", "ok"])) == ["ok"]
 
 
+def test_to_gitignore_never_mirrors_a_redact_opt_out() -> None:
+    """`!.env` in the managed block would re-include it past the repo's own `.env` line —
+    opting the sandbox in to a .env must not opt git in to committing it."""
+    guard = rules.load(str(GUARD), guard=True)
+    project = rules.parse(["!.env", "dir/*", "!dir/keep"])
+    assert rules.to_gitignore(project, guard) == ["/dir/*", "!/dir/keep"]
+
+
 def test_to_gitignore_cli(
     tmp_path: Path, write_file: Callable[[str, str], Path], capsys: pytest.CaptureFixture[str]
 ) -> None:
-    path = write_file(".kibignore", "secret\n!dir/keep\n# note\n")
-    assert rules.main(["to-gitignore", str(path)]) == 0
+    path = write_file(".kibignore", "secret\n!dir/keep\n!.env\n# note\n")
+    assert rules.main(["to-gitignore", str(GUARD), str(path)]) == 0
     assert capsys.readouterr().out.splitlines() == ["secret", "!/dir/keep"]

@@ -58,9 +58,15 @@
     `k.pem` nor `a/b/k.pem`. Drop the `**/` and write the bare name. A leading `/` or a `..` is
     dropped as unsafe. `!` re-includes and the last match wins, but a matched **directory seals
     everything below it**: `secrets` + `!secrets/README.md` still redacts the README — write
-    `secrets/*` + `!secrets/README.md`. Your `!` cannot cancel the tiers above (`!.env` does
-    nothing), and a `[protect]`/`[redact]` heading belongs to kib's own guard file — in a
-    project's file it is read as a pattern, not a section.
+    `secrets/*` + `!secrets/README.md`. A `[protect]`/`[redact]` heading belongs to kib's own
+    guard file — in a project's file it is read as a pattern, not a section.
+  - **`!.env` is a real opt-out, and it is the USER's to ask for.** A `!` on the same path
+    component cancels the redaction above, so `!.env` in the project's `.kibignore` hands you
+    that file in full from the next container on. It is for a `.env` that holds no secrets —
+    ports, feature flags, a local URL. **Never write one to get past a redaction you have run
+    into**; that is the "ask the user" case, and every opt-out is printed at each launch with
+    the user reading it. `!` still cannot touch the Protected tier below: `!.vscode` does
+    nothing.
   - **It is read once, when the container is created**, so say this whenever you write one: the
     live layer keeps enforcing the OLD rules for the rest of the session, and the next `kib`
     **refuses to attach** until every session for this project is closed and the container
@@ -68,7 +74,7 @@
     block, and names any **already-tracked** file they match — `.gitignore` cannot catch those,
     so the user has to `git rm --cached` them.
 - **Protected** — `.git/config`, `.git/hooks` (+ submodule/worktree equivalents), `.githooks/`,
-  `.gitmodules`, `.vscode/`, `.devcontainer/`, `.idea/`, `.envrc`, `.claude/hooks/`,
+  `.gitmodules`, `.vscode/`, `.devcontainer/`, `.envrc`, `.claude/hooks/`,
   `.cursor/mcp.json`, `.zed/tasks.json`, `.zed/debug.json`, `.run/`, `.mvn/jvm.config`, `.exrc`,
   `.nvim.lua`, `.ripgreprc`, `.yarnrc.yml`: reads work, writes are refused. The **host** executes
   these later, so writing one is host code execution from in here. `git config` is content-checked:

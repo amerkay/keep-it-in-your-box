@@ -24,8 +24,16 @@
 # DETECTED instead, by audit_project_configs() in kib/host/gitaudit.py.
 .vscode
 .devcontainer
-.idea
 .envrc
+
+# .idea — WITHDRAWN 2026-07-30, and this is a real hole, not a cleanup.
+# It broke `pnpm install` in a JetBrains project (the install writes under .idea/ and got EPERM),
+# and a [protect] refusal ends the session, so an unrelated ordinary command could not complete.
+# What is now unguarded: .idea/workspace.xml carries the RunManager run configurations, and
+# .idea/watcherTasks.xml carries File Watchers — the IDE runs the first when you press Run and
+# the second on every save, unprompted. So a session can leave a command behind that the host
+# executes at the next IDE interaction. Re-add the rule if you use JetBrains on this machine and
+# nothing needs to write there; otherwise `git diff .idea/` is the control.
 
 # git indirection the .git/* guard does not reach: .githooks is the usual committed
 # core.hooksPath target (already-trusted config, so the validator never sees a change), and
@@ -53,8 +61,14 @@
 # Stub on read + write-deny — the existing .kibignore behaviour. Secrets, not executables.
 # Mirrors the "Redacted" tier in etc-CLAUDE.md.
 #
-# '!' works here and applies within the guard set only (last match wins), so these
-# carve-outs cannot be used by a *project* to un-redact itself. The placeholder files
+# UNLIKE [protect], this tier is opt-out-able: a project .kibignore's `!` on the same path
+# component cancels a rule here, so a repo whose .env holds no secrets can hand it over
+# (`!.env`). What this tier withholds is the user's own secrets from their own session, which
+# is theirs to waive; [protect] stops the box writing what the HOST later runs, and no repo may
+# waive that. The launch prints every rule that opts out — the box can write .kibignore, so
+# being SEEN is the whole control.
+#
+# '!' works here and applies within the guard set (last match wins). The placeholder files
 # are committed by convention and contain no secrets — redacting them just breaks
 # ordinary work like "add the new key to .env.example".
 #
