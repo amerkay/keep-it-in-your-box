@@ -131,6 +131,10 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
 - **Never nest a bind inside another bind's destination** — Docker Desktop aborts the whole
   `docker run` (`mountpoint … is outside of rootfs`), and pre-creating the mountpoint does not
   help. Mount flat under `/run/kib/` via `bind_via_link`, or copy the file in. (`macos.md`)
+- **`--publish` is 127.0.0.1-only and fixed at creation — don't add a bind address, don't try to
+  publish onto a running container.** `-p` exists only on `docker run`, so the attach path refuses
+  a port the container lacks instead of starting a session whose failure is indistinguishable from
+  a dead dev server. (`container-lifecycle.md`)
 - **Don't drop the main container's dual-homing** (`connect_broker_network`) — host dev servers
   and LAN must stay reachable alongside the broker net. (`credential-broker.md`)
 - **Don't hide clipboard interfaces from the Wayland registry** — it broke `wl-paste`; sanitise

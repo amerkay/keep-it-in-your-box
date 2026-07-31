@@ -14,29 +14,6 @@ KIB_NODE_CACHE="${KIB_NODE_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/keep-it-in-you
 # project: a box-writable file here would let a session choose the next session's interpreter.
 KIB_NODE_CONF="${KIB_NODE_CONF:-${KIB_CONFIG%/*}/node-versions}"
 
-_node_sticky_get() {
-    [ -f "$KIB_NODE_CONF" ] || return 0
-    local line found=""
-    while IFS= read -r line || [ -n "$line" ]; do
-        case "$line" in "$1="*) found="${line#*=}" ;; esac # last wins
-    done <"$KIB_NODE_CONF"
-    printf '%s' "$found"
-}
-
-_node_sticky_set() {
-    local path="$1" versions="$2" tmp line
-    mkdir -p "${KIB_NODE_CONF%/*}" 2>/dev/null || return 0
-    tmp="$KIB_NODE_CONF.$$"
-    : >"$tmp" 2>/dev/null || return 0
-    if [ -f "$KIB_NODE_CONF" ]; then
-        while IFS= read -r line || [ -n "$line" ]; do
-            case "$line" in "$path="*) ;; *) printf '%s\n' "$line" >>"$tmp" ;; esac
-        done <"$KIB_NODE_CONF"
-    fi
-    printf '%s=%s\n' "$path" "$versions" >>"$tmp"
-    mv -f "$tmp" "$KIB_NODE_CONF" 2>/dev/null || rm -f "$tmp" # rename: no half-written table
-}
-
 # READ ONLY — the pin is written by node_versions_remember, after the fetch worked. Writing it
 # here bricked the project on a failed fetch: every later launch retried it and died.
 node_versions_resolve() {
@@ -44,7 +21,7 @@ node_versions_resolve() {
         NODE_VERSION_PINNED=1
     else
         NODE_VERSION_PINNED=0
-        NODE_VERSION_LIST="$(_node_sticky_get "$PWD")"
+        NODE_VERSION_LIST="$(sticky_get "$KIB_NODE_CONF" "$PWD")"
         [ -z "$NODE_VERSION_LIST" ] \
             || echo "🟩 kib: Node $NODE_VERSION_LIST — remembered for this project." >&2
     fi
@@ -54,7 +31,7 @@ node_versions_resolve() {
 
 node_versions_remember() {
     [ "${NODE_VERSION_PINNED:-0}" = 1 ] || return 0
-    _node_sticky_set "$PWD" "$NODE_VERSION_LIST"
+    sticky_set "$KIB_NODE_CONF" "$PWD" "$NODE_VERSION_LIST"
 }
 
 # Mirrors the guest's resolve_node_version glob — opposite sides of the boundary, no shared code.

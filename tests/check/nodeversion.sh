@@ -197,6 +197,9 @@ _nv_sticky() { # <pwd> <flag list>  -> "list|default"
         KIB_CONFIG="${_nv_conf%/*}/config"
         # shellcheck disable=SC2034  # ditto
         KIB_NODE_CONF="$_nv_conf"
+        # core.sh first: node.sh's per-project pin is the shared sticky_get/sticky_set table.
+        # shellcheck source=/dev/null
+        . "$KIB_ROOT/host/core.sh"
         # shellcheck source=/dev/null
         . "$KIB_ROOT/host/node.sh"
         PWD="$1"
@@ -231,6 +234,8 @@ is "an explicit flag overrides what was remembered" "20|20" "$(_nv_sticky /p/one
     KIB_CONFIG="${_nv_conf%/*}/config"
     # shellcheck disable=SC2034  # ditto
     KIB_NODE_CONF="$_nv_conf"
+    # shellcheck source=/dev/null
+    . "$KIB_ROOT/host/core.sh"
     # shellcheck source=/dev/null
     . "$KIB_ROOT/host/node.sh"
     PWD=/p/fetch-failed

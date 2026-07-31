@@ -34,6 +34,11 @@ Flags (before the verb):
                               A list caches every one and runs on the first (monorepos), so
                               `nvm use` reaches the others instantly inside the session.
                               Remembered per project; =system goes back to the built-in Node.
+  --publish=PORT[,PORT…]      reach a dev server in the box at http://127.0.0.1:PORT (that host
+                              only — never the LAN). Bind the server to 0.0.0.0 in there.
+                              Remembered per project; =none stops publishing. Ports are fixed
+                              when the container is created, so changing them needs every
+                              session for this project closed.
 
 Verbs win over programs: `kib bash` is an error, `kib exec bash` is what you want.
 USAGE
@@ -49,28 +54,48 @@ USAGE
 # the FIRST is the one this terminal's PATH resolves to. That is what a monorepo with packages
 # on two lines needs: both fetched, both instantly reachable by `nvm use` inside the session,
 # one of them the default.
+#
+# --publish takes a list the same way; its value is shape-checked in host/net.sh, which owns what
+# a port is. Neither flag may reach the verb table, or a flag typo would be reported as a bad verb
+# and the real one never seen.
 # shellcheck disable=SC2034  # read by host/node.sh (ensure_node_cached)
 NODE_VERSION_LIST="${KIB_NODE_VERSION:-}"
+# shellcheck disable=SC2034  # read by host/net.sh (publish_ports_resolve)
+PUBLISH_LIST="${KIB_PUBLISH:-}"
+
+_flag_needs_value() { # <flag> <example>  — no `die` yet: host/_load.sh is sourced much later
+    printf '❌ kib: %s needs a value, e.g. %s\n' "$1" "$2" >&2
+    exit 2
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
-        --node-version=*) _nv="${1#*=}" && shift ;;
+        --node-version=*)
+            NODE_VERSION_LIST="${NODE_VERSION_LIST:+$NODE_VERSION_LIST }${1#*=}"
+            shift
+            ;;
         --node-version)
-            if [ $# -lt 2 ]; then
-                printf '❌ kib: --node-version needs a value, e.g. --node-version=20\n' >&2
-                exit 2
-            fi
-            _nv="$2"
+            [ $# -ge 2 ] || _flag_needs_value --node-version --node-version=20
+            NODE_VERSION_LIST="${NODE_VERSION_LIST:+$NODE_VERSION_LIST }$2"
+            shift 2
+            ;;
+        --publish=*)
+            PUBLISH_LIST="${PUBLISH_LIST:+$PUBLISH_LIST }${1#*=}"
+            shift
+            ;;
+        --publish)
+            [ $# -ge 2 ] || _flag_needs_value --publish --publish=3000
+            PUBLISH_LIST="${PUBLISH_LIST:+$PUBLISH_LIST }$2"
             shift 2
             ;;
         *) break ;;
     esac
-    NODE_VERSION_LIST="${NODE_VERSION_LIST:+$NODE_VERSION_LIST }$_nv"
 done
 # Commas are just another separator, so 18,20 and "18 20" mean the same thing.
 NODE_VERSION_LIST="$(printf '%s' "$NODE_VERSION_LIST" | tr ',' ' ')"
+PUBLISH_LIST="$(printf '%s' "$PUBLISH_LIST" | tr ',' ' ')"
 # shellcheck disable=SC2034  # read by host/lifecycle.sh (kib_run_session); first wins
 NODE_VERSION="${NODE_VERSION_LIST%% *}"
-unset _nv
 
 # ── Verb ─────────────────────────────────────────────────────────
 if [ $# -gt 0 ]; then
@@ -230,6 +255,10 @@ node_versions_resolve
 ensure_node_cached
 node_versions_remember # only after the fetch worked — a failed one must not pin the project
 
+# --publish: same shape, and pinned by publish_ports_confirm below for the same reason — a port
+# docker refused (already in use on the host) must not be remembered.
+publish_ports_resolve
+
 kib_identity
 kib_prepare_session
 
@@ -241,4 +270,5 @@ sync_kibignore_gitignore
 report_kibignore_optouts
 
 kib_bring_up
+publish_ports_confirm # pin + the URL, only now the container is actually up
 kib_run_session ${CMD[@]+"${CMD[@]}"}

@@ -424,6 +424,10 @@ start_container() {
     # recreating it. That is what lets --node-version stay a per-terminal exec setting.
     add_node_cache_args
 
+    # The one host→container route: -p 127.0.0.1:N:N per `kib --publish N`. Nothing by default,
+    # and fixed here at creation — verify_publish_attach guards the attach path. (host/net.sh)
+    add_publish_args
+
     # Broker wiring: -e ANTHROPIC_BASE_URL + the placeholder credential that SHADOWS the real
     # .credentials.json (copied into the shared-assembly dir, not mounted). Must follow
     # stage_credential, which clears that path. No-op unless the broker came up.
@@ -431,8 +435,15 @@ start_container() {
 
     # The container just idles; the real work runs in `docker exec` sessions, so it survives
     # any one terminal closing.
-    docker run "${ARGS[@]}" "$IMAGE_NAME" sleep infinity >/dev/null \
-        || die "failed to start the project container."
+    if ! docker run "${ARGS[@]}" "$IMAGE_NAME" sleep infinity >/dev/null; then
+        # A published port already bound on the host is the one failure here a user can act on,
+        # and docker's own message is swallowed above.
+        [ -n "${PUBLISH_LIST:-}" ] && die "failed to start the project container." \
+            "It publishes $(printf '%s' "$PUBLISH_LIST" | tr ' ' ',') — if one of those is" \
+            "already in use on the host, free it, or pick another:" \
+            "    kib --publish=<port>        kib --publish=none"
+        die "failed to start the project container."
+    fi
 
     # Dual-home onto the broker net AFTER the run (a second --network at run time would
     # replace the default bridge; connecting keeps both + enables embedded DNS for the
@@ -510,6 +521,9 @@ kib_bring_up() {
         verify_broker_attach
         # Same again for the sandbox policy, which is also fixed at creation (warn-only).
         verify_policy_attach
+        # And for published ports: a session attached without them looks exactly like a dev
+        # server that failed to start, so refuse rather than let the user debug the wrong thing.
+        verify_publish_attach
         # And for the read-only mounts over the container's shared-assets dir, fixed at
         # creation too.
         if [ "$(running_unlocked && echo 1 || echo 0)" != "$UNLOCK_SHARED" ]; then

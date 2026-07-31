@@ -71,7 +71,16 @@ kib help                  # the full verb table
 
 kib --node-version=20 claude   # this terminal runs on Node 20 (18|20|22|24 are baked; 26 is
                                # the system default). Per terminal, no download, no restart.
+
+kib --publish=3000             # reach a dev server in the box at http://127.0.0.1:3000
+                               # (that host only, never the LAN). Remembered per project.
 ```
+
+A container publishes **no** ports by default, and on macOS the host cannot route to its bridge
+IP at all — so `--publish` is the only way a host browser reaches a server running inside. Bind
+the server to `0.0.0.0` in there (`nuxt dev --host 0.0.0.0`, `vite --host`) or the published port
+has nothing to forward to. Ports are fixed when the container is created, so changing them needs
+every session for the project closed; `--publish=none` stops publishing.
 
 Verbs win over programs: `kib bash` is an **error**, not a shell — pass-through is explicit,
 via `kib exec`. Run either name from any project directory; the project is mounted at the same

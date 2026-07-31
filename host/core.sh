@@ -62,6 +62,33 @@ BUILD_LOCK="$KIB_BUILD_DIR/build.lock"
 BUILD_LOG="$KIB_BUILD_DIR/build.log"
 BUILD_PID="$KIB_BUILD_DIR/build.pid"
 
+# ── Per-project sticky tables ────────────────────────────────────
+# One `<project path>=<value>` line per project in a flat file, last wins. Beside the host config
+# and NEVER in the project: a box-writable table here would let a session choose the next
+# session's interpreter, or open a host port for it. Used by host/node.sh and host/net.sh.
+sticky_get() { # <table file> <key>
+    [ -f "$1" ] || return 0
+    local line found=""
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in "$2="*) found="${line#*=}" ;; esac
+    done <"$1"
+    printf '%s' "$found"
+}
+
+sticky_set() { # <table file> <key> <value>
+    local file="$1" key="$2" value="$3" tmp line
+    mkdir -p "${file%/*}" 2>/dev/null || return 0
+    tmp="$file.$$"
+    : >"$tmp" 2>/dev/null || return 0
+    if [ -f "$file" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in "$key="*) ;; *) printf '%s\n' "$line" >>"$tmp" ;; esac
+        done <"$file"
+    fi
+    printf '%s=%s\n' "$key" "$value" >>"$tmp"
+    mv -f "$tmp" "$file" 2>/dev/null || rm -f "$tmp" # rename: no half-written table
+}
+
 # ── Polling ──────────────────────────────────────────────────────
 #   wait_until <tries> <interval-seconds> <predicate> [args…]
 #

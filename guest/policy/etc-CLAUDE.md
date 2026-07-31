@@ -118,6 +118,20 @@ legitimate need is a conversation, not a workaround.
   Ask the user to run, in a **host terminal**: `kib --node-version=20` (a comma list for a repo
   needing two, `18,20`). Fetched once per machine, then remembered for this project.
 
+## Reaching a dev server from the host browser
+
+- **The box publishes no ports unless the user asked for it**, and on macOS the host cannot reach
+  the container's bridge IP by any route. So a server you start here is invisible to their
+  browser until they run, in a **host terminal**: `kib --publish=3000` (a comma list for two,
+  `3000,5173`). It binds `127.0.0.1` only, is remembered for this project, and `=none` undoes it.
+- **Ports are fixed when the container is created**, so say this when you hand over the command:
+  it takes effect only once every session for this project is closed and the container recreated.
+  Until then `kib` refuses to attach with the flag rather than start a session that silently has
+  no port.
+- **Bind the server to `0.0.0.0` in here** — `nuxt dev --host 0.0.0.0`, `vite --host`,
+  `next dev -H 0.0.0.0`. On `127.0.0.1` it is unreachable even when the port IS published, and
+  the symptom is identical.
+
 **`EPERM` inside the project is kib refusing, and the path is the whole message** — the reason is
 logged where you cannot see it (the FUSE sidecar's stderr, a different container), so do not
 speculate about the cause beyond the rules above. `EACCES` is an ordinary permission problem:
