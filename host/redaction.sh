@@ -125,14 +125,19 @@ _stale_mount_report() { # <die|warn>
 }
 
 # The rule file changed since the container started → the running layer enforces the OLD
-# rules. $1 is the staged copy to compare against.
+# rules. $1 is the staged copy to compare against, and the message names it: the box can write
+# .kibignore, so the usual cause is an edit an in-box session made, and "I never touched that
+# file" has no answer without the one copy of what the live layer is enforcing.
 _refuse_if_rules_stale() {
     local staged="$1"
     cmp -s "$PWD/$KIB_RULE_FILE" "$staged" 2>/dev/null && return 0
     [ ! -f "$PWD/$KIB_RULE_FILE" ] && [ ! -s "$staged" ] && return 0
     die "$KIB_RULE_FILE changed since this project's container started." \
         "The running redaction layer still enforces the OLD rules. Refusing to" \
-        "attach — close all kib sessions for this project and relaunch."
+        "attach — close all kib sessions for this project and relaunch." \
+        "A session in the box can edit $KIB_RULE_FILE, so an edit nobody made by hand" \
+        "is expected here. The staged copy is what the live layer enforces:" \
+        "  diff -u '$staged' '$PWD/$KIB_RULE_FILE'"
 }
 
 prepare_redaction() {
