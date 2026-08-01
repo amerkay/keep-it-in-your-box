@@ -112,13 +112,12 @@ def test_inject_points_a_hosted_mcp_at_its_own_sidecar_only_if_it_came_up(
 def test_inject_prunes_only_entries_we_own(
     tmp_path: Path, providers_dir: Path, write_json: Callable[[str, object], Path]
 ) -> None:
-    """Including the pre-rename marker: an entry written by an older kib must not be immortal."""
+    """A user-authored server survives; every entry carrying our marker is dropped."""
     cfg = write_json(
         "session/.claude.json",
         {
             "mcpServers": {
                 "mine": {"type": "http", "url": "http://user"},
-                "legacy": {"_ccBroker": True, "url": "STALE_OLD"},
                 "current": {mcp.MARKER: True, "url": "STALE_NEW"},
             }
         },

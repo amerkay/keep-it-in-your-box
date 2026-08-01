@@ -115,9 +115,10 @@ host's `--resume` and ↑ history, and vice versa, which is exactly the seamless
 `container-lifecycle.md` exists to protect. (It also made three `security-test.sh` cross-project
 assertions fail, which is how it surfaced; they were reporting a key mismatch, not a leak.)
 
-`kib_legacy_box_pwd` (host/config.sh) survives for one job: computing that old key so
-`start_container` can find transcripts left under it and fold them back into canonical before
-relinking. Delete it once no session dir predates the sidecar restore.
+`kib_legacy_box_pwd` (host/config.sh) computed that old key so `start_container` could find
+transcripts left under it and fold them back into canonical before relinking. Deleted 2026-08-01
+with the rest of the compat layer; `start_container` still folds a real dir at the CURRENT slug,
+which an ephemeral session legitimately leaves behind.
 
 One trap that window exposed, and worth keeping: `merge_history`'s dedupe compared raw text.
 Claude writes those lines with JS `JSON.stringify` (no space after separators) and re-keying

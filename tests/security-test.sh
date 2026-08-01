@@ -912,7 +912,7 @@ try:
 except Exception:
     sys.exit(0)
 for name, e in (d.get("mcpServers") or {}).items():
-    if isinstance(e, dict) and (e.get("_kibBroker") or e.get("_ccBroker")):
+    if isinstance(e, dict) and e.get("_kibBroker"):
         print("%s\t%s\t%s" % (name, e.get("url", ""), "header" if e.get("headers") else "nohdr"))
 PY
 )"

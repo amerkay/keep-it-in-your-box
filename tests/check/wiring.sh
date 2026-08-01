@@ -183,46 +183,6 @@ else
         "the sidecar binds the project at its host path; the two keys are one"
 fi
 
-# The translation survives for ONE job: finding transcripts the in-container-mount window left
-# under the container-home key, so start_container can fold them back in.
-#
-# Each case sources config.sh in its OWN subshell and only the RESULT crosses back, so `is`
-# runs in the suite's shell — inside a subshell its counter bump is discarded and a regression
-# prints ✘ while the run still exits 0.
-_legacy_pwd_for() { # $1 = the host's $HOME, $2 = the host's $PWD → the legacy box path
-    (
-        HOME="$1"
-        PWD="$2"
-        # shellcheck source=SCRIPTDIR/../../host/config.sh
-        . "$KIB_ROOT/host/config.sh"
-        kib_legacy_box_pwd
-    )
-}
-
-# The same five properties, whatever shape the host's $HOME has: macOS /Users/<name>, Linux
-# /home/<name>. The legacy key is /home/hostuser either way, and an upgrader may be on either,
-# so both shapes are asserted rather than only the one this suite runs on.
-for _h in /Users/veronica /home/kay; do
-    is "a project under \$HOME ($_h) remaps to the container home" \
-        "/home/hostuser/proj" "$(_legacy_pwd_for "$_h" "$_h/proj")"
-    is "the path below \$HOME ($_h) survives the remap intact" \
-        "/home/hostuser/code/nested/proj" "$(_legacy_pwd_for "$_h" "$_h/code/nested/proj")"
-    is "\$HOME itself ($_h) maps to the container home" \
-        "/home/hostuser" "$(_legacy_pwd_for "$_h" "$_h")"
-    # Outside $HOME the entrypoint mkdir'd the real path, so it resolved to itself even then.
-    is "a project outside \$HOME ($_h) is left alone" \
-        "/opt/work/proj" "$(_legacy_pwd_for "$_h" /opt/work/proj)"
-    # The near-miss: a sibling whose name merely starts with $HOME must not be rewritten.
-    is "a \$HOME ($_h) prefix that is not a path boundary is not remapped" \
-        "$_h-backup/proj" "$(_legacy_pwd_for "$_h" "$_h-backup/proj")"
-done
-unset _h
-
-# The container's user is the constant `hostuser` whatever the host user is called, so a Linux
-# host whose home already IS /home/hostuser must remap to itself — not double the prefix.
-is "a host \$HOME that already is the container home maps to itself" \
-    "/home/hostuser/proj" "$(_legacy_pwd_for /home/hostuser /home/hostuser/proj)"
-
 # $SESSION_BASE outlives the container, so a transcripts link keyed by a name kib no longer uses
 # is never reaped — renaming it $SLUG → $BOX_SLUG stranded the old one, and a stray dir in
 # projects/ reads to an auditor as ANOTHER project's transcripts (security-test.sh checks
@@ -261,26 +221,22 @@ fi
 rm -rf "$tl_tmp"
 unset tl_tmp
 
-# A REAL directory in $SESSION_BASE/projects/ is a previous in-box session's transcripts, which
-# nothing ever tied to canonical. bind_via_link `rm -rf`s a non-symlink, so relinking without
-# folding first destroys every prior in-box session — silently. Two slugs can hold one: $SLUG
-# (the sidecar's key, and the pre-sidecar link name) and the container-home key the
-# in-container-mount window used. Both must be folded, and the relink must NOT proceed if the
-# fold of the CURRENT slug failed.
+# A REAL directory at $SESSION_BASE/projects/$SLUG is a previous in-box session's transcripts,
+# which nothing ever tied to canonical (an ephemeral session never gets the link). bind_via_link
+# `rm -rf`s a non-symlink, so relinking without folding first destroys every prior in-box
+# session — silently. The relink must NOT proceed if the fold failed.
 #
 # Extracted from lifecycle.sh rather than retyped: an inline copy drifts, and the whole point of
 # the block is that it matches what start_container runs.
 tm_tmp="$(mktemp -d)"
-mkdir -p "$tm_tmp/session/projects/-host-slug" "$tm_tmp/session/projects/-box-slug" \
-    "$tm_tmp/canonical/projects/-host-slug"
+mkdir -p "$tm_tmp/session/projects/-host-slug" "$tm_tmp/canonical/projects/-host-slug"
 printf 'old\n' >"$tm_tmp/session/projects/-host-slug/a.jsonl"
 printf 'hidden\n' >"$tm_tmp/session/projects/-host-slug/.b.jsonl"
-printf 'legacy\n' >"$tm_tmp/session/projects/-box-slug/c.jsonl"
-awk '/^    _bt_ok=1$/{f=1} f{print} /^    done$/{if(f) exit}' \
+awk '/^    _bt_ok=1$/{f=1} f{print} /^    fi$/{if(f) exit}' \
     "$KIB_ROOT/host/lifecycle.sh" >"$tm_tmp/block.sh"
 (
     # shellcheck disable=SC2034  # consumed by the extracted block
-    EPHEMERAL=0 CLAUDE_HOME="$tm_tmp/canonical" SLUG=-host-slug LEGACY_BOX_SLUG=-box-slug
+    EPHEMERAL=0 CLAUDE_HOME="$tm_tmp/canonical" SLUG=-host-slug
     SESSION_BASE="$tm_tmp/session"
     # Both codes: the host's shellcheck and the image's report an indirect call differently.
     # shellcheck disable=SC2317,SC2329  # called by the sourced block
@@ -289,7 +245,7 @@ awk '/^    _bt_ok=1$/{f=1} f{print} /^    done$/{if(f) exit}' \
     . "$tm_tmp/block.sh"
     printf '%s' "${_bt_ok:-unset}" # the sourced block sets it; :- keeps shellcheck honest
 ) >"$tm_tmp/ok"
-is "both in-box transcripts dirs are folded into canonical, not deleted" ".b.jsonl a.jsonl c.jsonl" \
+is "the in-box transcripts dir is folded into canonical, not deleted" ".b.jsonl a.jsonl" \
     "$(find "$tm_tmp/canonical/projects/-host-slug" -mindepth 1 -exec basename {} \; \
         | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')"
 is "the fold reports success, so the relink may proceed" "1" "$(cat "$tm_tmp/ok")"

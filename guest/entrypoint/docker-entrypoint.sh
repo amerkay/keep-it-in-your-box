@@ -361,9 +361,9 @@ if [ -n "$CLAUDE_SESSION_DIR" ] && [ -d "$CLAUDE_SHARED_DIR" ]; then
     # read-only; nothing is locked now, and what those trees auto-run is DETECTED on the host
     # instead (kib/host/asset_scan.py). (redaction-config-guard.md)
     #
-    # A real dir left here by an older kib is that farm. The host folds it out to canonical before
-    # the container starts (fold_out_project_assets), so anything still real is content it could
-    # not move, and it stays as this project's override rather than being linked over.
+    # A real dir here is a leftover farm from before the collapse: left in place as this project's
+    # own copy rather than linked over, since `ln -sfn` cannot replace a non-empty dir and losing
+    # it would be worse than not sharing it. Reinstall to share — nothing migrates it.
     for entry in skills agents commands plugins hooks; do
         src="$CLAUDE_SHARED_DIR/$entry"
         dst="$CLAUDE_SESSION_DIR/$entry"

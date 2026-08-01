@@ -382,15 +382,12 @@ fi
 # and test_adoption_failure_does_not_fail_the_create. Those monkeypatch os.fchown/os.chown and
 # assert the ids actually passed, which a grep for `_adopt(` cannot see.)
 
-# The pre-commit hook kib used to install into every project is gone, and the marker it left
-# behind is still recognised so the one-time cleanup can fire.
+# kib installs no hook into a user's repo: the checks run at launch, teardown and `kib audit`.
+# Why a hook is not an option is in kib/host/gitaudit.py's docstring.
 if [ -e "$KIB_ROOT/ccignore-precommit.py" ]; then
     fail "the auto-installed pre-commit hook is back" "its checks belong in host/gitguard.sh"
-elif grep -q 'MARKER: ccignore-precommit' "$KIB_ROOT/host/gitguard.sh"; then
-    pass "no hook is installed into user repos, and the legacy marker is still cleaned up"
 else
-    fail "the legacy hook marker is no longer recognised" \
-        "existing project repos would keep kib's obsolete pre-commit hook forever"
+    pass "no hook is installed into user repos"
 fi
 
 # PYTHONPATH must never be set image-wide: it would leak into every process the agent runs.

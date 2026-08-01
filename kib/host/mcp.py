@@ -24,16 +24,12 @@ from kib.broker import helpers, registry
 from kib.shared import cli, jsonio
 
 #: Marks the `.claude.json` entries kib owns, so a launch can drop its own stale ones and
-#: never touch a user-authored server. The `_cc` spelling is the pre-rename form: still
-#: recognised on the prune path so entries written by an older kib cannot become immortal.
+#: never touch a user-authored server.
 MARKER = "_kibBroker"
-LEGACY_MARKER = "_ccBroker"
-
-BROKERED_MARKERS = (MARKER, LEGACY_MARKER)
 
 
 def _is_ours(entry: object) -> bool:
-    return isinstance(entry, dict) and any(entry.get(m) for m in BROKERED_MARKERS)
+    return isinstance(entry, dict) and bool(entry.get(MARKER))
 
 
 def _servers(path: str) -> tuple[dict[str, Any], dict[str, Any]]:

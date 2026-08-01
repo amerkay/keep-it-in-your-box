@@ -326,16 +326,13 @@ start_container() {
     done
     unset _t
 
-    # A REAL directory at either slug is a previous in-box session's transcripts that nothing
-    # ever tied to canonical. bind_via_link `rm -rf`s a non-symlink, so fold them out first or
-    # the upgrade destroys every prior in-box session and `--resume` stops listing them. Two
-    # spellings: $SLUG, and the container-home key the in-container-mount window used
-    # (kib_legacy_box_pwd) — drop that one once no session dir predates the sidecar restore.
+    # A REAL directory here is a previous in-box session's transcripts that nothing ever tied to
+    # canonical — an ephemeral session persists nothing, so it never gets the link below.
+    # bind_via_link `rm -rf`s a non-symlink, so fold it out first or the relink destroys every
+    # prior in-box session and `--resume` stops listing them.
     _bt_ok=1
-    for _bt in "$SESSION_BASE/projects/$SLUG" "$SESSION_BASE/projects/$LEGACY_BOX_SLUG"; do
-        # The two spellings coincide for a project outside $HOME — fold once, warn once.
-        [ "$_bt" = "$SESSION_BASE/projects/$SLUG" ] || [ "$SLUG" != "$LEGACY_BOX_SLUG" ] || continue
-        { [ -d "$_bt" ] && [ ! -L "$_bt" ]; } || continue
+    _bt="$SESSION_BASE/projects/$SLUG"
+    if [ -d "$_bt" ] && [ ! -L "$_bt" ]; then
         _bt_this=0
         if [ "$EPHEMERAL" != 1 ] && mkdir -p "$CLAUDE_HOME/projects/$SLUG" 2>/dev/null; then
             for _f in "$_bt"/* "$_bt"/.[!.]*; do
@@ -349,15 +346,14 @@ start_container() {
             rmdir "$_bt" 2>/dev/null && _bt_this=1
         fi
         if [ "$_bt_this" != 1 ]; then
-            # Only the CURRENT slug blocks the link below; a stranded legacy dir is inert.
-            [ "$_bt" = "$SESSION_BASE/projects/$SLUG" ] && _bt_ok=0
+            _bt_ok=0 # it still blocks the link below
             # Not a failure for an ephemeral session: it persists nothing to canonical BY
             # DESIGN, so the fold is skipped rather than attempted.
             [ "$EPHEMERAL" = 1 ] || warn "could not fold this box's old transcripts at $_bt" \
                 "into $CLAUDE_HOME/projects/$SLUG — leaving them in place, so --resume will" \
                 "not show them on the host. Nothing was deleted."
         fi
-    done
+    fi
 
     # Skipped for an ephemeral session — it must persist nothing to canonical. A link left
     # DANGLING would be worse than none: Claude cannot create its transcript dir over one,
@@ -476,9 +472,6 @@ kib_bring_up() {
         # Cold start only: refuse to launch into a repo whose git config the host would
         # execute. Nothing is running yet, so exiting here strands nothing.
         kib_audit_gate launch
-        # Legacy per-project asset trees out to canonical, before anything reads either side:
-        # `ln -sfn` cannot replace a non-empty dir, so one left here shadows the shared tree.
-        fold_out_project_assets
         # Rebuild this project's config from canonical ~/.claude, then pin. Only here — never
         # while a container is attached to these bind-mounted files.
         assemble_session_dir

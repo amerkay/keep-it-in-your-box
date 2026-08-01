@@ -57,22 +57,20 @@ case "$en" in
 esac
 
 # .claude.json injection: broker + hosted URLs written from the user defs' ports, the user's
-# own entry kept, and stale entries WE own pruned — including one written under the
-# pre-rename `_ccBroker` marker, which must not become immortal.
+# own entry kept, and stale entries WE own pruned.
 inj="$(_mcp_run '
   mkdir -p "$KIB_DIR/providers.d"
   printf "{\"id\":\"remote\",\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://mcp.remote.example\",\"inject_header\":\"Authorization\",\"inject_template\":\"Bearer {secret}\",\"mcp_path\":\"/http\",\"mcp_server_name\":\"remote\"}" > "$KIB_DIR/providers.d/remote.json"
   printf "{\"id\":\"local\",\"delivery\":\"hosted_mcp\",\"credential_kind\":\"file_path\",\"host_run\":[\"uvx\",\"some-mcp\"],\"credential_env\":\"L_CRED\",\"mcp_path\":\"/mcp\",\"mcp_server_name\":\"local\",\"token_basename\":\"local.json\"}" > "$KIB_DIR/providers.d/local.json"
   printf y>"$KIB_DIR/remote-token"
-  printf "{\"mcpServers\":{\"myown\":{\"type\":\"http\",\"url\":\"http://x\"},\"legacy\":{\"_ccBroker\":true,\"url\":\"STALE_OLD\"},\"remote\":{\"_kibBroker\":true,\"url\":\"STALE_NEW\"}}}" > "$SESSION_BASE/.claude.json"
+  printf "{\"mcpServers\":{\"myown\":{\"type\":\"http\",\"url\":\"http://x\"},\"remote\":{\"_kibBroker\":true,\"url\":\"STALE_NEW\"}}}" > "$SESSION_BASE/.claude.json"
   BROKER_ENABLED=1 HOSTED_MCP_UP="local" inject_brokered_mcps >/dev/null 2>&1
   cat "$SESSION_BASE/.claude.json"')"
 if printf '%s' "$inj" | grep -q "kib-broker:8100/mcp/remote/http" \
     && printf '%s' "$inj" | grep -q "local:8100/mcp" \
     && printf '%s' "$inj" | grep -q '"myown"' \
-    && ! printf '%s' "$inj" | grep -q "STALE_OLD" \
     && ! printf '%s' "$inj" | grep -q "STALE_NEW"; then
-    pass "inject: writes broker+hosted URLs, keeps the user entry, prunes ours (both markers)"
+    pass "inject: writes broker+hosted URLs, keeps the user entry, prunes ours"
 else
     fail "inject_brokered_mcps wrong" "$(printf '%s' "$inj" | tr -d '\n ' | head -c 220)"
 fi
@@ -263,7 +261,7 @@ fi
 # of the table still resolves. (The bind itself is proved fail-soft in tests/broker/.)
 soft="$(_mcp_run '
   mkdir -p "$KIB_DIR/providers.d"
-  printf "{\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://x.example\",\"listen_port\":8100}" > "$KIB_DIR/providers.d/bad.json"
+  printf "{\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://x.example\"}" > "$KIB_DIR/providers.d/bad.json"
   printf "{\"id\":\"good\",\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://ok.example\",\"inject_header\":\"Authorization\",\"inject_template\":\"Bearer {secret}\"}" > "$KIB_DIR/providers.d/good.json"
   printf x>"$KIB_DIR/claude-token"; printf y>"$KIB_DIR/good-token"
   echo "enabled=[$(broker_enabled_providers)]"; echo "rc=$?"')"

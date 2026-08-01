@@ -8,42 +8,23 @@
 # and locking. (docs/design-notes/container-lifecycle.md)
 #
 # Reads:  KIB_ROOT KIB_STATE_ROOT PWD
-# Writes: CLAUDE_HOME CLAUDE_JSON SLUG LEGACY_BOX_SLUG SESSION_BASE SHARED_BASE LOCK_DIR
+# Writes: CLAUDE_HOME CLAUDE_JSON SLUG SESSION_BASE SHARED_BASE LOCK_DIR
 #         LOCK_FILE BOOT_LOCK STATE_DIR EPHEMERAL SCRATCH_SUFFIX
-#         KIB_ASSETS_OPEN KIB_ASSETS_PROMPT KIB_ASSETS_FARMED KIB_ASSETS_FOLDED
+#         KIB_ASSETS_OPEN KIB_ASSETS_PROMPT
 # shellcheck disable=SC2034  # the globals above are read in bin/kib and the other units
 
 _scope() { kib_py host.config_scope "$@"; }
 
-# The container's own home. The image's user is always `hostuser` whatever the host user is
-# called, so this is a constant, not $HOME.
-CONTAINER_HOME=/home/hostuser
-
-# ── Legacy box key (migration only) ──────────────────────────────
-# Claude keys projects/, .claude.json and history.jsonl by its RESOLVED cwd. The sidecar binds
-# the redacted view at the project's host path, so that resolves to $PWD and the box key equals
-# the host key — nothing to translate, and config_scope's `box` argument is left at its default.
-#
-# It was NOT equal during the one window kib mounted the view in-container: with no $PWD bind
-# the entrypoint's $HOST_HOME symlink made a project under $HOME resolve to $CONTAINER_HOME/<rel>
-# and Claude kept a second, host-invisible set of entries there. This survives only to find that
-# directory and fold it back in (start_container). Delete once no session dir predates the
-# sidecar restore.
-kib_legacy_box_pwd() {
-    case "$PWD" in
-        "$HOME") printf '%s\n' "$CONTAINER_HOME" ;;
-        "$HOME"/*) printf '%s%s\n' "$CONTAINER_HOME" "${PWD#"$HOME"}" ;;
-        *) printf '%s\n' "$PWD" ;;
-    esac
-}
-
 # ── Identity and paths ───────────────────────────────────────────
 # Called once, before anything touches a file. Pure: no mkdir, no docker.
+#
+# One key, host and box: Claude keys projects/, .claude.json and history.jsonl by its RESOLVED
+# cwd, and the sidecar binds the redacted view at the project's HOST path — so that resolves to
+# $PWD and canonical and the session share a slug. Remove the mismatch, never translate it.
 kib_resolve_paths() {
     CLAUDE_HOME="$HOME/.claude"
     CLAUDE_JSON="$HOME/.claude.json"
     SLUG="$(printf '%s' "$PWD" | sed 's/[^a-zA-Z0-9]/-/g')"
-    LEGACY_BOX_SLUG="$(printf '%s' "$(kib_legacy_box_pwd)" | sed 's/[^a-zA-Z0-9]/-/g')"
     SESSION_BASE="$KIB_STATE_ROOT/$SLUG/session"
     SHARED_BASE="$KIB_STATE_ROOT/$SLUG/shared"
     EPHEMERAL=0
@@ -186,10 +167,6 @@ KIB_ASSETS_OPEN="skills agents commands plugins hooks"
 # The prompt-text subset, for the cheap "changed since last launch" report — see why below.
 KIB_ASSETS_PROMPT="skills agents commands"
 
-# Trees an older kib mounted :ro and farmed per project, so a launch may still find real content
-# under $SESSION_BASE for them. Migration only — delete once no session dir predates the collapse.
-KIB_ASSETS_FARMED="plugins hooks"
-
 # ── Shared asset trees: report what a host `claude` would AUTO-RUN ───
 # These trees are plain bind mounts with nothing to interpose on, so this is detection, not
 # prevention — and what it detects is host RCE only in the one case where the host has its own
@@ -263,107 +240,6 @@ warn_host_claude() {
     echo "⚠️  a native claude is installed at $cc — it is NOT sandboxed, and it loads the same" >&2
     echo "   ~/.claude skills/agents/commands/plugins/hooks a session in here can write." >&2
     echo "   kib reports what those trees auto-run; only uninstalling it closes the path." >&2
-    return 0
-}
-
-# ── One-time fold-out of a per-project plugins/hooks farm ────────
-# These two mounted :ro until the shared tier collapsed, so every install landed per-project
-# behind a symlink farm the entrypoint rebuilt each start. They are shared and symlinked now, and
-# `ln -sfn` cannot replace a non-empty directory — so a leftover per-project dir would silently
-# SHADOW the shared tree and the user's plugins would vanish from every project at once.
-#
-# Every symlink still in there points into a mount that no longer exists, so dropping the danglers
-# and collapsing the emptied dirs leaves exactly this project's own installs. Canonical is empty
-# for anyone who never ran `unlock-shared` — the lock is why the content is here — so the whole
-# tree moves across intact. If both hold content, nothing is merged and nothing is deleted: the
-# project's copy is set aside under a named path and the user is told where it went.
-fold_out_farmed_assets() {
-    local _t _l _aside
-    for _t in ${KIB_ASSETS_FARMED:-}; do
-        if [ -L "$SESSION_BASE/$_t" ]; then
-            rm -f "$SESSION_BASE/$_t" 2>/dev/null || true # a plain link: nothing of its own
-            continue
-        fi
-        [ -d "$SESSION_BASE/$_t" ] || continue
-        { find "$SESSION_BASE/$_t" -type l 2>/dev/null || true; } | while IFS= read -r _l; do
-            [ -e "$_l" ] || rm -f "$_l" 2>/dev/null || true
-        done
-        # -depth so the emptied parents go too; the whole tree disappears when it was only farm.
-        find "$SESSION_BASE/$_t" -depth -type d -exec rmdir {} + 2>/dev/null || true
-        [ -d "$SESSION_BASE/$_t" ] || continue
-
-        # rmdir succeeds only on an EMPTY canonical tree — exactly when there is nothing to lose.
-        if [ ! -e "$CLAUDE_HOME/$_t" ] || rmdir "$CLAUDE_HOME/$_t" 2>/dev/null; then
-            if mv "$SESSION_BASE/$_t" "$CLAUDE_HOME/$_t" 2>/dev/null; then
-                # shellcheck disable=SC2088  # the tilde is prose for the user, not a path
-                warn "moved this project's $_t/ into the shared ~/.claude/$_t." \
-                    "It was written when that tree was read-only and every install landed" \
-                    "per-project. It loads in EVERY project from now on, and in a host claude."
-                continue
-            fi
-        fi
-        _aside="$SESSION_BASE/$_t.pre-shared"
-        rm -rf "$_aside" 2>/dev/null || true
-        if mv "$SESSION_BASE/$_t" "$_aside" 2>/dev/null; then
-            warn "this project had its own $_t/ and the shared ~/.claude/$_t is not empty," \
-                "so neither was merged. Nothing was deleted — the project's copy is at:" \
-                "    $_aside" \
-                "The shared tree is what loads now. Reinstall what you need, or copy it across."
-        else
-            warn "could not move this project's $_t/ aside, so the shared ~/.claude/$_t will" \
-                "NOT load in this project: $SESSION_BASE/$_t shadows it."
-        fi
-    done
-    return 0
-}
-
-# ── One-time fold-out of per-project prompt assets ───────────────
-# `ln -sfn` cannot replace a non-empty dir, so a project still holding real entries here — any
-# project used before these trees became shared, since the read-only tier sent every install
-# there — keeps a private dir that SHADOWS the whole shared tree. Folding out is the safer half
-# of the trade, not a nicety. It promotes what a box wrote per-project to global, which the rw
-# mount already allows anyway; never overwrites, and always names what moved. Cold start only:
-# the session dir is bind-mounted, so moving entries out from under a live container makes them
-# vanish mid-session. (`redaction-config-guard.md`)
-fold_out_project_assets() {
-    local _t _e _name _moved=""
-    KIB_ASSETS_FOLDED=0
-    fold_out_farmed_assets
-    for _t in ${KIB_ASSETS_PROMPT:-}; do
-        [ -d "$SESSION_BASE/$_t" ] || continue
-        for _e in "$SESSION_BASE/$_t"/*; do
-            # `-L` too: any symlink here is the old farm's and DANGLES (its mount is gone), and
-            # -e follows the link — so -e alone skips exactly the entries that block the rmdir.
-            # Also the bash-3.2 no-nullglob guard: an empty dir yields the pattern, which is
-            # neither.
-            [ -e "$_e" ] || [ -L "$_e" ] || continue
-            if [ -L "$_e" ]; then
-                rm -f "$_e" 2>/dev/null || true
-                continue
-            fi
-            _name="$(basename "$_e")"
-            mkdir -p "$CLAUDE_HOME/$_t" 2>/dev/null || true
-            if [ -e "$CLAUDE_HOME/$_t/$_name" ]; then
-                warn "kept this project's $_t/$_name — a shared one already has that name." \
-                    "It stays private to this project and shadows the shared tree." \
-                    "Rename or delete one:  \$EDITOR $SESSION_BASE/$_t/$_name"
-                continue
-            fi
-            if mv "$_e" "$CLAUDE_HOME/$_t/$_name" 2>/dev/null; then
-                _moved="$_moved $_t/$_name"
-            else
-                warn "could not move $_e into ~/.claude/$_t — it stays project-private."
-            fi
-        done
-        # Only succeeds once the tree is empty, which is exactly the condition to symlink it.
-        rmdir "$SESSION_BASE/$_t" 2>/dev/null || true
-    done
-    case "$_moved" in *[![:space:]]*) ;; *) return 0 ;; esac
-    KIB_ASSETS_FOLDED=1 # the caller re-vets only when something actually moved
-    # shellcheck disable=SC2088  # the tilde is prose for the user, not a path we open
-    warn "moved this project's prompt assets into the shared ~/.claude:$_moved" \
-        "They were written when those trees were read-only, and a project-private copy now" \
-        "hides every shared one. They load in EVERY project from now on."
     return 0
 }
 

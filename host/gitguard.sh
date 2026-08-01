@@ -6,28 +6,12 @@
 #   • teardown     (host/lifecycle.sh) — reports, and raises a desktop alert
 #   • `kib audit`  (bin/kib)           — reports, on demand
 #
-# Findings and remedies live in kib.host.gitaudit; this file is placement, severity mapping and
-# the one-time cleanup of the hook kib used to install.
+# Findings and remedies live in kib.host.gitaudit; this file is placement and severity mapping.
 #
 # Reads:  PWD
 # Writes: nothing global
 
-# Still spelled `ccignore` on purpose — that is what is sitting in the user's repos, and
-# matching it literally is the only way the cleanup below can ever fire.
-KIB_LEGACY_HOOK_MARKER="MARKER: ccignore-precommit"
-
 _git_toplevel() { git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true; }
-
-# One-time cleanup: remove ours, and only ours — a hook without the marker is the user's.
-kib_remove_legacy_hook() {
-    local hook="$1/.git/hooks/pre-commit"
-    [ -f "$hook" ] || return 0
-    grep -q "$KIB_LEGACY_HOOK_MARKER" "$hook" 2>/dev/null || return 0
-    rm -f "$hook" 2>/dev/null \
-        && echo "🧹 kib: removed the obsolete auto-installed pre-commit hook from this repo" >&2 \
-        && echo "   (its checks now run at launch and teardown — see \`kib audit\`)." >&2
-    return 0
-}
 
 # $1 = launch | teardown | report.
 #
@@ -45,7 +29,6 @@ kib_audit_gate() {
     have_python || return 0
     top="$(_git_toplevel)"
     [ -n "$top" ] || return 0 # not a git repo — nothing to audit
-    kib_remove_legacy_hook "$top"
 
     # `.claude/hooks/` is a whole tree with no schema to parse, and git cannot bound it: the box
     # can commit, so a hook it wrote checks out pristine past any dirty-file filter. The stamp is
