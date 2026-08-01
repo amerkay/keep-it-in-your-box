@@ -552,90 +552,27 @@ is "a project inside canonical's store steps aside from a nested bind" \
     "/home/hostuser/.claude-session" "$(_cdir /home/kay /home/kay/.claude/plugins/foo)"
 unset _cdir_src
 
-# ── The plugin farm must be real dirs down to where the installer writes ──────────────
-# `/plugin install` clones into plugins/cache/temp_git_*, then renames onto
-# plugins/cache/<marketplace>/<plugin>/<version>. A farm that stopped one level down left
-# cache/<marketplace> a symlink into the READ-ONLY shared mount whenever canonical already held
-# that marketplace, so the rename failed EROFS — the UI sat on "Installing…" for good and the
-# clone was stranded. Behavioural, not a grep: the functions are extracted and run, against a
-# shared tree made read-only exactly as the :ro bind makes it.
-_farm_tmp="$(mktemp -d)"
-sed -n '/^    prune_farm() {/,/^    }$/p; /^    farm_dir() {/,/^    }$/p' \
-    "$KIB_ROOT/guest/entrypoint/docker-entrypoint.sh" | sed 's/^    //' >"$_farm_tmp/farm.sh"
-mkdir -p "$_farm_tmp/shared/cache/mkt/plug/1.0.0" "$_farm_tmp/shared/cache/mkt/stale/1.0.0"
-# Depth comes from the entrypoint's own CALL SITE, never a literal here: a function that supports
-# a depth is worth nothing if the caller stops passing one. No match yields "" → floored to 0, the
-# exact one-level farm that shipped broken, so the guard fails closed.
-# shellcheck disable=SC2016  # a literal sed pattern: it must match the source text verbatim
-_farm_depth="$(sed -n \
-    's|.*farm_dir "\$CLAUDE_SHARED_DIR/plugins/cache" "\$CLAUDE_SESSION_DIR/plugins/cache" *\([0-9]*\) *$|\1|p' \
-    "$KIB_ROOT/guest/entrypoint/docker-entrypoint.sh")"
-cat >"$_farm_tmp/run.sh" <<'RUN'
-set -e
-CLAUDE_SHARED_DIR="$PWD/shared"
-. ./farm.sh
-farm_dir "$PWD/shared/cache" "$PWD/session/cache" "${FARM_DEPTH:-}"
-RUN
-if [ "$(id -u)" = "0" ]; then
-    skip "the plugin farm reaches the installer's write depth" "root ignores the read-only bit"
-else
-    chmod -R a-w "$_farm_tmp/shared" # stand in for the :ro shared mount
-    (cd "$_farm_tmp" && FARM_DEPTH="$_farm_depth" sh run.sh) >/dev/null 2>&1
-    # The write an install actually performs: a new version inside an EXISTING shared plugin.
-    if mkdir -p "$_farm_tmp/session/cache/mkt/plug/2.0.0" 2>/dev/null; then
-        pass "/plugin install can write cache/<marketplace>/<plugin>/<version>"
-    else
-        fail "/plugin install cannot write cache/<marketplace>/<plugin>/<version>" \
-            "the farm stops above the depth it writes at — install hangs on 'Installing…'"
-    fi
-    is "a shared version stays visible through the deepened farm" "symlink" \
-        "$([ -L "$_farm_tmp/session/cache/mkt/plug/1.0.0" ] && echo symlink || echo missing)"
-
-    # Deepening means we now CREATE mirror dirs, so they must be torn down too: a plugin dropped
-    # from canonical would linger as a dir of dangling links — "enabled but nothing in /mcp".
-    chmod -R u+w "$_farm_tmp/shared"
-    rm -rf "$_farm_tmp/shared/cache/mkt/stale"
-    chmod -R a-w "$_farm_tmp/shared"
-    (cd "$_farm_tmp" && FARM_DEPTH="$_farm_depth" sh run.sh) >/dev/null 2>&1
-    is "a plugin deleted from the shared dir leaves no dangling mirror" "gone" \
-        "$([ -e "$_farm_tmp/session/cache/mkt/stale" ] && echo lingering || echo gone)"
-    is "a locally installed version survives the re-farm" "kept" \
-        "$([ -d "$_farm_tmp/session/cache/mkt/plug/2.0.0" ] && echo kept || echo lost)"
-    chmod -R u+w "$_farm_tmp/shared"
-fi
-rm -rf "$_farm_tmp"
-unset _farm_tmp
-
-# A failed install strands its staging clone (hundreds of files) in plugins/cache/, which every
-# later start then re-walks and re-chowns — the compounding cost that read as "frozen on startup".
-# shellcheck disable=SC2016  # literal grep pattern: it must match the source text verbatim
-if grep -q 'rm -rf "\$CLAUDE_SESSION_DIR"/plugins/cache/temp_git_\*' \
-    "$KIB_ROOT/guest/entrypoint/docker-entrypoint.sh"; then
-    pass "the entrypoint sweeps stranded plugin-install staging clones"
-else
-    fail "the entrypoint no longer sweeps plugins/cache/temp_git_*" \
-        "a failed install's clone is re-walked and re-chowned at every container start"
-fi
-
-# Same cost, unbounded: the session-dir chown must not walk the whole plugin cache. It has to
-# stay deep enough to cover the farm, though — that is the only root-created thing in there —
-# so derive what farm_dir actually plants (target's depth + its depth argument + the leaf link)
-# and hold the -maxdepth to it. Deepen one without the other and root-owned symlinks come back.
+# ── The shared asset trees are one symlink each, never a per-project farm ─────────────
+# The farm existed only because plugins/ and hooks/ mounted :ro. Reintroducing it would bring
+# back the whole subsystem it paid for — the depth table, the prune walk, the temp_git_* sweep,
+# and the bounded chown that stopped the macOS cold start walking 100k+ cache entries (macos.md).
 _ep="$KIB_ROOT/guest/entrypoint/docker-entrypoint.sh"
+if grep -q 'farm_dir\|prune_farm' "$_ep"; then
+    fail "the entrypoint farms shared assets per project again" \
+        "every tree is writable now, so one symlink each is the whole job"
+else
+    pass "the entrypoint symlinks each shared asset tree, with no per-project farm"
+fi
+# Belt on the same cost: a recursive chown over the session dir walks the plugin cache through
+# the symlink and puts ~30s back into every macOS cold start.
 if grep -q 'chown -Rh .*CLAUDE_SESSION_DIR' "$_ep"; then
     fail "the session-dir chown is recursive again" \
         "it walks 100k+ plugin-cache entries — ~30s of macOS cold start (macos.md)"
 else
-    # shellcheck disable=SC2016  # awk program: $ is awk's, not the shell's
-    _need="$(awk '/^ *farm_dir "\$CLAUDE_SHARED_DIR/ {
-        d = split($3, seg, "/") - 1 + ($4 == "" ? 0 : $4) + 1
-        if (d > max) max = d
-    } END { print max + 0 }' "$_ep")"
-    _bound="$(sed -n 's/.*-maxdepth \([0-9][0-9]*\).*/\1/p' "$_ep" | head -1)"
-    is "the session-dir chown is bounded, and still covers the farm" "yes" \
-        "$([ -n "$_bound" ] && [ "$_bound" -ge "$_need" ] && echo yes || echo "no ($_bound < $_need)")"
+    is "the session-dir chown stays bounded (-maxdepth)" "yes" \
+        "$(sed -n 's/.*-maxdepth \([0-9][0-9]*\).*/yes/p' "$_ep" | head -1)"
 fi
-unset _ep _need _bound
+unset _ep
 
 # The project container must NOT be created with --rm. It is the only place a startup failure
 # explains itself: with --rm the engine reaped the container before wait_for_container_ready

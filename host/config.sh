@@ -10,7 +10,7 @@
 # Reads:  KIB_ROOT KIB_STATE_ROOT PWD
 # Writes: CLAUDE_HOME CLAUDE_JSON SLUG LEGACY_BOX_SLUG SESSION_BASE SHARED_BASE LOCK_DIR
 #         LOCK_FILE BOOT_LOCK STATE_DIR EPHEMERAL SCRATCH_SUFFIX
-#         KIB_ASSETS_LOCKED KIB_ASSETS_OPEN KIB_ASSETS_DEMOTED KIB_ASSETS_FOLDED
+#         KIB_ASSETS_OPEN KIB_ASSETS_PROMPT KIB_ASSETS_FARMED KIB_ASSETS_FOLDED
 # shellcheck disable=SC2034  # the globals above are read in bin/kib and the other units
 
 _scope() { kib_py host.config_scope "$@"; }
@@ -176,60 +176,144 @@ validate_shared_settings() {
         "    \$EDITOR ~/.claude/settings.json"
 }
 
-# ── Shared-asset tiers ───────────────────────────────────────────
-# Both tiers auto-load in every project and in a host `claude`; they differ in what a WRITE buys,
-# so they mount differently (audit H6). LOCKED carries a `command` the host EXECUTES, so :ro
-# unless `kib unlock-shared`, farmed per project. OPEN is prompt text with none, so it is
-# writable and symlinked straight at canonical. (`redaction-config-guard.md`)
-KIB_ASSETS_LOCKED="plugins hooks"
-KIB_ASSETS_OPEN="skills agents commands"
+# ── Shared assets: one open tier ─────────────────────────────────
+# All five auto-load in every project and in a host `claude`, and all five mount WRITABLE and
+# symlinked straight at canonical — so an install or an authored skill is shared exactly as it is
+# on the host. plugins/ and hooks/ used to mount :ro (unlocked by a verb, farmed per project);
+# that lock is gone and what these trees AUTO-RUN is detected instead. The trade is written up in
+# full — including the cross-project residual it accepts — in `redaction-config-guard.md`.
+KIB_ASSETS_OPEN="skills agents commands plugins hooks"
+# The prompt-text subset, for the cheap "changed since last launch" report — see why below.
+KIB_ASSETS_PROMPT="skills agents commands"
 
-# ── Open asset trees: refuse a smuggled command or an escaping symlink ───
-# Same placement and reasoning as validate_shared_settings above — vet on the host, before any
-# container reads it, on both the create and attach paths. Sets KIB_ASSETS_DEMOTED to the trees
-# that must mount :ro this launch; a clean tree stays writable. Never deletes or moves anything:
-# the file stays where you left it, and the banner names it.
+# Trees an older kib mounted :ro and farmed per project, so a launch may still find real content
+# under $SESSION_BASE for them. Migration only — delete once no session dir predates the collapse.
+KIB_ASSETS_FARMED="plugins hooks"
+
+# ── Shared asset trees: report what a host `claude` would AUTO-RUN ───
+# These trees are plain bind mounts with nothing to interpose on, so this is detection, not
+# prevention — and what it detects is host RCE only in the one case where the host has its own
+# unsandboxed `claude` to load them. So the probe gates the whole check: no host claude, no walk.
+# `kib audit` calls this with force=1, for a user who wants to look anyway.
 #
-# $1 = launch (default; demote the tree for this session) or teardown (nothing left to demote —
-# say it now, while the user still remembers the session that wrote it, instead of at the next
-# launch). Detection either way: these trees are plain bind mounts with nothing to interpose on.
+# Teardown, not launch: the finding is almost always what THIS session just wrote, and naming it
+# while the user still remembers writing it beats naming it at the next launch. Change-scoped
+# against a stamp, so an installed plugin's own hooks are reported once and not every exit.
 validate_shared_assets() {
-    local mode="${1:-launch}" _t bad
-    if [ "$mode" = launch ]; then KIB_ASSETS_DEMOTED=""; fi
-    if ! have_python; then
-        if [ "$mode" = launch ]; then
-            warn "python3 not found on the host — cannot vet the shared skills/agents/commands." \
-                "Mounting them read-only for this session."
-            KIB_ASSETS_DEMOTED="$KIB_ASSETS_OPEN"
-        fi
+    local force="${1:-0}" _t bad hostcc stamp="$STATE_DIR/assets.scanned"
+    # The host-claude gate FIRST: with no unsandboxed reader there is nothing to say, so a host
+    # without python3 must not be told at every teardown that a check it would have skipped was
+    # skipped. `host_claude_path` needs no python of its own.
+    hostcc="$(host_claude_path)"
+    if [ -z "$hostcc" ] && [ "$force" != 1 ]; then return 0; fi
+    have_python || {
+        warn "python3 not found on the host — cannot vet the shared ~/.claude asset trees."
         return 0
-    fi
+    }
     for _t in $KIB_ASSETS_OPEN; do
         [ -d "$CLAUDE_HOME/$_t" ] || continue
-        bad="$(kib_py host.asset_scan scan "$CLAUDE_HOME/$_t")" && continue
-        # shellcheck disable=SC2088  # the tilde is prose for the user, not a path we open
-        if [ "$mode" = launch ]; then
-            KIB_ASSETS_DEMOTED="$KIB_ASSETS_DEMOTED $_t"
-            warn "~/.claude/$_t is read-only this session — it configures a command to RUN," \
-                "or links out of the tree:" \
-                "$(printf '%s\n' "$bad" | sed 's/^/    /')" \
-                "These trees are shared BECAUSE nothing in them auto-runs and nothing in them" \
-                "reads outside them. Remove it and relaunch."
+        # force=1 is `kib audit` — a look the user just asked for, so it scans WHOLE. Handing it
+        # the stamp would answer "nothing changed since your last launch" to the question "what is
+        # in my shared trees", which is the one question it exists to answer.
+        if [ "$force" = 1 ]; then
+            bad="$(kib_py host.asset_scan scan "$CLAUDE_HOME/$_t")" && continue
         else
-            # Already named at launch (this run's own scan, create or attach): the user has
-            # heard it, and repeating it every exit is how an alert stops being read. What is
-            # left is what THIS session added, which is the whole point of scanning here.
-            case " ${KIB_ASSETS_DEMOTED:-} " in *" $_t "*) continue ;; esac
-            warn "~/.claude/$_t now configures a command to RUN, or links out of the tree:" \
-                "$(printf '%s\n' "$bad" | sed 's/^/    /')" \
-                "It loads in EVERY project's next session and in your host claude, which is not" \
-                "sandboxed. Remove it — until you do, kib mounts this tree read-only."
-            notify_desktop critical "kib · shared $_t is no longer prompt-only" \
-                "Something in ~/.claude/$_t runs a command or links out of the tree."
+            bad="$(kib_py host.asset_scan scan-new "$CLAUDE_HOME/$_t" "$stamp")" && continue
         fi
+        # shellcheck disable=SC2088  # the tilde is prose for the user, not a path we open
+        warn "~/.claude/$_t gained something that RUNS a command by itself, or links out of" \
+            "the tree:" \
+            "$(printf '%s\n' "$bad" | sed 's/^/    /')" \
+            "It loads in EVERY project's next session — and in ${hostcc:-a host claude}, which" \
+            "is NOT sandboxed, so that command runs as you on this machine. Review it, or" \
+            "remove it. kib does not protect ~/.claude from what a session writes there."
+        # Teardown only, like kib_audit_gate's: `kib audit` is something the user just typed and
+        # is watching, so a popup on top of the report they asked for is only noise.
+        [ "$force" = 1 ] || notify_desktop critical \
+            "kib · shared ~/.claude/$_t now auto-runs a command" \
+            "Something in ~/.claude/$_t runs a command or links out of the tree."
     done
+    # AFTER the scan, and its OWN stamp — never report_shared_asset_writes'. That one is refreshed
+    # by every launch of every project (the trees are global), so a second terminal opening
+    # mid-session would move the reference point past what this session had already written into
+    # plugins/ or hooks/ — trees that report has never covered. `kib audit` is a look, not a
+    # checkpoint, so it does not move the mark either.
+    if [ "$force" != 1 ]; then
+        : >"$stamp" 2>/dev/null || true
+    fi
     # Explicit: a loop whose last iteration ends on a false test returns 1, and under `set -e`
     # that aborts the launch with no message at all. Never end a launch-path function on a test.
+    return 0
+}
+
+# ── The one thing the box cannot protect you from ────────────────
+# Every ~/.claude asset tree is writable from a session, and all five auto-load. Inside another
+# box that is in-container execution — the same class as prompt injection, which the design
+# already accepts. In a NATIVE `claude` it is code running as you, outside any sandbox, which is
+# a different thing entirely. So the notice exists only when that reader does: silent otherwise,
+# because a warning about a program you have not installed is noise that trains you to skip the
+# rest. Removing the host install is the only thing that actually closes it.
+warn_host_claude() {
+    local cc
+    # Prime the memo in THIS shell: every caller reads it through `$(…)`, and a subshell's
+    # assignment dies with it — so without one direct call each site re-walks PATH.
+    host_claude_path >/dev/null
+    cc="$(host_claude_path)"
+    [ -n "$cc" ] || return 0
+    echo "⚠️  a native claude is installed at $cc — it is NOT sandboxed, and it loads the same" >&2
+    echo "   ~/.claude skills/agents/commands/plugins/hooks a session in here can write." >&2
+    echo "   kib reports what those trees auto-run; only uninstalling it closes the path." >&2
+    return 0
+}
+
+# ── One-time fold-out of a per-project plugins/hooks farm ────────
+# These two mounted :ro until the shared tier collapsed, so every install landed per-project
+# behind a symlink farm the entrypoint rebuilt each start. They are shared and symlinked now, and
+# `ln -sfn` cannot replace a non-empty directory — so a leftover per-project dir would silently
+# SHADOW the shared tree and the user's plugins would vanish from every project at once.
+#
+# Every symlink still in there points into a mount that no longer exists, so dropping the danglers
+# and collapsing the emptied dirs leaves exactly this project's own installs. Canonical is empty
+# for anyone who never ran `unlock-shared` — the lock is why the content is here — so the whole
+# tree moves across intact. If both hold content, nothing is merged and nothing is deleted: the
+# project's copy is set aside under a named path and the user is told where it went.
+fold_out_farmed_assets() {
+    local _t _l _aside
+    for _t in ${KIB_ASSETS_FARMED:-}; do
+        if [ -L "$SESSION_BASE/$_t" ]; then
+            rm -f "$SESSION_BASE/$_t" 2>/dev/null || true # a plain link: nothing of its own
+            continue
+        fi
+        [ -d "$SESSION_BASE/$_t" ] || continue
+        { find "$SESSION_BASE/$_t" -type l 2>/dev/null || true; } | while IFS= read -r _l; do
+            [ -e "$_l" ] || rm -f "$_l" 2>/dev/null || true
+        done
+        # -depth so the emptied parents go too; the whole tree disappears when it was only farm.
+        find "$SESSION_BASE/$_t" -depth -type d -exec rmdir {} + 2>/dev/null || true
+        [ -d "$SESSION_BASE/$_t" ] || continue
+
+        # rmdir succeeds only on an EMPTY canonical tree — exactly when there is nothing to lose.
+        if [ ! -e "$CLAUDE_HOME/$_t" ] || rmdir "$CLAUDE_HOME/$_t" 2>/dev/null; then
+            if mv "$SESSION_BASE/$_t" "$CLAUDE_HOME/$_t" 2>/dev/null; then
+                # shellcheck disable=SC2088  # the tilde is prose for the user, not a path
+                warn "moved this project's $_t/ into the shared ~/.claude/$_t." \
+                    "It was written when that tree was read-only and every install landed" \
+                    "per-project. It loads in EVERY project from now on, and in a host claude."
+                continue
+            fi
+        fi
+        _aside="$SESSION_BASE/$_t.pre-shared"
+        rm -rf "$_aside" 2>/dev/null || true
+        if mv "$SESSION_BASE/$_t" "$_aside" 2>/dev/null; then
+            warn "this project had its own $_t/ and the shared ~/.claude/$_t is not empty," \
+                "so neither was merged. Nothing was deleted — the project's copy is at:" \
+                "    $_aside" \
+                "The shared tree is what loads now. Reinstall what you need, or copy it across."
+        else
+            warn "could not move this project's $_t/ aside, so the shared ~/.claude/$_t will" \
+                "NOT load in this project: $SESSION_BASE/$_t shadows it."
+        fi
+    done
     return 0
 }
 
@@ -244,7 +328,8 @@ validate_shared_assets() {
 fold_out_project_assets() {
     local _t _e _name _moved=""
     KIB_ASSETS_FOLDED=0
-    for _t in ${KIB_ASSETS_OPEN:-}; do
+    fold_out_farmed_assets
+    for _t in ${KIB_ASSETS_PROMPT:-}; do
         [ -d "$SESSION_BASE/$_t" ] || continue
         for _e in "$SESSION_BASE/$_t"/*; do
             # `-L` too: any symlink here is the old farm's and DANGLES (its mount is gone), and
@@ -282,13 +367,18 @@ fold_out_project_assets() {
     return 0
 }
 
-# What a sandboxed session (or anything else) wrote into the open trees since the last launch.
+# What a sandboxed session (or anything else) wrote into the PROMPT trees since the last launch.
 # Reported HERE, not only mid-session, because a write while no session ran — another project's
-# box, a host process — still loads in this one. The stamp is refreshed after reporting.
+# box, a host process — still loads in this one. The stamp is refreshed after reporting, and
+# validate_shared_assets scopes its teardown scan against the same one.
+#
+# Prompt trees only, deliberately: plugins/ is 100k+ entries and ~30s to walk over macOS virtiofs
+# (macos.md), and every ordinary `/plugin install` would trip it. What a plugin AUTO-RUNS is the
+# part worth an alert, and that is validate_shared_assets' job.
 report_shared_asset_writes() {
     local stamp="$STATE_DIR/assets.seen" _t hits=""
     if [ -f "$stamp" ]; then
-        for _t in $KIB_ASSETS_OPEN; do
+        for _t in $KIB_ASSETS_PROMPT; do
             [ -d "$CLAUDE_HOME/$_t" ] || continue
             # NO pipe here, and `sed` not `head` below. Under `set -o pipefail` a `find | head`
             # returns 141 the moment head closes the pipe early, and `find` alone returns 1 on
@@ -298,6 +388,11 @@ report_shared_asset_writes() {
         done
     fi
     : >"$stamp" 2>/dev/null || true
+    # Seed the teardown scan's stamp on a FIRST launch only — never refresh it here, which is the
+    # whole reason it is a second file (validate_shared_assets). Seeded, the first teardown after
+    # an upgrade reports what this session wrote rather than every plugin already installed, and
+    # does not walk a 100k-entry cache to say so. Same judgement as gitaudit's `_since_stamp`.
+    [ -f "$STATE_DIR/assets.scanned" ] || : >"$STATE_DIR/assets.scanned" 2>/dev/null || true
     case "$hits" in *[![:space:]]*) ;; *) return 0 ;; esac
     warn "shared prompt assets changed since the last launch:" \
         "$(printf '%s\n' "$hits" | sed -n '/./{s/^/    /;p;}' | sed -n '1,5p')" \

@@ -35,7 +35,7 @@ Header of `host/portable.sh`, enforced by `check.sh`: host-side scripts are bash
 
 **Empty arrays.** bash 3.2 expands `"${arr[@]}"` of an *empty* array as an unbound variable under `set -u` — it aborts the launch, and only 4.4 fixed it. Every array ever assigned `()` expands through `${arr[@]+"${arr[@]}"}`, including where it reads as provably non-empty: the reader cannot verify that, and one later edit makes it empty. This shipped once — a sessionless first Mac run died in `start_broker` on `tok_mounts[@]: unbound variable`, because a Mac with no brokered MCP routes is exactly the case where the array is empty. `portability.sh` now derives the `X=()` names per file and fails on any bare expansion left.
 
-**No nested bind mounts.** A `-v` whose destination is inside another `-v`'s destination aborts the whole `docker run` on Docker Desktop — `mountpoint "/run/host_virtiofs/…" is outside of rootfs`. runc resolves the mountpoint *through* the parent bind, so the real path lands in the engine VM's virtiofs view of the host, outside the container rootfs; the check runs after resolution whether or not runc had to create the mountpoint, so pre-creating it is not a workaround. This killed the second Mac launch attempt (the broker's synthetic `.credentials.json` over the shared-assembly dir), and the other three nests — the ro shared assets, the lock witness, the transcripts dir — would each have killed it in turn. `bind_via_link` (host/lifecycle.sh) mounts flat under `/run/kib/` and leaves a symlink to it in the parent's host-side dir; `tests/check/portability.sh` fails on a reintroduced nest. Linux tolerates nesting, so the Linux-only one (the resolv-sync `/dev/null` masks) stays as it is.
+**No nested bind mounts.** A `-v` whose destination is inside another `-v`'s destination aborts the whole `docker run` on Docker Desktop — `mountpoint "/run/host_virtiofs/…" is outside of rootfs`. runc resolves the mountpoint *through* the parent bind, so the real path lands in the engine VM's virtiofs view of the host, outside the container rootfs; the check runs after resolution whether or not runc had to create the mountpoint, so pre-creating it is not a workaround. This killed the second Mac launch attempt (the broker's synthetic `.credentials.json` over the shared-assembly dir), and the other three nests — the shared assets, the lock witness (since removed), the transcripts dir — would each have killed it in turn. `bind_via_link` (host/lifecycle.sh) mounts flat under `/run/kib/` and leaves a symlink to it in the parent's host-side dir; `tests/check/portability.sh` fails on a reintroduced nest. Linux tolerates nesting, so the Linux-only one (the resolv-sync `/dev/null` masks) stays as it is.
 
 **`$HOST_HOME`'s parent is not in the image.** The entrypoint symlinks `$HOST_HOME` → the container home so Claude's absolute-path-keyed project config resolves. On macOS that is `/Users/<user>`, and a debian image has no `/Users`, so `ln` failed ENOENT and the entrypoint's `set -e` killed PID 1. It `mkdir -p "$(dirname …)"` first now. A project *under* `$HOME` no longer reaches that branch at all — the `$PWD` bind's mountpoint creates the whole chain, so `$HOST_HOME` exists and the block is skipped — but a project outside `$HOME` still does, on both platforms.
 
@@ -82,14 +82,14 @@ worth knowing:
 
 **A recursive `chown` over a bind costs ~30s and buys nothing.** The entrypoint used to
 `chown -Rh` the whole session dir to retag the symlink farm it had just planted as root. That
-dir also holds `plugins/cache` — 100k+ entries of per-project marketplace clones — and every
+dir also held `plugins/cache` — 100k+ entries of per-project marketplace clones — and every
 one of those metadata ops is a virtiofs round-trip to the Mac, *and* a no-op once it lands,
 since `fakeowner` ignores `chown`. It ran before the entrypoint `exec`s `sleep infinity`, so
 `wait_for_container_ready` spun on it and the whole cold start stalled ~30s with no output. On
 a Linux bind the same walk is ~0.1s, which is why it was invisible for so long. The chown is
-now `find -maxdepth 5`: the farm is the only root-created thing in there and plants no deeper
-than `plugins/cache/<marketplace>/<plugin>/<version>`, so the walk drops 114k → 900 entries
-with the same result. Keep the bound in step if `farm_dir`'s depth arguments ever grow.
+now `find -maxdepth 5`, and since the farm was deleted (2026-08-01) each asset tree is a single
+symlink, which `-h` retags without descending — so the walk drops 114k → a few dozen entries.
+The depth bound stays as a belt: nothing root-created in the session dir goes deeper.
 
 **Mode bits do not gate access.** `chmod 0400` on a bind is *recorded* faithfully — `stat` reads
 back `400` — but `access(2)` still answers writable. Every chmod-based read-only control there is

@@ -259,7 +259,7 @@ t_wait_until() {
 
 # The darwin notifier must prefer terminal-notifier. `display notification` from a DETACHED
 # osascript is attributed to Script Editor and dropped without that grant — and the caller that
-# matters most, shared-watch.sh ("a shared prompt asset now loads in every project"), is detached.
+# matters most, clipboard-bridge.sh, runs under detach_pgrp.
 # Stubs on PATH record which binary ran; no real notification is raised on this Linux box.
 _notify_stub() { # <dir> <name> <tag>: a notifier stub that records that it, and not the other, ran
     printf '#!/bin/sh\necho "%s $*" >>"%s/log"\n' "$3" "$1" >"$1/$2"
@@ -308,6 +308,26 @@ t_kill_pgrp
 t_sleep_state
 t_wait_until
 t_notify_desktop
+
+# host_claude_path has no OS branch, but it lives in portable.sh and gates every "this runs
+# OUTSIDE the sandbox" warning kib prints — so a wrong answer either nags a user with no native
+# claude or stays silent for the one who has it.
+(
+    unset KIB_HOST_CLAUDE
+    _hcp="$(mktemp -d)"
+    printf '#!/bin/sh\n' >"$_hcp/claude"
+    chmod +x "$_hcp/claude"
+    PATH="$_hcp:$PATH"
+    is "host_claude_path finds a claude on PATH" "$_hcp/claude" "$(host_claude_path)"
+    # Memoised: the second call must not re-probe, or every warning site pays a PATH walk. The
+    # probe has to run OUTSIDE a command substitution or the memo dies with the subshell — which
+    # is also why every caller assigns it rather than testing "$(host_claude_path)" twice.
+    host_claude_path >/dev/null
+    rm -f "$_hcp/claude"
+    is "host_claude_path is memoised for the launch" "$_hcp/claude" "$(host_claude_path)"
+    rm -rf "$_hcp"
+)
+is "an empty KIB_HOST_CLAUDE is honoured, not re-probed" "" "$(KIB_HOST_CLAUDE="" host_claude_path)"
 
 KIB_OS="$_saved_os"
 unset _saved_os

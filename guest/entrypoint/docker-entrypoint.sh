@@ -325,13 +325,16 @@ CLAUDE_SHARED_DIR="${CLAUDE_SECURESTORAGE_CONFIG_DIR:-}"
 
 if [ -n "$CLAUDE_SESSION_DIR" ] && [ -d "$CLAUDE_SHARED_DIR" ]; then
     mkdir -p "$CLAUDE_SESSION_DIR" 2>/dev/null || true
-    # Skipped when plugins/ is mounted read-only, which is the default.
-    if [ -w "$CLAUDE_SHARED_DIR/plugins" ]; then
-        mkdir -p "$CLAUDE_SHARED_DIR/plugins/marketplaces" 2>/dev/null || true
-    fi
+    # This lands in the HOST's canonical ~/.claude/plugins (the shared dir's entry is a symlink
+    # to the rw bind), and we are still root here — so chown it, or the first launch on a machine
+    # with no marketplaces yet leaves a root-owned dir that neither the box nor a host `claude`
+    # can clone into. It was guarded by `-w` while plugins/ mounted :ro; nothing is locked now.
+    mkdir -p "$CLAUDE_SHARED_DIR/plugins/marketplaces" 2>/dev/null || true
+    chown "$HOST_UID:$HOST_GID" "$CLAUDE_SHARED_DIR/plugins" \
+        "$CLAUDE_SHARED_DIR/plugins/marketplaces" 2>/dev/null || true
 
     # Whole-file assets: one symlink each. CLAUDE.md is deliberately absent (see above).
-    for entry in settings.json keybindings.json hooks; do
+    for entry in settings.json keybindings.json; do
         src="$CLAUDE_SHARED_DIR/$entry"
         dst="$CLAUDE_SESSION_DIR/$entry"
         [ -e "$src" ] || continue
@@ -352,91 +355,28 @@ if [ -n "$CLAUDE_SESSION_DIR" ] && [ -d "$CLAUDE_SHARED_DIR" ]; then
         ln -sfn "$src" "$dst" 2>/dev/null || true
     done
 
-    # Drop what we planted last start, deepest first, and rmdir what that empties — else an item
-    # deleted from the shared dir lingers as a dangling mirror. Only links INTO the shared dir are
-    # ours; a dir still holding project content refuses the rmdir. Bounded by the plant depth.
-    prune_farm() { # $1 = per-project dir, $2 = depth
-        for entry in "$1"/* "$1"/.*; do
-            case "${entry##*/}" in . | ..) continue ;; esac # never recurse into the parent
-            if [ -L "$entry" ]; then
-                case "$(readlink "$entry" 2>/dev/null)" in
-                    "$CLAUDE_SHARED_DIR"/*) rm -f "$entry" ;;
-                esac
-            elif [ "${2:-0}" -gt 0 ] && [ -d "$entry" ]; then
-                (prune_farm "$entry" "$(($2 - 1))")
-                rmdir "$entry" 2>/dev/null || true # refused while project content remains
-            fi
-        done
-    }
-
-    # Asset DIRECTORIES get a real per-project dir holding one symlink per shared item, not one
-    # symlink to the shared dir: these mount read-only (a write there would auto-run in every
-    # other project's next session), and a plain symlink makes `/agents`, skill authoring and
-    # `/plugin install` fail outright. This way shared items still load and in-session creations
-    # land in this project's dir. State FILES need no special case — a JSON writer's rename
-    # replaces our symlink with a real local file, which this dir permits.
-    # $3 is how many levels BELOW $2 stay real dirs instead of becoming symlinks; callers differ.
-    farm_dir() {                  # $1 = shared source dir, $2 = per-project dir, $3 = depth (0)
-        [ -L "$2" ] && rm -f "$2" # upgrade a farm built by an older kib
-        # The per-project dir is created even with NO shared source: it is where in-session
-        # authoring lands. Returning early left a user with no canonical commands/ with no
-        # commands/ in the box either, so authoring one had nowhere to go.
-        mkdir -p "$2" 2>/dev/null || true
-        prune_farm "$2" "${3:-0}"
-        [ -d "$1" ] || return 0
-
-        for item in "$1"/*; do
-            [ -e "$item" ] || continue # unmatched glob
-            name="${item##*/}"
-            # Recurse in a SUBSHELL: this runs under dash, where the loop variables above are
-            # global, and a plain recursive call would clobber the caller's own iteration.
-            if [ "${3:-0}" -gt 0 ] && [ -d "$item" ]; then
-                (farm_dir "$item" "$2/$name" "$(($3 - 1))")
-                continue
-            fi
-            [ -e "$2/$name" ] && continue # a local item of the same name wins
-            ln -sfn "$item" "$2/$name" 2>/dev/null || true
-        done
-    }
-
-    # A failed install strands its staging clone — hundreds of files every later start re-walks
-    # and re-chowns. Safe here: container creation, so nothing can be mid-install.
-    rm -rf "$CLAUDE_SESSION_DIR"/plugins/cache/temp_git_* 2>/dev/null || true
-
-    farm_dir "$CLAUDE_SHARED_DIR/plugins" "$CLAUDE_SESSION_DIR/plugins"
-
-    # Prompt-only trees are SHARED, not farmed: a skill authored in a box must land in canonical
-    # so every project and a host `claude` get it — which is the whole point of authoring one.
-    # They mount writable (host/config.sh, "Shared-asset tiers"), so one symlink is enough.
-    for entry in skills agents commands; do
+    # Every asset TREE is shared and writable, so one symlink each — no per-project symlink farm.
+    # A skill, agent, command, hook or plugin created in a box lands in canonical, where every
+    # project and a host `claude` get it. The farm existed ONLY because plugins/ and hooks/ mounted
+    # read-only; nothing is locked now, and what those trees auto-run is DETECTED on the host
+    # instead (kib/host/asset_scan.py). (redaction-config-guard.md)
+    #
+    # A real dir left here by an older kib is that farm. The host folds it out to canonical before
+    # the container starts (fold_out_project_assets), so anything still real is content it could
+    # not move, and it stays as this project's override rather than being linked over.
+    for entry in skills agents commands plugins hooks; do
         src="$CLAUDE_SHARED_DIR/$entry"
         dst="$CLAUDE_SESSION_DIR/$entry"
         [ -d "$src" ] || continue
-        # An older kib farmed these. `ln -sfn` onto a real dir plants the link INSIDE it, so
-        # take the farm down first — and leave it alone if it still holds project-local content,
-        # which rmdir refuses to remove. That content then wins as this project's override.
-        if [ -d "$dst" ] && [ ! -L "$dst" ]; then
-            prune_farm "$dst" 0
-            rmdir "$dst" 2>/dev/null || true
-        fi
         [ -e "$dst" ] && [ ! -L "$dst" ] && continue
         ln -sfn "$src" "$dst" 2>/dev/null || true
     done
 
-    # Deeper where the installer writes: it renames onto cache/<marketplace>/<plugin>/<version>
-    # and mkdirs data/<key>, and a symlink to the read-only shared dir refuses that — shallower,
-    # the rename hit EROFS and the UI hung on "Installing…". marketplaces stays 0: git clones,
-    # which no farm makes writable, so the installer re-clones per-project. (redaction-config-guard.md)
-    farm_dir "$CLAUDE_SHARED_DIR/plugins/marketplaces" "$CLAUDE_SESSION_DIR/plugins/marketplaces"
-    farm_dir "$CLAUDE_SHARED_DIR/plugins/cache" "$CLAUDE_SESSION_DIR/plugins/cache" 2
-    farm_dir "$CLAUDE_SHARED_DIR/plugins/data" "$CLAUDE_SESSION_DIR/plugins/data" 1
-
     # The session dir belongs to one project, so no other container is walking it and this
     # chown cannot race. `-h` retags the symlinks above instead of dereferencing them into the
-    # shared dir. Bounded at depth 5 because only the farm above is root-created and it plants
-    # no deeper than plugins/cache/<marketplace>/<plugin>/<version>; unbounded it also walked
-    # the plugin cache — 100k+ entries, ~0.1s on a Linux bind but ~30s over macOS virtiofs,
-    # every second of it before the container reports ready. (macos.md)
+    # shared dir — which is what keeps the plugin cache (100k+ entries, ~0.1s on a Linux bind but
+    # ~30s over macOS virtiofs) out of the walk entirely now that each tree is one link. The
+    # depth bound stays as a belt: nothing root-created here goes deeper. (macos.md)
     find "$CLAUDE_SESSION_DIR" -maxdepth 5 \
         -exec chown -h "$HOST_UID:$HOST_GID" {} + 2>/dev/null || true
 

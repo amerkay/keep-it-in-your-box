@@ -85,7 +85,8 @@ of the host `$HOME` is mounted** — no `~/.ssh`, `~/.aws`, `~/.gnupg`, no SSH-a
 is a container path.
 
 **The carve-out, stated plainly.** Slices of canonical `~/.claude` are bound in, in **two tiers**:
-`plugins` and `hooks` are read-only (writable only under `--unlock-shared`); `skills`, `agents` and
+`skills`, `agents`, `commands`, `plugins` and `hooks` are all writable and shared, with what they
+auto-run reported at teardown; 
 `commands` are **writable by default**, because authoring a skill from one project is meant to share
 it. Everything else Claude needs is assembled into `$KIB_STATE_ROOT` scratch.
 

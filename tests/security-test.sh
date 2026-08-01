@@ -312,20 +312,26 @@ allow "regression: ordinary hardlink" bash -c "echo x > '$ARTIFACTS/hl-src'; ln 
 section "Host-executed config guard — non-git paths"
 
 for p in .vscode/tasks.json .devcontainer/devcontainer.json .envrc \
-    .githooks/pre-commit .gitmodules .claude/hooks/notify.sh .cursor/mcp.json \
+    .githooks/pre-commit .gitmodules .cursor/mcp.json \
     .zed/tasks.json .zed/debug.json .run/app.run.xml .mvn/jvm.config \
     .exrc .nvim.lua .ripgreprc .yarnrc.yml; do
     deny "write $p" bash -c "mkdir -p \"\$(dirname '$ARTIFACTS/$p')\" 2>/dev/null; echo x > '$ARTIFACTS/$p'"
 done
 
-# The guard is pure-exec files ONLY. A rule on a file ordinary work edits would refuse an
-# everyday write, and the policy text tells the session to stop — so mixed-use config stays
-# writable and is warned about host-side (audit_project_configs). Prompt text is not execution.
+# The guard is AMBIENT-trigger files ONLY — ones the host runs at the next commit, `cd` or
+# editor-open. A rule on a file ordinary work edits would refuse an everyday write, and the policy
+# text tells the session to stop; anything waiting on a deliberate `claude` launch is warned about
+# host-side instead (audit_project_configs). Prompt text is not execution.
 # .idea/ is here, not above, since 2026-07-30: the [protect] rule broke `pnpm install`, whose
 # EPERM under .idea/ ends the session over an unrelated command. Residual risk (run configs,
 # File Watchers) is stated in guest/policy/global.kibignore.
+# .claude/hooks/ and .claude-plugin/ joined them 2026-08-01, and unlike .idea that is a
+# correction: nothing under them loads until a pointer names it AND `claude` is launched, so a
+# report reaches the user in time — and refusing hooks/hooks.json blocked the one sanctioned way
+# to ship a repo-local committed hook while the manifest that arms it stayed writable.
 for p in .cursor/rules/style.md .claude/commands/deploy.md .claude/settings.json .mcp.json \
-    mise.toml .idea/workspace.xml; do
+    mise.toml .idea/workspace.xml .claude/hooks/notify.sh sub/.claude/hooks/deep.sh \
+    .claude-plugin/plugin.json .claude-plugin/marketplace.json; do
     allow "regression: $p stays writable (detected host-side, not refused)" \
         bash -c "mkdir -p \"\$(dirname '$ARTIFACTS/$p')\" 2>/dev/null; echo '{}' > '$ARTIFACTS/$p'"
 done
@@ -435,26 +441,19 @@ deny "the write-sibling shape does not carve out .env.local" \
 section "Shared config surface — cross-project pivot (H5, H6)"
 
 SHARED="$HOME/.claude-shared"
-# Two tiers (host/config.sh). plugins/ and hooks/ hold a command the HOST executes, so a write
-# is host RCE and must be refused. skills/agents/commands are prompt text and deliberately
-# writable-and-shared — asserted so, because a regression that re-locks them breaks skill
-# authoring silently, and one that widens the locked pair is the H6 pivot coming back.
-for d in plugins hooks; do
+# ONE open tier (host/config.sh). All five are writable and shared on purpose, so an install or
+# an authored skill lands in canonical exactly as it would on the host. Asserted, because a
+# regression that re-locks any of them breaks authoring and installing silently — and because the
+# accepted cost of opening them (H6 cross-project auto-execution) should be visible in the suite
+# that measures the sandbox, not only in the design note. The control is detection at teardown:
+# kib/host/asset_scan.py, gated on a native `claude` actually being installed.
+for d in skills agents commands plugins hooks; do
     if [ -d "$SHARED/$d" ]; then
-        deny "shared $d/ is read-only (the host executes it)" \
+        allow "shared $d/ is writable (one open tier, reported not prevented)" \
             bash -c "touch '$SHARED/$d/.sectest-probe'"
         rm -f "$SHARED/$d/.sectest-probe" 2>/dev/null
     else
-        skip "shared $d/ is read-only (the host executes it)" "not present"
-    fi
-done
-for d in skills agents commands; do
-    if [ -d "$SHARED/$d" ]; then
-        allow "shared $d/ is writable (prompt text, shared on purpose)" \
-            bash -c "touch '$SHARED/$d/.sectest-probe'"
-        rm -f "$SHARED/$d/.sectest-probe" 2>/dev/null
-    else
-        skip "shared $d/ is writable (prompt text, shared on purpose)" "not present"
+        skip "shared $d/ is writable (one open tier, reported not prevented)" "not present"
     fi
 done
 # The sandbox rules mount :ro at Claude's managed-policy path, not into the config dir: they
@@ -468,56 +467,53 @@ deny "sandbox policy is read-only to the session" bash -c "echo probe >>'$_pol'"
 # settings.json is deliberately still writable — locking it would break /config.
 is "settings.json stays writable (/config must work)" "writable" \
     "$([ -w "$SHARED/settings.json" ] && echo writable || echo 'read-only ***')"
-# Broker ON: the real token is gone and a read-only SYNTHETIC placeholder shadows it, so
-# read-only is the desired state — never make this writable to "let refresh work", since under
-# the broker nothing refreshes by design. Broker OFF: the real credential is copied in
-# writable, so in-sandbox Claude can refresh it.
-_cred_state="$([ ! -e "$SHARED/.credentials.json" ] || [ -w "$SHARED/.credentials.json" ] && echo writable || echo read-only)"
+# Broker ON: the real token never enters the box and a SYNTHETIC placeholder shadows it. The
+# invariant is the CONTENT, not the mode — the shared dir is deliberately rw (that is what makes
+# Claude's atomic credential rename work, the EBUSY footgun that made this mount dir-backed), so
+# Claude replaces the read-only shadow with its own copy seconds after start. Asserting the file
+# stays read-only asserts something the design never promised, and it passed only while Claude
+# happened not to rewrite it. What must hold either way: no real token, ever.
+#
+# Broker OFF: the real credential is copied in writable, so in-sandbox Claude can refresh it —
+# there is no placeholder to assert about, which is why this half only checks the mode.
 if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
-    is ".credentials.json is a read-only synthetic placeholder (broker holds a static token)" "read-only" "$_cred_state"
+    is ".credentials.json in the box is synthetic, whatever Claude rewrites it to" "synthetic" \
+        "$(grep -q 'fake_value_' "$SHARED/.credentials.json" 2>/dev/null && echo synthetic \
+            || echo 'REAL TOKEN ***')"
+    # The shadow kib mounts is still read-only at its own path, which Claude cannot rename over:
+    # a regression that made THIS writable would put the real credential's mount mode in doubt.
+    _ph=""
+    for _c in /run/kib/placeholder-cred-*; do
+        [ -e "$_c" ] && _ph="$_c" && break # bash 3.2 has no nullglob: an unmatched glob is itself
+    done
+    if [ -n "$_ph" ]; then
+        is "the placeholder kib mounts is read-only at its own path" "read-only" \
+            "$([ -w "$_ph" ] && echo 'writable ***' || echo read-only)"
+    else
+        skip "the placeholder kib mounts is read-only at its own path" "no placeholder bind"
+    fi
+    unset _ph _c
 else
-    is ".credentials.json stays writable (in-sandbox OAuth refresh, broker off)" "writable" "$_cred_state"
+    is ".credentials.json stays writable (in-sandbox OAuth refresh, broker off)" "writable" \
+        "$([ ! -e "$SHARED/.credentials.json" ] || [ -w "$SHARED/.credentials.json" ] \
+            && echo writable || echo 'read-only ***')"
 fi
 
-# The lock on plugins/ must not cost in-session installing: that is what the merge farm buys.
+# Every tree is a SYMLINK at canonical now, never a per-project farm: what a box installs or
+# authors must land in ~/.claude, shared with every project, not be trapped in this one. The farm
+# existed only to make installs work under the :ro mount, and it brought a depth table, a prune
+# walk and a 30s macOS cold start with it.
 CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude-session}"
-is "plugins/ is a per-project merge farm, not a symlink" "real dir" \
-    "$([ -d "$CFG/plugins" ] && [ ! -L "$CFG/plugins" ] && echo 'real dir' || echo 'symlink ***')"
-# The open tier is the opposite: a SYMLINK at canonical, so a skill authored here is shared with
-# every project rather than trapped in this one. A farm here would silently un-share authoring.
-for d in skills agents commands; do
-    is "$d/ is a symlink to the shared tree, not a farm" "symlink" \
+for d in skills agents commands plugins hooks; do
+    is "$d/ is a symlink to the shared tree, not a per-project farm" "symlink" \
         "$([ -L "$CFG/$d" ] && echo symlink || echo 'real dir ***')"
 done
 allow "regression: create a skill in-session" bash -c "mkdir -p '$CFG/skills/.sectest' && echo x > '$CFG/skills/.sectest/SKILL.md'"
 allow "regression: create an agent in-session" bash -c "echo x > '$CFG/agents/.sectest.md'"
-rm -rf "$CFG/skills/.sectest" "$CFG/agents/.sectest.md" 2>/dev/null
-if [ -d "$CFG/plugins/marketplaces" ] && [ ! -L "$CFG/plugins/marketplaces" ]; then
-    allow "regression: clone a marketplace per-project" mkdir -p "$CFG/plugins/marketplaces/.sectest"
-    rmdir "$CFG/plugins/marketplaces/.sectest" 2>/dev/null
-else
-    fail "regression: clone a marketplace per-project" \
-        "plugins/marketplaces is a symlink into the read-only shared dir — /plugin install will fail"
-fi
-# …and one level deeper, where an install actually lands: a version inside a plugin of a
-# marketplace the shared dir already holds. While cache/<marketplace> was a read-only symlink that
-# rename failed EROFS, so `/plugin install` sat on "Installing…" and stranded its staging clone.
-_mkt=""
-for _m in "$CFG"/plugins/cache/*; do
-    case "${_m##*/}" in temp_git_* | '*') continue ;; esac
-    [ -e "$_m" ] || continue # unmatched glob
-    _mkt="$_m"
-    break
-done
-if [ -n "$_mkt" ]; then
-    allow "regression: /plugin install can write inside a cached marketplace" \
-        mkdir -p "$_mkt/.sectest/1.0.0"
-    rm -rf "$_mkt/.sectest" 2>/dev/null
-else
-    skip "regression: /plugin install can write inside a cached marketplace" "no marketplace cached"
-fi
-unset _mkt _m
-rm -rf "$CFG/skills/.sectest" "$CFG/agents/.sectest.md" 2>/dev/null
+allow "regression: /plugin install can write where it lands" \
+    mkdir -p "$CFG/plugins/cache/.sectest/p/1.0.0" "$CFG/plugins/marketplaces/.sectest"
+rm -rf "$CFG/skills/.sectest" "$CFG/agents/.sectest.md" \
+    "$CFG/plugins/cache/.sectest" "$CFG/plugins/marketplaces/.sectest" 2>/dev/null
 
 # ── Cross-project isolation: the assembled config is THIS project only ──────────
 # canonical ~/.claude holds every project's transcripts, ↑ history and .claude.json entries.

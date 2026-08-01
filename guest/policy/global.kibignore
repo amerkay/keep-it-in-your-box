@@ -18,10 +18,15 @@
 # here. They nest arbitrarily deep, which a tail rule cannot express, so they live in
 # Redact._git_sensitive() instead — one definition, shared with the write validator.
 #
-# ONLY pure-exec files belong here. A write here is refused and the policy text tells the
-# agent to stop and report, so a rule on a file anyone edits day to day ends the session
-# over ordinary work. Mixed-use config (.claude/settings.json, .mcp.json, mise.toml, …) is
-# DETECTED instead, by audit_project_configs() in kib/host/gitaudit.py.
+# ONLY files with an AMBIENT trigger belong here — ones the host runs at the next commit, `cd`,
+# editor-open or ordinary tool invocation, with nobody deciding to run anything. A write here is
+# refused and the policy text tells the agent to stop and report, so a rule on a file anyone edits
+# day to day ends the session over ordinary work.
+#
+# Everything whose trigger is a DELIBERATE `claude` launch — .claude/settings.json, .mcp.json,
+# .claude/hooks/, a .claude-plugin/ manifest, mise.toml, … — is DETECTED instead, by
+# audit_project_configs() in kib/host/gitaudit.py. A report reaches the user before they launch;
+# it cannot reach them before a `git status`. That is the whole basis of the split.
 .vscode
 .devcontainer
 .envrc
@@ -44,7 +49,16 @@
 # Agent and editor config that carries a command rather than prompt text. Deliberately
 # file-precise: .cursor/rules and .claude/commands are prompt text, which kib holds is not
 # execution (see the shared-assets tiers in redaction-config-guard.md).
-.claude/hooks
+#
+# .claude/hooks — WITHDRAWN 2026-08-01, and unlike .idea this is a correction, not a hole.
+# Everything else in this section fires on an ordinary commit, `cd` or editor-open, with the user
+# not thinking about Claude at all; nothing under .claude/hooks/ loads until a POINTER names it
+# (settings.json, a plugin manifest, skill frontmatter) and someone launches `claude`. That is a
+# deliberate act a report reaches in time — and the pointer was always writable, so refusing the
+# script while the thing that arms it stayed editable protected nothing. It also blocked the one
+# sanctioned way to ship a repo-local committed hook: a plugin's hooks/hooks.json lives here.
+# Now DETECTED, tree-wide, by audit_project_configs() + _since_stamp() in kib/host/gitaudit.py —
+# the mtime half matters because the box can `git commit` past a dirty-file filter.
 .cursor/mcp.json
 .zed/tasks.json
 .zed/debug.json

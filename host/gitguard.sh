@@ -41,13 +41,22 @@ kib_remove_legacy_hook() {
 # returning 1 for a warn-class finding would turn "you are tracking a path you asked kib to
 # hide" into "the sandbox will not start". Report mode returns the code, so it is scriptable.
 kib_audit_gate() {
-    local mode="$1" top rc=0
+    local mode="$1" top rc=0 stamp="${STATE_DIR:-}/${SLUG:-x}.hooks.seen"
     have_python || return 0
     top="$(_git_toplevel)"
     [ -n "$top" ] || return 0 # not a git repo — nothing to audit
     kib_remove_legacy_hook "$top"
 
-    kib_py host.gitaudit --top "$top" --mode "$mode" || rc=$?
+    # `.claude/hooks/` is a whole tree with no schema to parse, and git cannot bound it: the box
+    # can commit, so a hook it wrote checks out pristine past any dirty-file filter. The stamp is
+    # the second opinion. Absent (a first launch) it reports nothing and is created below —
+    # hooks already in a fresh clone are the user's own.
+    kib_py host.gitaudit --top "$top" --mode "$mode" \
+        --hooks-stamp "$stamp" --host-claude "$(host_claude_path)" || rc=$?
+    # AFTER the report, never before: refreshed first, the scan above always reads empty.
+    if [ "$mode" != report ] && [ -d "${STATE_DIR:-}" ]; then
+        : >"$stamp" 2>/dev/null || true
+    fi
     case "$rc" in
         0) return 0 ;;
         5)

@@ -74,10 +74,13 @@
     block, and names any **already-tracked** file they match — `.gitignore` cannot catch those,
     so the user has to `git rm --cached` them.
 - **Protected** — `.git/config`, `.git/hooks` (+ submodule/worktree equivalents), `.githooks/`,
-  `.gitmodules`, `.vscode/`, `.devcontainer/`, `.envrc`, `.claude/hooks/`,
+  `.gitmodules`, `.vscode/`, `.devcontainer/`, `.envrc`,
   `.cursor/mcp.json`, `.zed/tasks.json`, `.zed/debug.json`, `.run/`, `.mvn/jvm.config`, `.exrc`,
-  `.nvim.lua`, `.ripgreprc`, `.yarnrc.yml`: reads work, writes are refused. The **host** executes
-  these later, so writing one is host code execution from in here. `git config` is content-checked:
+  `.nvim.lua`, `.ripgreprc`, `.yarnrc.yml`: reads work, writes are refused. Every one of these
+  fires **ambiently** — the host runs it at the next commit, `cd`, editor-open or ordinary tool
+  invocation, with nobody deciding to run anything — so no report could reach the user in
+  time. Anything that waits for a deliberate `claude` launch is editable and watched instead
+  (below). `git config` is content-checked:
   ordinary keys pass; `core.hooksPath`, `core.fsmonitor`, `core.sshCommand`, `core.pager`,
   `alias.*`, `filter.*.clean` are refused.
   - **You may reproduce one, never author one.** A protected file *below* the project root may be
@@ -86,23 +89,24 @@
     `.vscode/`. One byte different, or no copy at the root to match, and it is refused. The root
     copy itself can never be written, whatever you do at a nested path. Committing a file first
     does not make it writable: the check is the bytes, not what git thinks is tracked.
-- **Editable, but watched** — `.claude/settings*.json`, `.mcp.json`, `.zed/settings.json`,
-  `.cargo/config.toml`, `mise.toml`, `.pre-commit-config.yaml`. These carry ordinary settings too,
-  so you may write them. If you add a key naming a **command** (a hook, an MCP `command`, a
-  `rustc-wrapper`, a mise `[hooks]` entry), say so plainly in your reply — the host's audit gate
-  reports it at teardown, and the user should hear it from you first, not from a warning.
-- **`~/.claude-shared/` — two tiers.** Everything under it auto-loads in every project's next
-  session *and* in a host `claude`, so a write from one repo pivots into all of them.
-  - **Locked — `plugins/`, `hooks/`** (read-only): these carry a `command` the **host** runs, so
-    writing one is host code execution from in here. Installing still works — it lands
-    per-project in `$CLAUDE_CONFIG_DIR`, the intended path, not a fallback. On EROFS, say that,
-    and that sharing it needs every session for this project closed and, in a **host terminal**:
-    `kib unlock-shared`.
-  - **Open — `skills/`, `agents/`, `commands/`** (writable): prompt text, nothing auto-runs.
-    Writes land in canonical `~/.claude` and load in **every** project from now on — **say so,
-    naming the file, whenever you write one.** A bundled helper script is fine: it runs only if
-    someone chooses to. A `hooks` or `mcpServers` **`command`** is not — parking one there
-    demotes the whole tree to read-only from the next launch.
+- **Editable, but watched** — `.claude/settings*.json`, `.claude/hooks/`, `.claude-plugin/`
+  (`plugin.json`, `marketplace.json`), `.mcp.json`, `.zed/settings.json`, `.cargo/config.toml`,
+  `mise.toml`, `.pre-commit-config.yaml`. None of these run until someone launches `claude` or the
+  tool that reads them, so you may write them — **a repo-local, committed hook is a supported
+  thing to build here**, either from `.claude/settings.json` or as a plugin's `hooks/hooks.json`.
+  The condition is that you **say so plainly, naming the file and what it runs**, whenever you
+  write one. The host's audit gate reports it at teardown and the user should hear it from you
+  first. Two things worth knowing before you try to be clever: a `plugin.json`'s `hooks` /
+  `mcpServers` / `lspServers` pointer is **followed** by that audit, so aiming it at an
+  unremarkable path is not a way to stay quiet; and the detector unions git with an **mtime**
+  pass, so committing the file does not hide it either.
+- **`~/.claude-shared/` — one open tier.** `skills/`, `agents/`, `commands/`, `plugins/`, `hooks/`
+  are all writable, and everything under them auto-loads in **every** project's next session *and*
+  in a host `claude` — so a write from one repo pivots into all of them. **Say so, naming the
+  file, whenever you write one.** Installing a plugin works normally and lands in canonical.
+  kib does not protect this tree: what it auto-runs (a `hooks` / `mcpServers` / `lspServers` /
+  `monitors` `command`, or a symlink out of the tree) is reported to the user at teardown, and a
+  native host `claude` — if they have one — runs it outside any sandbox.
 
 **On any refusal above, or a launch refused by the host's audit gate: stop and report it
 verbatim, including what you were attempting.** Do not retry via another path, another tool,
@@ -135,9 +139,8 @@ legitimate need is a conversation, not a workaround.
 **`EPERM` inside the project is kib refusing, and the path is the whole message** — the reason is
 logged where you cannot see it (the FUSE sidecar's stderr, a different container), so do not
 speculate about the cause beyond the rules above. `EACCES` is an ordinary permission problem:
-check the mode and owner, and treat it as a normal error. `EROFS` is a read-only mount, which
-under `~/.claude-shared/` means the locked tier, and under `~/.nvm/versions/node/` means the
-shared Node cache above.
+check the mode and owner, and treat it as a normal error. `EROFS` is a read-only mount — under
+`~/.nvm/versions/node/` that is the shared Node cache above.
 
 ## What persists
 

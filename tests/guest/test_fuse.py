@@ -319,7 +319,6 @@ def test_git_paths_are_protected_at_any_nesting(redact: Callable[[str], Any], pa
     [
         ".githooks/pre-commit",
         ".gitmodules",
-        ".claude/hooks/notify.sh",
         ".cursor/mcp.json",
         ".zed/tasks.json",
         ".zed/debug.json",
@@ -330,7 +329,6 @@ def test_git_paths_are_protected_at_any_nesting(redact: Callable[[str], Any], pa
         ".ripgreprc",
         ".yarnrc.yml",
         "sub/.githooks/pre-push",  # tail-matched, so any depth
-        "vendor/pkg/.claude/hooks/x.sh",
     ],
 )
 def test_non_git_host_executed_paths_are_protected(redact: Callable[[str], Any], path: str) -> None:
@@ -349,6 +347,13 @@ def test_non_git_host_executed_paths_are_protected(redact: Callable[[str], Any],
         ".cursor/rules/style.md",  # prompt text, not execution
         ".claude/commands/deploy.md",
         ".claude/settings.json",  # mixed-use: detected by the audit gate, not refused
+        # Demoted 2026-08-01: inert until a pointer names it and `claude` is launched, which is
+        # what makes detection reach the user in time. Listed here so a future [protect] on a
+        # Claude-shaped path re-breaks loudly instead of silently ending sessions.
+        ".claude/hooks/notify.sh",
+        "vendor/pkg/.claude/hooks/x.sh",
+        ".claude-plugin/plugin.json",
+        ".claude-plugin/marketplace.json",
         ".mcp.json",
         "mise.toml",
     ],
@@ -356,8 +361,9 @@ def test_non_git_host_executed_paths_are_protected(redact: Callable[[str], Any],
 def test_lookalike_and_mixed_use_paths_are_not_protected(
     redact: Callable[[str], Any], path: str
 ) -> None:
-    """The guard is pure-exec files only. A refused write here would end the session over
-    ordinary work, so mixed-use config is warned about host-side instead."""
+    """The guard is AMBIENT-trigger files only — ones the host runs at the next commit, `cd` or
+    editor-open. A refused write here would end the session over ordinary work, and anything
+    waiting on a deliberate `claude` launch is warned about host-side instead."""
     assert redact("")._protected("/" + path) is False
 
 

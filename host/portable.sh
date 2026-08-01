@@ -151,7 +151,7 @@ notify_desktop() {
     if [ "$KIB_OS" = darwin ]; then
         # terminal-notifier first: `display notification` from a DETACHED osascript is attributed
         # to Script Editor and dropped silently without that grant — and the loudest caller,
-        # shared-watch.sh, is exactly that (detach_pgrp). Same order as clipboard-bridge.sh.
+        # clipboard-bridge.sh, is exactly that (detach_pgrp). Same order as it uses itself.
         if command -v terminal-notifier >/dev/null 2>&1; then
             terminal-notifier -title "$title" -message "$body" >/dev/null 2>&1 || true
             return 0
@@ -169,6 +169,33 @@ notify_desktop() {
         command -v notify-send >/dev/null 2>&1 || return 0
         notify-send -u "$urgency" -i "$icon" "$title" "$body" 2>/dev/null || true
     fi
+}
+
+# ── Is there a `claude` on the HOST? ──────────────────────────────
+# Prints its path, or nothing. The shared ~/.claude trees load in every project's box AND in a
+# native host `claude` — and only that second reader is unsandboxed, so it is the difference
+# between "another box runs this" and "this runs as you on your machine". kib's warning about
+# those trees is gated on it.
+#
+# Deliberately NOT `npm prefix -g`: that spawns node on a launch path to earn one line of prose.
+# A `claude` that exists only as a shell alias or function is a false negative; the cost is a
+# warning we do not print, so failing open here is the cheap direction. Memoised for the launch.
+host_claude_path() {
+    if [ -z "${KIB_HOST_CLAUDE+x}" ]; then
+        KIB_HOST_CLAUDE="$(command -v claude 2>/dev/null || true)"
+        if [ -z "$KIB_HOST_CLAUDE" ]; then
+            local _c
+            for _c in "$HOME/.local/bin/claude" "$HOME/.claude/local/claude" \
+                "$HOME/.npm-global/bin/claude" "${npm_config_prefix:-/nonexistent}/bin/claude" \
+                /opt/homebrew/bin/claude /usr/local/bin/claude /usr/bin/claude; do
+                if [ -x "$_c" ]; then
+                    KIB_HOST_CLAUDE="$_c"
+                    break
+                fi
+            done
+        fi
+    fi
+    printf '%s\n' "$KIB_HOST_CLAUDE"
 }
 
 # ── The FUSE redaction root ───────────────────────────────────────

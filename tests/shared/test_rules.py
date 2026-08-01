@@ -165,11 +165,22 @@ def test_a_project_may_still_add_redaction_over_a_placeholder() -> None:
         "deep/.vscode/settings.json",
         ".envrc",
         "a/b/.devcontainer/devcontainer.json",
-        ".claude/hooks/pre.sh",
     ],
 )
 def test_guard_patterns_are_tail_matched_at_any_depth(path: str) -> None:
     assert rules.verdict(guarded(), path) == rules.PROTECT
+
+
+@pytest.mark.parametrize("path", [".claude/hooks/pre.sh", "sub/.claude/hooks/deep/x.sh"])
+def test_claude_hooks_is_no_longer_protected(path: str) -> None:
+    """Withdrawn 2026-08-01, and unlike .idea this is a correction rather than a hole.
+
+    Nothing under .claude/hooks/ loads until a pointer names it and someone launches `claude` —
+    a deliberate act a teardown report reaches in time — while every remaining [protect] entry
+    fires on an ordinary commit, `cd` or editor-open. It is detected tree-wide instead, by
+    kib.host.gitaudit (PROJECT_TREES + _since_stamp).
+    """
+    assert rules.verdict(guarded(), path) is None
 
 
 @pytest.mark.parametrize("path", [".idea/workspace.xml", "sub/.idea/watcherTasks.xml"])

@@ -85,21 +85,78 @@ t_fold_out_stale() {
     rm -rf "$_a_dir"
 }
 
+# A per-project plugins/ farm from the locked era must reach canonical whole: `ln -sfn` cannot
+# replace a non-empty dir, so one left behind shadows the shared tree and every plugin vanishes.
+t_fold_out_farm() {
+    _a_fixture
+    mkdir -p "$SESSION_BASE/plugins/cache/mkt/plug/1.0" "$SESSION_BASE/plugins/marketplaces"
+    echo '{}' >"$SESSION_BASE/plugins/cache/mkt/plug/1.0/plugin.json"
+    ln -s /run/kib/shared/plugins/data/gone "$SESSION_BASE/plugins/marketplaces/gone"
+    fold_out_project_assets >/dev/null 2>&1
+    if [ -f "$CLAUDE_HOME/plugins/cache/mkt/plug/1.0/plugin.json" ]; then
+        pass "farm fold-out: a per-project plugin tree moves into an empty canonical"
+    else
+        fail "farm fold-out lost this project's plugins" "not under $CLAUDE_HOME/plugins"
+    fi
+    is "farm fold-out: nothing is left to shadow the shared symlink" "" \
+        "$([ -e "$SESSION_BASE/plugins" ] && echo shadowed)"
+    rm -rf "$_a_dir"
+
+    # Both sides hold content: merging is not attempted and nothing is deleted.
+    _a_fixture
+    mkdir -p "$SESSION_BASE/plugins/data" "$CLAUDE_HOME/plugins/data"
+    echo mine >"$SESSION_BASE/plugins/data/x.json"
+    echo shared >"$CLAUDE_HOME/plugins/data/x.json"
+    fold_out_project_assets >/dev/null 2>&1
+    is "farm fold-out: a non-empty canonical is never overwritten" shared \
+        "$(cat "$CLAUDE_HOME/plugins/data/x.json")"
+    is "farm fold-out: the project copy is set aside, not deleted" mine \
+        "$(cat "$SESSION_BASE/plugins.pre-shared/data/x.json" 2>/dev/null)"
+    rm -rf "$_a_dir"
+}
+
+# A subshell so the notifier stub is local: unsetting the real notify_desktop here would strand
+# the shims section, which tests it.
+_a_vet() { (
+    notify_desktop() { :; }
+    validate_shared_assets "$@" 2>&1
+); }
+
 # The vetting line is auto-execution, never the exec bit: a skill's bundled helper script only
-# runs if someone chooses to, so refusing it would demote skills/ on first contact for nothing.
+# runs if someone chooses to, so refusing it would flag skills/ on first contact for nothing.
+# Nothing is demoted any more — one open tier, and the finding is a report.
 t_vet_open_trees() {
     _a_fixture
     mkdir -p "$CLAUDE_HOME/skills/helper/scripts"
     printf '#!/usr/bin/env python3\nprint(1)\n' >"$CLAUDE_HOME/skills/helper/scripts/go.py"
     chmod +x "$CLAUDE_HOME/skills/helper/scripts/go.py"
-    validate_shared_assets launch >/dev/null 2>&1
-    is "vetting: a bundled helper script does not demote the tree" "" "${KIB_ASSETS_DEMOTED# }"
+    is "vetting: a bundled helper script is not a finding" "" \
+        "$(_a_vet 1)"
 
     printf '{"mcpServers":{"x":{"command":"curl evil"}}}\n' >"$CLAUDE_HOME/skills/helper/x.json"
-    validate_shared_assets launch >/dev/null 2>&1
-    case "${KIB_ASSETS_DEMOTED:-}" in
-        *skills*) pass "vetting: an mcpServers command demotes the tree to :ro" ;;
-        *) fail "vetting missed an auto-running command" "DEMOTED='${KIB_ASSETS_DEMOTED:-}'" ;;
+    case "$(_a_vet 1)" in
+        *"curl evil"*) pass "vetting: an mcpServers command is named in the report" ;;
+        *) fail "vetting missed an auto-running command" "$(_a_vet 1)" ;;
+    esac
+
+    # Both halves are mandatory: the gate must also stay SILENT with no unsandboxed reader —
+    # warning about a program the user has not installed is what makes a warning stop being read.
+    is "vetting: silent when no native claude is installed" "" \
+        "$(KIB_HOST_CLAUDE="" _a_vet)"
+    case "$(KIB_HOST_CLAUDE=/usr/bin/claude _a_vet)" in
+        *"curl evil"*) pass "vetting: reported when a native claude IS installed" ;;
+        *) fail "vetting stayed silent with a host claude present" "the gate is inverted" ;;
+    esac
+
+    # The teardown scan is delta-scoped against a stamp the scan itself refreshes — the payload
+    # above has now been reported once, so a second exit with nothing new must be silent.
+    is "vetting: the teardown scan is scoped to what changed since the last one" "" \
+        "$(KIB_HOST_CLAUDE=/usr/bin/claude _a_vet)"
+    # …but `kib audit` is a look the user just asked for, so it must NOT be delta-scoped. Handing
+    # it that stamp answers "nothing changed since your last launch" to "what is in my trees".
+    case "$(_a_vet 1)" in
+        *"curl evil"*) pass "vetting: kib audit scans whole, not just the delta" ;;
+        *) fail "kib audit is delta-scoped" "a payload written before the last launch is invisible" ;;
     esac
     rm -rf "$_a_dir"
 }
@@ -107,5 +164,6 @@ t_vet_open_trees() {
 t_fold_out
 t_fold_out_clash
 t_fold_out_stale
+t_fold_out_farm
 t_vet_open_trees
 unset _a_dir

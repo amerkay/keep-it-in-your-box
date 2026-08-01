@@ -98,6 +98,16 @@ else
 fi
 unset missing fn
 
+# host_claude_path gates every "this runs OUTSIDE the sandbox" warning kib prints, so a wrong
+# answer either nags a user with no native claude or stays silent for one who has it. Memoised
+# per launch, and it must NEVER shell out to node — `npm prefix -g` on a launch path costs an
+# interpreter start to earn one line of prose.
+if sed -n '/^host_claude_path() {/,/^}$/p' host/portable.sh | grep -q 'npm prefix'; then
+    fail "host_claude_path shells out to npm" "it runs on the launch path; use static candidates"
+else
+    pass "host_claude_path resolves without spawning node"
+fi
+
 # A bind whose destination sits inside another bind aborts the whole `docker run` on Docker
 # Desktop (runc resolves the mountpoint through the parent and finds it outside the rootfs).
 # The two dir mounts are the ones with children; anything landing inside them must go through

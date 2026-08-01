@@ -23,8 +23,8 @@ kib — run Claude Code in a Docker sandbox, one container per project.
   kib broker add [name …]     put an MCP behind the broker (bare = ask the questions)
   kib broker <verb> [name]    login | logout | status | probe   (host-only credentials)
   kib mcp adopt <name>        move an inline-credential MCP into the broker
-  kib audit                   report host-executed git config + tracked hidden paths
-  kib unlock-shared [verb…]   this session may write ~/.claude's plugins + hooks
+  kib audit                   report host-executed git config, tracked hidden paths, and
+                              what the shared ~/.claude trees auto-run
   kib build [--background]    rebuild the image
   kib sleep-monitor [iv] [id] diagnose "why won't it idle-suspend?"
   kib help                    this table
@@ -110,7 +110,7 @@ case "$VERB" in
         usage
         exit 0
         ;;
-    claude | exec | broker | mcp | audit | unlock-shared | build | sleep-monitor) ;;
+    claude | exec | broker | mcp | audit | build | sleep-monitor) ;;
     *)
         printf '❌ kib: unknown verb %s\n\n' "$VERB" >&2
         usage >&2
@@ -192,29 +192,18 @@ case "$VERB" in
             *) die "usage: kib mcp adopt <server-name>   (to declare one: kib broker add)" ;;
         esac
         ;;
-    audit) kib_audit_gate report && exit 0 || exit $? ;;
+    audit)
+        # force=1: on demand, report the shared trees whether or not a host claude is installed,
+        # and — with no launch stamp to scope against — report all of them, not just the delta.
+        validate_shared_assets 1
+        kib_audit_gate report && exit 0 || exit $?
+        ;;
 esac
 
 # ── Session verbs: claude | exec ─────────────────────────────────
-# --unlock-shared drops the read-only mounts over the assets the HOST executes (plugins, hooks),
-# so an install lands in canonical ~/.claude for EVERY project (and the host claude) rather than
-# just this one. skills/agents/commands need no flag — they are always shared and writable.
-# shellcheck disable=SC2034  # read by host/lifecycle.sh (start_container, kib_bring_up)
-UNLOCK_SHARED="${KIB_UNLOCK_SHARED:-0}"
-if [ "$VERB" = unlock-shared ]; then
-    # shellcheck disable=SC2034  # same global, read in host/lifecycle.sh
-    UNLOCK_SHARED=1
-    if [ $# -gt 0 ]; then
-        VERB="$1"
-        shift
-    else
-        VERB=claude
-    fi
-    case "$VERB" in
-        claude | exec) ;;
-        *) die "kib unlock-shared takes a session verb: claude (default) or exec" ;;
-    esac
-fi
+# There is no `unlock-shared` any more: all five ~/.claude asset trees mount writable, so an
+# install or an authored skill is shared exactly as it is on the host. What they auto-run is
+# reported at teardown when a native claude is installed. (`redaction-config-guard.md`)
 
 CMD=()
 case "$VERB" in

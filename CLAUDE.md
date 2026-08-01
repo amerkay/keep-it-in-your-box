@@ -183,12 +183,16 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   exactly like a `set -e` abort. Both regression-guarded. (`container-lifecycle.md`)
 - **Never unlink lock files**, and every backgrounded host process must close fds 200/201
   (`200>&- 201>&-`) — one miss strands every project's containers. (`container-lifecycle.md`)
-- **The host-executed-config guard is two tiers, split by USE, not by danger** — `[protect]`
-  refuses the write and the policy text tells the session to stop, so only pure-exec files get a
-  rule. Mixed-use config (`.claude/settings*.json`, `.mcp.json`, `mise.toml`, …) stays writable and
-  is *detected* by `audit_project_configs`. Don't promote one: rename-validation only works for
-  temp+rename writers, so a `[protect]` on `.claude/settings.json` breaks Claude's own "always
-  allow" with nothing to replace it. (`redaction-config-guard.md`)
+- **The host-executed-config guard is two tiers, split by WHEN a file fires — ambient trigger vs
+  deliberate `claude` launch** — `[protect]` refuses the write and the policy text tells the session
+  to stop, so a rule is only worth it where no report could arrive in time (`.git/hooks`, `.envrc`,
+  `.vscode`: a commit, a `cd`, an editor-open). Everything that waits for someone to launch
+  `claude` — `.claude/settings*.json`, `.claude/hooks/`, `.claude-plugin/`, `.mcp.json`,
+  `mise.toml` — is *detected* by `audit_project_configs`. Don't promote one: rename-validation only
+  works for temp+rename writers, so a `[protect]` on `.claude/settings.json` breaks Claude's own
+  "always allow" with nothing to replace it, and the `[protect]` on `.claude/hooks` refused the
+  script while the pointer arming it stayed writable. A tree-shaped detector must union git with an
+  **mtime stamp** — the box can commit past a dirty-file filter. (`redaction-config-guard.md`)
 - **A nested `[protect]` write is allowed only as a byte-identical copy of the same guarded tail
   at the project ROOT — never carve out a worktree dir or an "editor config" tier.** That was
   tried (`feat/worktree-editor-carveout`, reverted) and is bypassable with zero detection: the box
@@ -199,12 +203,16 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   with values replaced, everything else keeps the stub. Making it a policy choice needs a third
   verdict, a precedence table and an enable path, and lets a hostile repo pick the leakier
   renderer for its own paths. Format is a property of the file. (`redaction-config-guard.md`)
-- **Shared assets are two tiers, and don't "harden" the open one by refusing scripts** —
-  `plugins`/`hooks` are `:ro` (the host executes them); `skills`/`agents`/`commands` are rw and
-  symlinked at canonical so authoring one shares it. The vetting line is auto-execution (a
-  `hooks`/`mcpServers` `command`), never the exec bit or a `#!`: most real skills ship a helper
-  script, so that rule demotes `skills/` on first contact and buys nothing a prose "run this"
-  wouldn't. (`redaction-config-guard.md`)
+- **Shared assets are ONE open tier — don't re-lock `plugins`/`hooks`, and don't "harden" the tier
+  by refusing scripts** — all five are rw and symlinked at canonical so authoring or installing one
+  shares it. The `:ro` lock cost ~460 lines (mount-mode flag, lock witness, attach refusal, the
+  per-project plugin farm) and never covered `~/.claude/skills/x/.claude-plugin/plugin.json`, which
+  auto-loads as a plugin with no install step. It is `asset_scan` detection now, at teardown and
+  only when a native `claude` exists; the accepted residual is cross-project auto-execution (audit
+  H6, Accepted). The vetting line is auto-execution (a `hooks`/`mcpServers`/`lspServers`/`monitors`
+  `command`), never the exec bit or a `#!`: most real skills ship a helper script, so that rule
+  flags `skills/` on first contact and buys nothing a prose "run this" wouldn't.
+  (`redaction-config-guard.md`)
 - **Don't move the sandbox policy back into the assembled `CLAUDE.md`** — bound `:ro` at
   `/etc/claude-code/CLAUDE.md` it outranks user memory, survives a repo's `claudeMdExcludes` and
   cannot be edited from the box; the config-dir copy had none of the three.

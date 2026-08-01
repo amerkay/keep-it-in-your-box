@@ -241,6 +241,13 @@ def settings_findings(cfg: dict[str, Any]) -> list[str]:
 #: `formatter.external.command` and `terminal.shell.program`, and whatever key either adds next.
 JSON_EXEC_KEYS = ("command", "program")
 
+#: Keys below which a `command` is AUTO-run — nobody decides to run it, it fires when `claude`
+#: starts. This is the arming set for the shared-asset scanner (`armed=False`), and the line it
+#: draws is auto-execution, not executability: a bundled helper script runs only if the agent
+#: reads the skill and chooses to. `experimental` is included because `experimental.monitors` is
+#: where monitors are declared today and the wrapper is the part that will outlive the spelling.
+AUTO_RUN_KEYS = ("hooks", "mcpServers", "lspServers", "monitors", "experimental")
+
 
 def json_commands(
     node: object, *, arm: Sequence[str] = (), trail: str = "", armed: bool = True

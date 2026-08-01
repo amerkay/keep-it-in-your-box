@@ -81,7 +81,7 @@ Severity, mechanism, root cause and remediation for every confirmed issue. This 
 | **H3** | Shared OAuth token exfiltration over open egress | 🟠 High<br>Host credential theft | A real credential in the container's shared-assets mount (0600, **same-uid readable**, outside FUSE) plus **fully open egress** → the account token leaves the box with no host trigger | Open egress + a durable credential in a container-reachable mount | 🟡 **Mitigated** — the **broker is now on by default**, so that mount normally holds only a synthetic placeholder and the real token never enters the box. H3 applies to the fallback path only (`broker = off`, or headless with no stored token). Egress stays open by design — default-deny contradicts the sandbox's purpose. **Rotate the token if an untrusted session has run unbrokered** |
 | **H4** | Prompt injection → unattended token exfil | 🟠 High<br>Host credential theft | Injected content runs any in-container command with no consent; read→exfil of the host token needs *no host trigger*, and it arms every other chain. *Upgraded* from in-container-only under adversarial review | By design (`--dangerously-skip-permissions`) + H3 | ⚪ **Accepted** with H3 — in-container execution is the design; every *host-reaching* target it armed (C1–C4, H5, H6, H8) is now closed or mitigated |
 | **H5** | Poison shared `settings.json` | 🟠 High<br>Host cred theft + cross-project | Writable and **outside** FUSE; the entrypoint symlinked it into every project and folded in-session edits back into the shared copy, with no validation → `ANTHROPIC_BASE_URL`, `apiKeyHelper` and inline `hooks[].command` propagate to every project's next session | the entrypoint's settings fold-back (since moved host-side to `merge_out_shared_settings`); no content validation | 🟡 **Mitigated** `P1` — `validate_shared_settings` (the `host/` units) vets the file host-side on every launch, before any container reads it, refusing `apiKeyHelper`/`awsAuthRefresh`/`awsCredentialExport`/`gcpAuthRefresh`/`otelHeadersHelper`, `env.ANTHROPIC_{BASE_URL,API_KEY,AUTH_TOKEN}`, `statusLine.command` and inline `hooks[].command`. Left writable on purpose (`/config`, theme) — so it is prevention **at launch, not at write** |
-| **H6** | Poison shared `plugins`/`skills`/`agents`/`commands` | 🟠 High<br>Cross-project persistence | 0775, writable, symlinked into every project and — unlike `hooks/` — not read-only mounted → injected assets auto-run in every project's next session; with H3, exfil the token | Shared writable assets, no validation | 🟡 **Split** `P1` — **`plugins`/`hooks` fixed:** mounted `:ro` individually (the dir itself must stay writable for OAuth refresh), with a per-project **merge farm** in `guest/entrypoint/docker-entrypoint.sh` so `/plugin install` still works and lands per-project; `kib unlock-shared` is the deliberate opt-out. **`skills`/`agents`/`commands` deliberately reopened (2026-07-26):** prompt text with no executed command, mounted rw and symlinked at canonical so authoring one shares it, with `asset_scan` refusing a `hooks`/`mcpServers` command and a first-write desktop alert. The prompt-injection half of this finding is therefore **accepted**, like H3/H4 — see [Reopening the prompt-asset tier](#reopening-the-prompt-asset-tier--2026-07-26) |
+| **H6** | Poison shared `plugins`/`skills`/`agents`/`commands` | 🟠 High<br>Cross-project persistence | 0775, writable, symlinked into every project and — unlike `hooks/` — not read-only mounted → injected assets auto-run in every project's next session; with H3, exfil the token | Shared writable assets, no validation | ⚪ **Accepted** (2026-08-01; was 🟡 Split) — **the lock is gone.** All five trees mount rw and symlinked at canonical, so an install or an authored skill is shared exactly as on the host. This accepts the finding **whole**, including the half the 2026-07-26 split explicitly refused to accept: a poisoned `plugins/x/hooks/hooks.json` written from repo A's box **auto-runs unattended** in repo B's box at its next launch, with repo B's source bind-mounted rw and no host `claude` involved. The reasoning: the pivot is box→box, i.e. in-container execution, the same class already accepted for H3/H4 — it is not host RCE — and preventing it cost a mount-mode flag, a lock witness, an attach refusal and a per-project symlink farm, ~460 lines. What replaces it is detection: `kib/host/asset_scan.py` reports any `hooks`/`mcpServers`/`lspServers`/`monitors` command, a `monitors.json` array, a plugin manifest and its one-hop pointers, and a marketplace clone's `.git/{config,hooks}` — at teardown, change-scoped, and **only when a native `claude` is installed**, since that is the one reader outside a sandbox. See [Collapsing the shared-asset lock](#collapsing-the-shared-asset-lock--2026-08-01) |
 | **H8** | Wayland clipboard poisoning → host paste RCE / read exfil | 🟠 High<br>Host RCE (on paste) | Raw read-write Wayland socket, unmediated: the container could **write** the clipboard with bracketed-paste-bypass sequences (an embedded `ESC[201~`) that execute at your next host paste, and **read** it continuously (`wl-paste --watch`) | the raw socket bind (now `host/desktop.sh` `WL_HOST_SOCK`) — unmediated | ✅ **Fixed** `P2` — `kib/guest/wayland_guard.py` sidecar owns the real socket. Reads pass verbatim (`SCM_RIGHTS` fds included), so `wl-paste` and image paste are unaffected. **Policy revised 2026-07-26:** blanket refusal broke the fullscreen TUI's select-to-copy, so writes are now *sanitised* instead — the guard swaps the compositor's pipe on `send` and strips control characters (C0/DEL/C1 bar tab and newline) in flight, refusing non-`text/*` flavours and payloads over 1 MiB. The `ESC[201~` payload below is stripped rather than blocked; the rows recording the original behaviour are the audit-date observation |
 | **H9** | Loader/interpreter env keys in shared `settings.json` | 🟠 High<br>Host RCE + cross-project | The shared-settings validator flagged only `env.ANTHROPIC_{BASE_URL,API_KEY,AUTH_TOKEN}`. The same file loads in a host `claude`, whose `env` is applied to every subprocess it spawns → `env.NODE_OPTIONS` (`--require evil.js`), `BASH_ENV`, `LD_PRELOAD`, `GIT_SSH_COMMAND`, `PATH` are host code execution at the next tool or git call. Same propagation path as H5, wider key set | `kib/shared/dangerous.py` `SETTINGS_ENV_KEYS` (three keys only) | ✅ **Fixed** (2nd pass) — added `SETTINGS_ENV_EXEC_KEYS` (interpreter/loader/command-override set) to `settings_findings`; both the launch validator and the merge-out vet refuse them; benign prefs (`EDITOR`, `PAGER`, `LANG`) stay clean |
 | **MAC-C1** | Clipboard bridge stages the sanitised write in a sandbox-writable file<br>*(**macOS-only**)* | 🔴 Critical<br>Host RCE | The macOS bridge writes the cleaned bytes to `clean.$id` in the box-writable spool, then a *separate* `pbcopy` re-opens that path. (a) A pre-planted `clean.$id`/`err.$id` **symlink is followed** → arbitrary host-file overwrite (`~/.zshrc` → RCE), deterministic; (b) a **TOCTOU race** on `clean.$id` puts unsanitised bytes (a paste-escape) on the real pasteboard → RCE at the next terminal paste | `host/clipboard-bridge.sh` · `serve_write` (no `rm`/`O_NOFOLLOW` before `>clean.$id 2>err.$id`; separate `pbcopy <clean.$id`) | ✅ **Fixed** (macOS pass) — every answer is staged in a host-private `$DIR.priv` and `mv`'d in; `rename(2)` replaces the destination and never follows it, so neither the symlink nor the re-open window exists. Regression added to `tests/check/clipboard.sh`, which runs on Linux CI too |
@@ -319,12 +319,15 @@ H6 locked five shared trees behind one rule. Five was never one tier, and the co
 it was fell entirely on the harmless half: authoring a skill inside a box left it trapped in that
 project, which is the opposite of what a skill is for.
 
-The split is by **what a write buys**, not by file type:
+The split was by **what a write buys**, not by file type:
 
 | | why | mount |
 |:--|:--|:--|
 | `plugins/`, `hooks/` | carry a `command` the **host** executes — hook entries, a plugin's bundled MCP servers, a marketplace clone's `.git/hooks` (canonical is git-pulled by a host `claude`) | `:ro`, `kib unlock-shared` to opt out |
 | `skills/`, `agents/`, `commands/` | prompt text; nothing auto-runs | **rw**, symlinked at canonical so authoring shares it |
+
+> **Superseded 2026-08-01** — there is one tier now, all rw. The section below is kept because its
+> *reasoning* still holds and the next section is the argument for overturning its conclusion.
 
 `plugins/` is why locking `hooks/` alone was never the control: a plugin is a superset of a hook.
 That is the third spelling of one bug — inline `hooks[].command` in `settings.json` (H5/H9) and
@@ -344,14 +347,62 @@ executable Python helpers, and most non-trivial skills ship one — the rule wou
 script runs only if the agent chooses to run it, and a skill that is pure prose saying "now run
 this installer" is identical in effect and undetectable. The boundary is auto-execution.
 
-**Detection, not prevention** — the same trade as `settings.json`. `host/shared-watch.sh` raises
-one `notify_desktop` on the first write of a container's life and exits; `report_shared_asset_writes`
+**Detection, not prevention** — the same trade as `settings.json`. `report_shared_asset_writes`
 names what changed since the last launch, covering the writes a mid-session watcher structurally
 cannot see (another project's box, or a host process, while nothing was attached).
 
-Regressions in `security-test.sh` now assert **both** directions: `plugins`/`hooks` refuse a write,
-and the three prompt trees accept one and are symlinks rather than farms — a re-lock would break
-skill authoring silently, which is how this arrived.
+---
+
+## Collapsing the shared-asset lock — 2026-08-01
+
+The split above says the tiers differ by *what a write buys*. That was the wrong axis. What
+actually did the security work is **when the file fires**:
+
+* **Ambient** — `.git/hooks`, `.envrc`, `.githooks`, `.vscode/`, `.devcontainer/` run at the next
+  commit, `cd` or editor-open, with the user not thinking about Claude at all. No report can reach
+  them in time, so these must be *refused*. They still are.
+* **Deliberate** — everything Claude-shaped, including all five shared trees, fires only when
+  `claude` is launched. Inside a box that is sandboxed; on the host it is not. A report reaches a
+  deliberate act in time.
+
+Three things fell out of applying that consistently.
+
+**The lock was not the control it read as.** `~/.claude/skills/` was already writable, and any
+folder under a skills directory containing `.claude-plugin/plugin.json` loads as a plugin —
+personal scope, no marketplace, no install step, none of the restrictions project scope gets. The
+`:ro` bit on `plugins/` never covered that path.
+
+**It cost a subsystem.** Mount-mode selection, a lock witness bound only when locked, an
+attach-time refusal, the `unlock-shared` verb, and a per-project symlink farm with a depth table,
+a prune walk, a `temp_git_*` sweep and a bounded chown that existed to keep the macOS cold start
+off a 100k-entry plugin cache. All of it deleted.
+
+**What replaces it has to be wider than what it replaces**, because it is now the whole control.
+`asset_scan` gained: `lspServers` and `monitors` in the arm set (`.lsp.json` is
+`{"go": {"command": …}}`, and a `monitors.json` is a bare JSON *array* with no arming key at all,
+so it is armed by filename); plugin manifests, with `hooks`/`mcpServers`/`lspServers`/
+`experimental.monitors` **pointers followed exactly one level** and never outside the tree;
+marketplace clones' `.git/config` and `.git/hooks`, which are not JSON and were invisible; a depth
+bound past the installer's own layout; and mtime scoping, without which every legitimately
+installed plugin is reported on every exit — an alarm that is always on.
+
+**Accepted gaps, stated rather than papered over.** Hooks declared in a skill's or agent's YAML
+*frontmatter* are missed: python 3.9 has no YAML parser and the host side must run on stock macOS.
+Prose saying "now run this installer" is undetectable, as it always was. And the whole check is
+skipped when no native `claude` is installed — deliberately, because the box→box half is the
+accepted residual and warning about a program the user does not have is what makes a warning stop
+being read.
+
+**The project tier moved with it.** `.claude/hooks` left `[protect]` the same day: nothing under it
+loads until a pointer names it, so refusing the script while the `plugin.json` that arms it stayed
+writable protected nothing — and it blocked the one sanctioned way to ship a repo-local committed
+hook, which is what surfaced all of this. It is detected tree-wide instead, and the detector unions
+git with an **mtime stamp**, because the box can `git commit` and a committed file checks out
+pristine past a dirty-file filter (the hole that reverted `feat/worktree-editor-carveout`).
+
+Regressions in `security-test.sh` assert the new direction: all five trees accept a write and are
+symlinks rather than farms, and `.claude/hooks/` plus both `.claude-plugin/` manifests are writable
+— a re-lock would break authoring and installing silently, which is how this arrived.
 
 ---
 
@@ -777,6 +828,7 @@ Security-relevant work, oldest first. Everything before the audit built the boun
 | 2026-07-26 | `768ac48` | **H6 split into two tiers.** `plugins`/`hooks` stay `:ro` (the host executes them); `skills`/`agents`/`commands` reopen as rw and genuinely shared, because a skill trapped in one project is not a skill. `kib/host/asset_scan.py` demotes a prompt tree that configures a `hooks`/`mcpServers` command — or (since MAC-M1) carries a symlink out of the tree; `host/shared-watch.sh` alerts on the first write. The exec-bit variant was cut before shipping — see [Reopening the prompt-asset tier](#reopening-the-prompt-asset-tier--2026-07-26). |
 | 2026-07-27 | `be8c655` | **macOS pass — 6 new findings.** First audit on a macOS host; container boundary re-verified holding. Found: **MAC-C1** clipboard bridge stages sanitised output in the box-writable spool (symlink-follow arbitrary host-file write + TOCTOU paste RCE, macOS-only), **MAC-C2** leading-BOM git-config parser bypass, **MAC-H1** Unicode-line-separator parser bypass, **MAC-H2** unvalidated `~/.claude.json` merge-out, **MAC-H3** `gcpAuthRefresh` missing from `SETTINGS_COMMAND_KEYS`, **MAC-M1** open-asset symlink exfil evading `asset_scan`, plus DYLD-sibling (macOS) and broker-path (R3) Lows. Full detail: [macOS pass](#macos-pass--2026-07-27). |
 | 2026-07-27 | `b0654e4` | **macOS wave — all eight closed.** The clipboard bridge stages every answer host-private and `mv`s it in, so nothing it writes or re-opens lives in the spool (MAC-C1). The git-INI parser gained git's **input normalisation** and falls closed on any character git and Python split differently, closing the *category* the BOM and `U+2028` bypasses came from (MAC-C2/H1). `.claude.json` merge-out is now vetted like `settings.json` — added `mcpServers` commands dropped, trust flags one-way, `allowedTools` clamped (MAC-H2). `gcpAuthRefresh` and the DYLD siblings joined their key tables (MAC-H3/L1). `asset_scan` refuses symlinks out of the prompt trees and now runs at teardown too — detection, since a bind mount offers nothing to interpose on (MAC-M1, mitigated). The broker's LLM routes gained a path allowlist, closing residual R3 (MAC-L2). |
+| 2026-08-01 | — | **H6 accepted whole; the shared-asset lock deleted.** All five `~/.claude` trees mount rw and symlinked at canonical: `unlock-shared`, the lock witness, the attach refusal and the per-project plugin farm are gone (~460 lines). This accepts cross-project **auto-execution**, which the 2026-07-26 split explicitly did not — box→box, i.e. the class already accepted for H3/H4, never host RCE. `asset_scan` becomes the whole control and widens to `lspServers`/`monitors`, `monitors.json` by filename, plugin manifests with one-hop pointer resolution, and marketplace `.git/{config,hooks}`; it runs at teardown, change-scoped, and only when a native `claude` exists. `.claude/hooks` left `[protect]` the same day — the tier line is **ambient vs deliberate trigger**, not pure-exec vs mixed-use — and is detected tree-wide with an mtime stamp unioned over the git filter. Full detail: [Collapsing the shared-asset lock](#collapsing-the-shared-asset-lock--2026-08-01). |
 
 ---
 

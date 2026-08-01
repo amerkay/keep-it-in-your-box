@@ -8,13 +8,16 @@ Two severities, and the asymmetry is deliberate:
   `core.fsmonitor` fires on a bare `git status`, before the user reads a single diff, so
   launching a session into it is the wrong default.
 * **Warn** on a tracked path that matches `.kibignore` (the user's own hygiene; blocking a
-  session over it would be hostile), and on uncommitted project config — `.claude/settings*.json`,
-  `.mcp.json`, `mise.toml`, … — naming a command the host runs. That second class is *mixed-use*:
-  the same files carry ordinary settings, so the FUSE guard deliberately leaves them writable
-  and this is the only place they are seen at all.
+  session over it would be hostile), and on project config that names a command the host runs —
+  `.claude/settings*.json`, `.mcp.json`, `mise.toml`, a `.claude-plugin/` manifest, anything under
+  `.claude/hooks/`. That class is *deliberate-trigger*: none of it fires until someone launches
+  `claude`, so a report reaches the user in time. `[protect]` is reserved for what fires on an
+  ordinary commit, `cd` or editor-open, where no report can. (`redaction-config-guard.md`)
 
 Accepted loss versus the hook: commit-time *blocking* is gone, so a commit made between
-sessions is unchecked. The FUSE guard remains the preventer — this is the detector.
+sessions is unchecked. The FUSE guard remains the preventer — this is the detector. For the
+project TREES that detector is git-blind by construction (the box can commit, so it decides what
+"tracked" means), which is why `_since_stamp` unions an mtime pass over the git one.
 
 Exit: 0 clean · 1 warn-class findings only · 5 refuse-class findings.
 """
@@ -30,6 +33,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
+from kib.host import asset_scan
 from kib.shared import cli, dangerous, rules
 
 # Directories a project keeps large and boring. Walking them costs seconds and can hold no
@@ -165,7 +169,19 @@ PROJECT_CONFIGS = (
     (".claude/settings.local.json", "claude"),
     (".mcp.json", "json"),
     (".zed/settings.json", "json"),
+    # A repo published as a plugin — the multi-repo-workspace marketplace pattern. Its manifest
+    # may declare hooks/MCP servers inline, or POINT at a file that does; both are reported, and
+    # the pointer is followed exactly one level (`_plugin_findings`).
+    (".claude-plugin/plugin.json", "plugin"),
+    (".claude-plugin/marketplace.json", "marketplace"),
 )
+
+#: Whole DIRECTORIES whose contents are the finding, rather than a file with a schema. Value is
+#: what one entry is, for the report line. `.claude/hooks` was `[protect]`ed until the tier split
+#: was restated as ambient-vs-deliberate: nothing in there loads until a pointer names it and
+#: `claude` is launched, which is a deliberate act detection reaches in time — unlike `.git/hooks`
+#: or `.envrc`, which fire on an ordinary commit or `cd`. (`redaction-config-guard.md`)
+PROJECT_TREES = ((".claude/hooks", "hook script"),)
 
 #: Regex tier — python 3.9 has no `tomllib` and neither side has a YAML parser. Acceptable
 #: here and nowhere else, because this tier only warns: a false positive costs one line.
@@ -184,12 +200,21 @@ TEXT_CONFIGS = (
 
 
 #: One pathspec per config name, matching it at the root and at any depth — the same tails
-#: `_tail_match` accepts, handed to git so the `--ignored` widening below stays bounded.
-CONFIG_PATHSPECS = tuple(f":(glob)**/{name}" for name, _ in (*PROJECT_CONFIGS, *TEXT_CONFIGS))
+#: `_tail_match` accepts, handed to git so the `--ignored` widening below stays bounded. Trees
+#: take a `/**` tail instead: everything under them counts, at any depth.
+CONFIG_PATHSPECS = tuple(
+    [f":(glob)**/{name}" for name, _ in (*PROJECT_CONFIGS, *TEXT_CONFIGS)]
+    + [f":(glob)**/{name}/**" for name, _ in PROJECT_TREES]
+)
 
 
 def _tail_match(rel: str, name: str) -> bool:
     return rel == name or rel.endswith("/" + name)
+
+
+def _tree_match(rel: str, tree: str) -> bool:
+    """Is *rel* under a `<anything>/<tree>/` directory (or under `<tree>/` at the root)?"""
+    return ("/" + rel).find("/" + tree + "/") != -1
 
 
 def _dirty(top: str, pathspecs: Sequence[str]) -> list[str]:
@@ -241,17 +266,127 @@ def _scan_json(path: str, kind: str) -> list[str]:
         return []
 
 
-def audit_project_configs(top: str) -> list[str]:
+def _plugin_findings(top: str, rel: str, path: str) -> list[str]:
+    """A `.claude-plugin/plugin.json`: what it declares inline, plus what its pointers name.
+
+    Publishing a repo as a plugin is the sanctioned way to ship a repo-local hook — the manifest
+    is where `hooks` is declared or redirected — so this is the file that has to be reported, not
+    refused. A pointer is followed exactly one level and only inside the repo; asset_scan owns
+    that resolver, so the shared-tree and project-tree audits cannot drift on what a pointer is.
+    """
+    cfg = _load_manifest(path)
+    if cfg is None:
+        return []
+    found = ["a plugin manifest — this repo loads as a Claude Code plugin"]
+    found += dangerous.json_commands(cfg)
+    base = os.path.dirname(os.path.dirname(path))  # the plugin root, above .claude-plugin/
+    top_real = os.path.realpath(top)
+    for key, target, ok in asset_scan.pointer_paths(cfg, base, top_real):
+        # Against top_REAL: the target is already resolved, so relpath'ing it to an unresolved
+        # top prints a `../../..` walk whenever the repo path runs through a symlink (/tmp on
+        # macOS is /private/tmp), which reads as an escape that did not happen.
+        shown = os.path.relpath(target, top_real) if ok else target
+        if not ok:
+            found.append(f"{key} points OUT of the repo, to {shown}")
+            continue
+        pointed = _load_manifest(target)
+        found.append(f"{key} -> {shown}")
+        if pointed is not None:
+            found += [f"{shown}: {c}" for c in dangerous.json_commands(pointed)]
+    return [f"{rel}: {line}" for line in found]
+
+
+def _load_manifest(path: str) -> object:
+    """Parsed JSON, or None. Same error discipline as `_scan_json` — see its docstring."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return json.load(fh)
+    except (OSError, ValueError, RecursionError):
+        return None
+
+
+def _marketplace_findings(rel: str, path: str) -> list[str]:
+    """A `marketplace.json` publishes plugins; it names no command of its own.
+
+    What each published plugin runs lives in that plugin's own manifest, which is two hops away —
+    and one hop is the bound everywhere else here. So this names what is published and stops.
+    """
+    cfg = _load_manifest(path)
+    if not isinstance(cfg, dict):
+        return []
+    plugins = cfg.get("plugins")
+    # `or`, then dropped if neither: an entry with no name and no source would otherwise be
+    # published to the user as the literal string "None".
+    names = [
+        str(p.get("name") or p.get("source"))
+        for p in (plugins if isinstance(plugins, list) else [])
+        if isinstance(p, dict) and (p.get("name") or p.get("source"))
+    ]
+    if not names:
+        return []
+    return [f"{rel}: publishes {', '.join(names)} as plugins to any workspace adding it"]
+
+
+def _since_stamp(top: str, stamp: str | None) -> list[str]:
+    """Paths under a `PROJECT_TREES` directory modified since *stamp* was last touched.
+
+    The git filter alone is bypassable, and known to be: the box can `git commit`, so it decides
+    what "tracked" means, and a committed hook checks out pristine past a dirty-file detector —
+    the hole that got the worktree-editor carve-out reverted. The timestamp pass is the second
+    opinion that does not care what git thinks. The two are unioned, never traded off.
+
+    `asset_scan.changed_at`, not `st_mtime`: the box owns these files, so mtime alone is
+    something the payload can back-date past the stamp with one `touch`. ctime moves on every
+    write and no unprivileged caller can wind it back.
+
+    No stamp yet means the stamp is being created now, so report NOTHING: hooks already sitting
+    in a fresh clone are the user's own, the same judgement `audit_nested_hooks` makes about the
+    top-level `.git/hooks`.
+    """
+    if not stamp:
+        return []
+    try:
+        newer_than = os.stat(stamp).st_mtime
+    except OSError:
+        return []
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(top):
+        dirnames[:] = [d for d in dirnames if d not in PRUNE_DIRS]
+        rel_dir = os.path.relpath(dirpath, top).replace(os.sep, "/") + "/"
+        if not any(_tree_match(rel_dir, tree) for tree, _ in PROJECT_TREES):
+            continue
+        for name in filenames:
+            full = os.path.join(dirpath, name)
+            if asset_scan.changed_at(full) <= newer_than:
+                continue
+            found.append(os.path.relpath(full, top).replace(os.sep, "/"))
+    return found
+
+
+def audit_project_configs(top: str, stamp: str | None = None) -> list[str]:
     """Uncommitted project config naming a command the host runs. Warn-class."""
     found: list[str] = []
-    for rel in _dirty(top, CONFIG_PATHSPECS):
+    # Union, not either/or: git sees a change the mtime stamp missed (a file older than the
+    # stamp, edited before it), and the stamp sees one git cannot (a commit made from the box).
+    seen = set()
+    for rel in [*_dirty(top, CONFIG_PATHSPECS), *_since_stamp(top, stamp)]:
         # A vendored copy under node_modules/ is a dependency's own file, and only loads if
         # the user works from inside it — the same judgement PRUNE_DIRS already makes.
-        if PRUNE_DIRS.intersection(rel.split("/")[:-1]):
+        if rel in seen or PRUNE_DIRS.intersection(rel.split("/")[:-1]):
             continue
+        seen.add(rel)
         path = os.path.join(top, rel)
+        for tree, what in PROJECT_TREES:
+            if _tree_match(rel, tree):
+                found.append(f"{rel}: a {what} — it runs when a settings file or plugin names it")
         for name, kind in PROJECT_CONFIGS:
-            if _tail_match(rel, name):
+            if not _tail_match(rel, name):
+                continue
+            if kind == "plugin":
+                found += _plugin_findings(top, rel, path)
+            elif kind == "marketplace":
+                found += _marketplace_findings(rel, path)
+            else:
                 found += [f"{rel}: {line}" for line in _scan_json(path, kind)]
         for name, pattern in TEXT_CONFIGS:
             if not _tail_match(rel, name):
@@ -265,17 +400,17 @@ def audit_project_configs(top: str) -> list[str]:
     return found
 
 
-def audit(top: str) -> Findings:
+def audit(top: str, stamp: str | None = None) -> Findings:
     """Every check, against one repository root."""
     return Findings(
         config=audit_git_config(top) + audit_nested_gitdirs(top),
         hooks=audit_nested_hooks(top),
         tracked=audit_tracked(top),
-        project=audit_project_configs(top),
+        project=audit_project_configs(top, stamp),
     )
 
 
-def report(findings: Findings, refusing: bool) -> None:
+def report(findings: Findings, refusing: bool, host_claude: str = "") -> None:
     """Print findings to stderr, with the remedy for each class."""
     w = sys.stderr.write
     if findings.config or findings.hooks:
@@ -315,6 +450,12 @@ def report(findings: Findings, refusing: bool) -> None:
             "\nThese files are editable on purpose, so the sandbox is not blocked from\n"
             "writing them — read the diff before the host runs the tool that loads them.\n"
         )
+        # Unconditional finding, conditional wording: the list itself matters either way (the
+        # next box to open this repo loads it), but "runs on YOUR machine" is only true when
+        # there is an unsandboxed reader, and claiming it otherwise is what makes a warning
+        # stop being read.
+        if host_claude:
+            w(f"A native claude at {host_claude} loads them OUTSIDE any sandbox.\n")
 
 
 def main(argv: list[str]) -> int:
@@ -326,15 +467,27 @@ def main(argv: list[str]) -> int:
         default="report",
         help="launch exits 5 on a refuse-class finding; teardown/report are never fatal",
     )
+    ap.add_argument(
+        "--hooks-stamp",
+        default="",
+        help="file whose mtime bounds the project-tree scan; absent means report nothing there",
+    )
+    ap.add_argument(
+        "--host-claude", default="", help="path to a native claude, for the report's wording only"
+    )
     args = ap.parse_args(argv)
 
     if not os.path.isdir(os.path.join(args.top, ".git")) and not os.path.isdir(args.top):
         return cli.OK  # not a repo (or gone) — nothing to audit, silently
 
-    findings = audit(args.top)
+    findings = audit(args.top, args.hooks_stamp)
     if not findings.any:
         return cli.OK
-    report(findings, refusing=args.mode == "launch" and findings.refuse)
+    report(
+        findings,
+        refusing=args.mode == "launch" and findings.refuse,
+        host_claude=args.host_claude,
+    )
     if findings.refuse:
         return cli.REFUSED
     return cli.FAIL
