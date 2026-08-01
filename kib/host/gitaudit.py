@@ -19,7 +19,9 @@ sessions is unchecked. The FUSE guard remains the preventer — this is the dete
 project TREES that detector is git-blind by construction (the box can commit, so it decides what
 "tracked" means), which is why `_since_stamp` unions an mtime pass over the git one.
 
-Exit: 0 clean · 1 warn-class findings only · 5 refuse-class findings.
+Exit: 0 clean · 1 warn-class findings only · 5 refuse-class findings. On 1, stdout carries one
+line naming the warn classes that fired (`Findings.warn_summary`) — the caller's alert text.
+Findings themselves are stderr, always, so a caller may capture stdout without hiding them.
 """
 
 from __future__ import annotations
@@ -60,6 +62,21 @@ class Findings:
     @property
     def any(self) -> bool:
         return bool(self.config or self.hooks or self.tracked or self.project)
+
+    @property
+    def warn_summary(self) -> str:
+        """Which warn classes fired, for the caller's teardown alert. Empty when none did.
+
+        Here rather than in host/gitguard.sh because the two classes read nothing alike, and a
+        popup naming the wrong one is worse than no popup: the alert said "tracked paths match
+        .kibignore" for a plugin hook the session had just written.
+        """
+        parts = []
+        if self.tracked:
+            parts.append(f"tracked paths match {rules.RULE_FILE}")
+        if self.project:
+            parts.append("project config the host runs")
+        return " + ".join(parts)
 
 
 def _git(args: Sequence[str], cwd: str) -> str:
@@ -490,6 +507,10 @@ def main(argv: list[str]) -> int:
     )
     if findings.refuse:
         return cli.REFUSED
+    # stdout is the CALLER's channel, one line, read by host/gitguard.sh to title its teardown
+    # alert. Everything meant for the user goes to stderr via report() — never here, or the
+    # command substitution reading this would swallow the findings themselves.
+    print(findings.warn_summary)
     return cli.FAIL
 
 

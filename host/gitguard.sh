@@ -25,7 +25,7 @@ _git_toplevel() { git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true; }
 # returning 1 for a warn-class finding would turn "you are tracking a path you asked kib to
 # hide" into "the sandbox will not start". Report mode returns the code, so it is scriptable.
 kib_audit_gate() {
-    local mode="$1" top rc=0 stamp="${STATE_DIR:-}/${SLUG:-x}.hooks.seen"
+    local mode="$1" top rc=0 what="" stamp="${STATE_DIR:-}/${SLUG:-x}.hooks.seen"
     have_python || return 0
     top="$(_git_toplevel)"
     [ -n "$top" ] || return 0 # not a git repo — nothing to audit
@@ -34,8 +34,10 @@ kib_audit_gate() {
     # can commit, so a hook it wrote checks out pristine past any dirty-file filter. The stamp is
     # the second opinion. Absent (a first launch) it reports nothing and is created below —
     # hooks already in a fresh clone are the user's own.
-    kib_py host.gitaudit --top "$top" --mode "$mode" \
-        --hooks-stamp "$stamp" --host-claude "$(host_claude_path)" || rc=$?
+    # Capturing stdout only: the findings go to stderr, so the user still reads them as they
+    # print. What comes back is one line naming which warn classes fired, for the alert below.
+    what="$(kib_py host.gitaudit --top "$top" --mode "$mode" \
+        --hooks-stamp "$stamp" --host-claude "$(host_claude_path)")" || rc=$?
     # AFTER the report, never before: refreshed first, the scan above always reads empty.
     if [ "$mode" != report ] && [ -d "${STATE_DIR:-}" ]; then
         : >"$stamp" 2>/dev/null || true
@@ -55,10 +57,12 @@ kib_audit_gate() {
                 "This repo has a git config key the host would execute. Run: kib audit"
             ;;
         *)
-            # Warn-class only. Named on stderr by kib.host.gitaudit; never fatal.
+            # Warn-class only. Named on stderr by kib.host.gitaudit; never fatal. The title is
+            # ITS summary, not a fixed string: the two warn classes read nothing alike, and a
+            # hardcoded one described the wrong finding whenever the other fired.
             [ "$mode" = launch ] && return 0
-            [ "$mode" = teardown ] && notify_desktop normal "kib · tracked paths match $KIB_RULE_FILE" \
-                "Paths hidden from the sandbox are tracked in git. Run: kib audit"
+            [ "$mode" = teardown ] && notify_desktop normal \
+                "kib · ${what:-findings in this repo}" "Run: kib audit"
             ;;
     esac
     [ "$mode" = launch ] && return 0
