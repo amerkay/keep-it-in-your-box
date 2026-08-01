@@ -296,15 +296,22 @@ failed too.
   ```bash
   kib broker add             # asks the questions, then prompts for the credential (hidden)
   # …or the same thing from flags. Remote MCP, static auth header (broker injects it):
-  kib broker add linear --url https://mcp.linear.app/sse --header "Authorization: Bearer"
-  # local/hosted MCP whose secret can't be header-injected (runs in its own sidecar):
-  kib broker add gsc --run "uvx mcp-search-console" --cred-env GSC_CREDENTIALS_PATH \
-     --cred-kind file --env GSC_SKIP_OAUTH=true
-  kib broker login codex     # an OpenAI API key → OPENAI_BASE_URL points at the broker
+  kib broker add linear --url https://mcp.linear.app/sse --header "Authorization: Bearer" \
+     --mcp-name linear
+  # a service with no static key at all: the broker does the OAuth 2.0 exchange itself
+  kib broker add gsc --url https://searchconsole.googleapis.com --oauth \
+     --scope https://www.googleapis.com/auth/webmasters.readonly \
+     --allow-path /webmasters/v3/ --allow-path /v1/urlInspection/
   kib broker status          # every route: credential (size/mode only), URL, refused defs
   ```
 
-  There is **no port to pick**: every brokered MCP shares one listener and is told apart by
+  `--oauth` stores an OAuth config instead of a secret and mints short-lived access tokens
+  inside the broker, re-minting on expiry or on a 401 from upstream. The client secret and
+  refresh token stay host-side; the box only ever reaches the route's URL. `--allow-path` pins
+  which paths the credential may reach on that host — with none given, a route may reach every
+  path on it. Without `--mcp-name` a route is **REST only** — curl it, no `.claude.json` entry.
+
+  There is **no port to pick**: every route shares one listener and is told apart by
   name (`http://kib-broker:8100/mcp/<name>`). A route that can't come up is named and skipped —
   it never costs you the session.
 

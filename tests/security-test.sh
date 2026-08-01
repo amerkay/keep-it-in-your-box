@@ -946,8 +946,9 @@ if [ -n "$_brokered" ]; then
                     *) fail "brokered MCP '$name' is not behind the /mcp/ prefix" "url=$url" ;;
                 esac
                 ;;
-            # A hosted_mcp answers on its OWN sidecar alias, so it has no prefix to carry.
-            *) pass "brokered MCP '$name' runs in its own sidecar ($url)" ;;
+            # Every brokered route is muxed behind the broker alias now — nothing else is
+            # supposed to be able to write a kib-owned entry.
+            *) fail "brokered MCP '$name' points somewhere unexpected" "url=$url" ;;
         esac
     done <<EOF
 $_brokered

@@ -1,12 +1,11 @@
 {
   "id": "dataforseo",
-  "delivery": "reverse_proxy_mcp",
   "credential_kind": "paste_token",
   "upstream_origin": "https://mcp.dataforseo.com",
   "inject_header": "Authorization",
   "inject_template": "Basic {secret}",
   "token_basename": "dataforseo-token",
   "mcp_server_name": "dfs-mcp",
-  "mcp_path": "/http",
-  "mcp_transport": "http"
+  "path": "/http",
+  "transport": "http"
 }

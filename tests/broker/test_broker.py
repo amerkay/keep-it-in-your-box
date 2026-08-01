@@ -76,14 +76,14 @@ def token_file(tmp_path: Path) -> Path:
 
 
 def reverse_provider(upstream: int, path: str = "") -> dict[str, Any]:
-    """A reverse_proxy_mcp row pointed at the fake upstream. No port — routes are muxed."""
+    """A proxy row pointed at the fake upstream. No port — routes are muxed."""
     return {
-        "delivery": "reverse_proxy_mcp",
+        "delivery": "reverse_proxy",
         "upstream_origin": f"http://127.0.0.1:{upstream}",
         "inject_header": "Authorization",
         "inject_template": "Bearer {secret}",
         "strip_incoming": ["authorization", "x-api-key"],
-        "mcp_path": path,
+        "path": path,
     }
 
 
@@ -164,6 +164,182 @@ def test_a_trailing_newline_in_the_token_file_is_stripped(route: tuple[int, Any]
     assert route[1].current_secret() == REAL_SECRET
 
 
+# ── OAuth routes: mint, cache, replay, and the rotation guard ────
+class _TokenEndpoint(BaseHTTPRequestHandler):
+    """A fake OAuth token endpoint. `reply` is swapped per test; `mints` counts exchanges."""
+
+    reply: dict[str, Any] = {"access_token": "AT-1", "expires_in": 3600}
+    mints = 0
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *a: Any) -> None:
+        pass
+
+    def do_POST(self) -> None:
+        _TokenEndpoint.mints += 1
+        body = json.dumps(_TokenEndpoint.reply).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+@pytest.fixture
+def oauth_cred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[credential.Credential]:
+    """An oauth Credential wired to a fake token endpoint, with a state dir to write into."""
+    server = listen(_TokenEndpoint)
+    _TokenEndpoint.mints = 0
+    _TokenEndpoint.reply = {"access_token": "AT-1", "expires_in": 3600}
+    port = int(server.server_address[1])
+    # `_post_form` demands https; the fake endpoint is plain HTTP, so let it through here only.
+    monkeypatch.setattr(
+        "kib.broker.oauth._post_form",
+        lambda uri, fields: _real_post_form(f"http://127.0.0.1:{port}/token", fields),
+    )
+    cfg = tmp_path / "gsc.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "type": "authorized_user",
+                "client_id": "cid",
+                "client_secret": "csecret",
+                "refresh_token": "rtok",
+            }
+        )
+    )
+    out = tmp_path / "out"
+    out.mkdir()
+    provider = {"credential_kind": "oauth", "scopes": ["https://x.test/ro"]}
+    yield credential.Credential("gsc", provider, str(cfg), str(out))
+    server.shutdown()
+    server.server_close()
+
+
+def _real_post_form(uri: str, fields: dict[str, str]) -> dict[str, Any]:
+    """`oauth._post_form` minus its https requirement, for the in-process fake."""
+    conn = http.client.HTTPConnection("127.0.0.1", int(uri.split(":")[2].split("/")[0]), timeout=5)
+    try:
+        conn.request(
+            "POST",
+            "/token",
+            body="&".join(f"{k}={v}" for k, v in fields.items()).encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        parsed: dict[str, Any] = json.loads(conn.getresponse().read())
+        return parsed
+    finally:
+        conn.close()
+
+
+def test_an_oauth_route_injects_a_minted_token_not_the_config(
+    oauth_cred: credential.Credential,
+) -> None:
+    assert oauth_cred.current_secret() == "AT-1"
+
+
+def test_a_minted_token_is_cached_until_it_nears_expiry(
+    oauth_cred: credential.Credential,
+) -> None:
+    for _ in range(5):
+        oauth_cred.current_secret()
+    assert _TokenEndpoint.mints == 1, "every request re-minted — the cache is not working"
+
+
+def test_invalidate_forces_exactly_one_re_mint(oauth_cred: credential.Credential) -> None:
+    stale = oauth_cred.current_secret()
+    assert stale is not None
+    oauth_cred.invalidate(stale)
+    _TokenEndpoint.reply = {"access_token": "AT-2", "expires_in": 3600}
+    assert oauth_cred.current_secret() == "AT-2"
+    assert _TokenEndpoint.mints == 2
+
+
+def test_a_rotated_refresh_token_is_discarded_not_persisted(
+    oauth_cred: credential.Credential,
+) -> None:
+    """The exact shape of the incident: a rotated token must never reach the stored file."""
+    before = Path(oauth_cred.path).read_bytes()
+    _TokenEndpoint.reply = {
+        "access_token": "AT-1",
+        "expires_in": 3600,
+        "refresh_token": "ROTATED-DO-NOT-STORE",
+    }
+    assert oauth_cred.current_secret() == "AT-1"
+    assert Path(oauth_cred.path).read_bytes() == before
+    assert b"ROTATED" not in before
+
+
+def test_the_state_file_carries_expiry_but_never_the_token(
+    oauth_cred: credential.Credential,
+) -> None:
+    oauth_cred.current_secret()
+    raw = (Path(oauth_cred.out_dir) / "gsc.oauth").read_text()
+    assert "AT-1" not in raw, "the minted token was written to disk"
+    state = json.loads(raw)
+    assert state["last_mint"] == "ok" and state["expires_at"] > 0
+    assert state["scopes"] == ["https://x.test/ro"]
+
+
+def test_a_bad_oauth_config_is_refused_at_build_without_minting(tmp_path: Path) -> None:
+    """check() must not put a network round trip on the launch path."""
+    cfg = tmp_path / "bad.json"
+    cfg.write_text(json.dumps({"type": "authorized_user", "client_id": "only"}))
+    cred = credential.Credential("bad", {"credential_kind": "oauth"}, str(cfg))
+    why = cred.check()
+    assert why and "client_secret" in why
+
+
+def test_a_401_re_mints_and_replays_once(upstream: int, tmp_path: Path) -> None:
+    """A skill must never see an expired token — the upstream has the final say, not expires_in."""
+    seen: list[str | None] = []
+
+    class _Once(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a: Any) -> None:
+            pass
+
+        def do_POST(self) -> None:
+            seen.append(self.headers.get("Authorization"))
+            code = 401 if len(seen) == 1 else 200
+            self.send_response(code)
+            self.send_header("content-length", "2")
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+    fake = listen(_Once)
+    tok = tmp_path / "t"
+    tok.write_text("STATIC")
+    provider = {
+        "credential_kind": "oauth",
+        "upstream_origin": f"http://127.0.0.1:{fake.server_address[1]}",
+        "inject_header": "Authorization",
+        "inject_template": "Bearer {secret}",
+        "strip_incoming": [],
+        "listen_port": 0,
+    }
+    minted = ["A", "B"]
+    cred = credential.Credential("r", provider, str(tok))
+    # Stand in for the mint: is_oauth is what arms the replay, and each call yields a new token.
+    cred.current_secret = lambda: minted.pop(0) if minted else "B"  # type: ignore[method-assign]
+    server = listen(proxy.make_handler(proxy.Route("r", provider, cred)))
+    try:
+        status, _ = post(int(server.server_address[1]))
+    finally:
+        server.shutdown()
+        server.server_close()
+        fake.shutdown()
+        fake.server_close()
+    assert status == 200
+    assert seen == ["Bearer A", "Bearer B"], "the 401 was not retried with a fresh token"
+
+
+def test_a_static_route_does_not_replay_a_401(route: tuple[int, Any]) -> None:
+    """Only a mintable credential can be re-minted; a paste_token 401 must pass straight back."""
+    assert route[1].is_oauth is False
+
+
 # ── the path allowlist (audit MAC-L2 / R3) ───────────────────────
 # The origin was always pinned, so the credential could never be redirected. This is the other
 # half: what the box can DO against that origin with a token it never sees.
@@ -228,18 +404,32 @@ def test_placeholder_is_synthetic() -> None:
     ]
 
 
-def test_no_refresh_machinery_exists_under_any_name() -> None:
-    for name in ("maybe_refresh", "_do_refresh", "_expiry_seconds", "refresh"):
-        assert not hasattr(credential.Credential, name)
-    src = "".join(p.read_text() for p in sorted(BROKER_SRC.glob("*.py")))
-    assert "refresh_token" not in src.replace("refreshToken", "")
-    assert "grant_type" not in src
+def test_the_llm_row_can_never_mint() -> None:
+    """The scoped form of the old blanket ban on refresh machinery.
+
+    Minting is not what logged the account out — WRITING a rotated refresh token was. So a
+    user route may mint (kib/broker/oauth.py) and the LLM row may not: its credential is the
+    user's real account token, and Anthropic's rotates. Both halves are asserted here.
+    """
+    assert registry.PROVIDERS["claude"]["credential_kind"] == "paste_token"
+    for pid, p in registry.PROVIDERS.items():
+        if p.get("delivery") == "base_url_env":
+            assert p.get("credential_kind") != "oauth", pid
+
+
+def test_a_user_def_cannot_make_the_llm_row_mintable(providers_dir: Path) -> None:
+    user_def(providers_dir, "claude", credential_kind="oauth")
+    registry.merge_user_providers()
+    assert registry.PROVIDERS["claude"]["credential_kind"] == "paste_token"
 
 
 def test_no_write_path_to_a_credential() -> None:
+    """Absolute, and the one invariant the OAuth work was not allowed to touch."""
     src = "".join(p.read_text() for p in sorted(BROKER_SRC.glob("*.py")))
     assert 'open(self.path, "w' not in src
     assert "open(self.path, 'w" not in src
+    # oauth.py talks to a token endpoint and must never open a file at all.
+    assert "open(" not in (BROKER_SRC / "oauth.py").read_text()
 
 
 def test_no_write_path_serves_fine_with_a_read_only_token(
@@ -330,15 +520,14 @@ def test_every_built_in_row_is_complete() -> None:
         "token_basename",
     )
     for pid, p in registry.PROVIDERS.items():
-        assert p.get("credential_kind") in ("paste_token", "file_path"), pid
+        assert p.get("credential_kind") in registry.CREDENTIAL_KINDS, pid
         assert all(p.get(k) not in (None, "", []) for k in required), pid
 
 
 def user_def(providers_dir: Path, name: str, **over: Any) -> Path:
-    """Write a minimal valid reverse_proxy_mcp def, overriding/removing fields per test."""
+    """Write a minimal valid proxy def, overriding/removing fields per test."""
     prov: dict[str, Any] = {
         "id": name,
-        "delivery": "reverse_proxy_mcp",
         "upstream_origin": f"https://mcp.{name}.test",
         "inject_header": "X-API-Key",
         "inject_template": "{secret}",
@@ -351,26 +540,151 @@ def user_def(providers_dir: Path, name: str, **over: Any) -> Path:
 
 def test_user_defs_are_merged_and_finalized(providers_dir: Path) -> None:
     user_def(providers_dir, "acme")
-    (providers_dir / "hosted.json").write_text(
-        json.dumps(
-            {
-                "id": "hosted",
-                "delivery": "hosted_mcp",
-                "credential_kind": "file_path",
-                "token_basename": "hosted.json",
-                "host_run": ["uvx", "mcp-search-console"],
-                "credential_env": "HT_CRED",
-                "extra_env": {"HT_FLAG": "true"},
-            }
-        )
-    )
     registry.merge_user_providers()
     assert registry.DEF_PROBLEMS == []
-    assert "acme" in registry.PROVIDERS
-    assert registry.PROVIDERS["hosted"]["mcp_transport"] == "http"
-    assert registry.PROVIDERS["hosted"]["mcp_server_name"] == "hosted"
-    # Hosted rows get the shared number inside their own netns; nothing is user-settable.
-    assert registry.PROVIDERS["hosted"]["mcp_port"] == registry.MCP_PORT
+    acme = registry.PROVIDERS["acme"]
+    # `delivery` is OURS, never declared by a def — a user route is always a proxy route.
+    assert acme["delivery"] == "reverse_proxy"
+    assert acme["transport"] == "http"
+    assert acme["token_basename"] == "acme-token"
+    # Registration is opt-in: no mcp_server_name means no .claude.json entry.
+    assert acme["mcp_server_name"] == ""
+
+
+def test_a_def_cannot_promote_itself_to_the_llm_shape(providers_dir: Path) -> None:
+    """base_url_env is how the Claude token is delivered; a def naming it must not get it.
+
+    Belt and braces: `delivery` is a removed key so the def is refused outright, and
+    `_finalize_provider` would overwrite it anyway if it ever reached there.
+    """
+    user_def(providers_dir, "acme", delivery="base_url_env")
+    registry.merge_user_providers()
+    assert "acme" not in registry.PROVIDERS
+    assert registry.PROVIDERS["claude"]["delivery"] == "base_url_env"
+    assert registry._finalize_provider("x", {"delivery": "base_url_env"})["delivery"] == (
+        "reverse_proxy"
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "needle"),
+    [
+        ("mcp_path", "/http", 'use "path"'),
+        ("mcp_transport", "http", 'use "transport"'),
+        ("delivery", "reverse_proxy_mcp", "registry sets this"),
+        ("listen_port", 8100, "one listener"),
+        ("host_run", ["uvx", "m"], "no longer brokered"),
+    ],
+)
+def test_a_removed_key_is_refused_by_name(
+    providers_dir: Path, key: str, value: Any, needle: str
+) -> None:
+    """Silently ignoring `mcp_path` brings the route up at the WRONG URL — worse than not at all.
+
+    A def written against the old shape is exactly what gets pasted from an old note, so every
+    removed key is named with its replacement rather than dropped.
+    """
+    user_def(providers_dir, "acme", **{key: value})
+    registry.merge_user_providers()
+    assert "acme" not in registry.PROVIDERS
+    assert any(key in p and needle in p for p in registry.DEF_PROBLEMS), registry.DEF_PROBLEMS
+
+
+@pytest.mark.parametrize(
+    "basename",
+    ["../../../.ssh/id_rsa", "", "a/b", "..", "/etc/passwd", ".ssh", "two words", "a|b"],
+)
+def test_a_token_basename_that_is_not_a_bare_filename_is_refused(
+    providers_dir: Path, basename: str
+) -> None:
+    """host/broker.sh interpolates this into `-v "$KIB_DIR/$basename:…:ro"`.
+
+    A `..` segment mounts an arbitrary host file into the broker, which then injects its bytes
+    as the route's auth header to the def's own upstream — a pasted def exfiltrating a private
+    key. Empty is the same bug by another route: `$KIB_DIR/` is a directory and `[ -s ]` is
+    true for it, so the whole credential store gets bound.
+    """
+    user_def(providers_dir, "acme", token_basename=basename)
+    registry.merge_user_providers()
+    assert "acme" not in registry.PROVIDERS
+    assert any("token_basename" in p for p in registry.DEF_PROBLEMS), registry.DEF_PROBLEMS
+
+
+def test_an_allow_path_without_a_leading_slash_still_matches(
+    upstream: int, token_file: Path
+) -> None:
+    """`allows` compares against normpath output, which always starts with `/`.
+
+    Unnormalised, `webmasters/v3/` matches nothing and 404s the entire route — which reads as
+    a broken upstream rather than a typo in the def.
+    """
+    provider = {**reverse_provider(upstream), "allow_paths": ["webmasters/v3/", "/v1/"]}
+    route = proxy.Route("r", provider, credential.Credential("r", provider, str(token_file)))
+    assert route.allows("/webmasters/v3/sites") is True
+    assert route.allows("/v1/urlInspection/index:inspect") is True
+    assert route.allows("/admin") is False
+
+
+def test_a_short_lived_token_is_still_cached(oauth_cred: credential.Credential) -> None:
+    """expires_in <= EXPIRY_SKEW would floor the cache at 0s and re-mint on every request."""
+    _TokenEndpoint.reply = {"access_token": "AT-1", "expires_in": 60}
+    for _ in range(3):
+        oauth_cred.current_secret()
+    assert _TokenEndpoint.mints == 1
+
+
+def test_a_401_does_not_force_an_unbounded_mint_loop(oauth_cred: credential.Credential) -> None:
+    """An out-of-scope endpoint 401s forever; ungated that is one mint per request.
+
+    Walks the relay's actual loop: request, 401, invalidate, replay — ten times over.
+    """
+    tok = oauth_cred.current_secret()
+    for _ in range(10):
+        assert tok is not None
+        oauth_cred.invalidate(tok)  # the 401
+        tok = oauth_cred.current_secret()  # the replay, and the next request
+    assert _TokenEndpoint.mints == 2, "the interval did not hold: one mint per 401"
+
+    # A token that is no longer the cached one must never clear a newer one — otherwise a
+    # burst of concurrent 401s costs one mint each.
+    oauth_cred._last_forced = 0.0
+    oauth_cred.invalidate("SOME-OLDER-TOKEN")
+    assert oauth_cred._token == tok
+
+
+def test_oauth_state_survives_a_malformed_state_file(
+    providers_dir: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """It is a diagnostic; its caller hides stderr, so a crash shows the user nothing at all."""
+    user_def(providers_dir, "gsc", credential_kind="oauth", scopes=["s1"])
+    registry.merge_user_providers()
+    for junk in ('{"expires_at": null, "last_mint": "ok"}', "[1,2]", "not json", ""):
+        (tmp_path / "gsc.oauth").write_text(junk)
+        assert broker_cli.oauth_state("gsc", str(tmp_path)) == 0
+        assert "scopes: s1" in capsys.readouterr().out
+
+
+def test_the_shipped_examples_load(providers_dir: Path) -> None:
+    """The examples are copy-in ready — a stale one teaches the old schema by demonstration."""
+    examples = Path(__file__).resolve().parents[2] / "examples" / "providers"
+    for src in sorted(examples.glob("*.json")):
+        (providers_dir / src.name).write_text(src.read_text())
+    registry.merge_user_providers()
+    assert registry.DEF_PROBLEMS == []
+    assert registry.route_path("gsc", registry.PROVIDERS["gsc"]) == "/mcp/gsc"
+    assert registry.route_path("dataforseo", registry.PROVIDERS["dataforseo"]) == (
+        "/mcp/dataforseo/http"
+    )
+
+
+def test_an_oauth_def_is_finalized_for_a_config_file(providers_dir: Path) -> None:
+    user_def(providers_dir, "gsc", credential_kind="oauth", scopes=["https://x.test/ro"])
+    registry.merge_user_providers()
+    assert registry.DEF_PROBLEMS == []
+    gsc = registry.PROVIDERS["gsc"]
+    # An OAuth credential is a JSON document, so the stored file is named like one.
+    assert gsc["token_basename"] == "gsc.json"
+    assert gsc["scopes"] == ["https://x.test/ro"]
 
 
 def test_a_user_def_cannot_override_a_built_in(providers_dir: Path) -> None:
@@ -385,10 +699,11 @@ def test_a_user_def_cannot_override_a_built_in(providers_dir: Path) -> None:
 @pytest.mark.parametrize(
     ("over", "needle"),
     [
-        ({"inject_header": None}, "inject_header"),
-        ({"delivery": "wat"}, "delivery"),
-        ({"listen_port": 8100}, "listen_port"),
-        ({"upstream_origin": "https://mcp.x.test/http"}, "mcp_path"),
+        ({"inject_header": ""}, "inject_header"),
+        ({"inject_template": "Bearer nope"}, "{secret}"),
+        ({"credential_kind": "file_path"}, "credential_kind"),
+        ({"scopes": "not-a-list"}, "scopes"),
+        ({"upstream_origin": "https://mcp.x.test/http"}, '"path"'),
         ({"upstream_origin": "notaurl"}, "upstream_origin"),
         ({"id": "Acme"}, "route name"),
     ],
@@ -404,13 +719,12 @@ def test_a_bad_def_is_refused_and_the_field_is_named(
     assert all(p.startswith("acme.json:") for p in registry.DEF_PROBLEMS)
 
 
-def test_a_missing_hosted_field_is_named_not_counted(providers_dir: Path) -> None:
-    (providers_dir / "partial.json").write_text(
-        json.dumps({"id": "partial", "delivery": "hosted_mcp"})
-    )
+def test_a_def_with_no_upstream_is_named_not_counted(providers_dir: Path) -> None:
+    (providers_dir / "partial.json").write_text(json.dumps({"id": "partial"}))
     registry.merge_user_providers()
     assert "partial" not in registry.PROVIDERS
-    assert registry.DEF_PROBLEMS == ['partial.json: "host_run" is missing']
+    assert len(registry.DEF_PROBLEMS) == 1
+    assert "upstream_origin" in registry.DEF_PROBLEMS[0]
 
 
 def test_a_def_that_is_not_dot_json_is_reported_not_ignored(providers_dir: Path) -> None:
@@ -444,7 +758,7 @@ def test_no_route_carries_its_own_port(providers_dir: Path) -> None:
 
 
 def test_route_urls_are_prefixed_per_route(providers_dir: Path) -> None:
-    user_def(providers_dir, "acme", mcp_path="/http")
+    user_def(providers_dir, "acme", path="/http")
     registry.merge_user_providers()
     p = registry.PROVIDERS["acme"]
     assert registry.route_path("acme", p) == "/mcp/acme/http"
@@ -606,29 +920,24 @@ def test_broken_is_written_before_ready() -> None:
 
 
 # ── the host-facing output contracts bash parses ─────────────────
-def test_host_config_shell_quotes_a_multiword_value(
-    providers_dir: Path, capsys: pytest.CaptureFixture[str]
+def test_host_config_shell_quotes_a_value_that_needs_it(
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Unquoted, `KIB_BROKER_HOST_RUN=uvx mcp-search-console` would eval as `VAR=uvx cmd`."""
-    (providers_dir / "hosted.json").write_text(
-        json.dumps(
-            {
-                "id": "hosted",
-                "delivery": "hosted_mcp",
-                "host_run": ["uvx", "mcp-search-console"],
-                "credential_env": "HT_CRED",
-            }
-        )
-    )
-    registry.merge_user_providers()
-    broker_cli.host_config("hosted")
-    assert "KIB_BROKER_HOST_RUN='uvx mcp-search-console'" in capsys.readouterr().out
+    """Bash `eval`s these lines: unquoted, `VAR=word cmd` runs `cmd`.
+
+    No field host_config currently emits can contain a space — route ids are validated to
+    [a-z0-9._-] — so this pins the emitter, not a sample of today's values. Drop the quoting
+    and add one such field later, and this still fails.
+    """
+    broker_cli._emit("KIB_BROKER_X", "two words; rm -rf /")
+    out = capsys.readouterr().out.strip()
+    assert out == "KIB_BROKER_X='two words; rm -rf /'"
 
 
 def test_host_config_gives_bash_the_route_path_not_a_port(
     providers_dir: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    user_def(providers_dir, "acme", mcp_path="/http")
+    user_def(providers_dir, "acme", path="/http")
     registry.merge_user_providers()
     broker_cli.host_config("acme")
     out = capsys.readouterr().out
@@ -691,7 +1000,7 @@ def test_synthesize_reverse_proxy_shape() -> None:
         "dfs", "https://mcp.dfs.test/http", "Authorization", "Basic", "http"
     )
     assert prov["upstream_origin"] == "https://mcp.dfs.test"
-    assert prov["mcp_path"] == "/http"
+    assert prov["path"] == "/http"
     assert prov["inject_template"] == "Basic {secret}"
     assert prov["token_basename"] == "dfs-token"
     assert "listen_port" not in prov, "a per-route port is the knob that took a launch down"

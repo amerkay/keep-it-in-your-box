@@ -47,28 +47,20 @@ def inject(args: argparse.Namespace) -> int:
     current set, so disabling a provider cleanly removes its entry. The agent never holds a
     credential for them — the broker injects the header on the way out.
 
-    reverse_proxy_mcp routes point at the broker alias; hosted_mcp routes point at their own
-    sidecar's network alias, and only if that sidecar actually came up.
+    Registration is OPT-IN: only a route that named an `mcp_server_name` gets an entry. A
+    REST-only route is reached by curl at the same broker URL and would otherwise show up in
+    the session as an MCP server that fails to connect.
     """
-    hosted_up = set(args.hosted_up.split())
     specs: list[tuple[str, str, str]] = []
     for pid, p in registry.PROVIDERS.items():
-        delivery = p.get("delivery")
-        if delivery == "reverse_proxy_mcp":
-            token = os.path.join(args.kib_dir, p.get("token_basename", ""))
-            if not (os.path.isfile(token) and os.path.getsize(token)):
-                continue
-            host = args.broker_host
-        elif delivery == "hosted_mcp":
-            if pid not in hosted_up:
-                continue
-            host = pid
-        else:
-            continue
         name = p.get("mcp_server_name") or ""
-        if not name:
+        if p.get("delivery") != "reverse_proxy" or not name:
             continue
-        specs.append((name, p.get("mcp_transport") or "http", registry.agent_url(pid, p, host)))
+        token = os.path.join(args.kib_dir, p.get("token_basename", ""))
+        if not (os.path.isfile(token) and os.path.getsize(token)):
+            continue
+        url = registry.agent_url(pid, p, args.broker_host)
+        specs.append((name, p.get("transport") or "http", url))
 
     data, servers = _servers(args.config)
     servers = {k: v for k, v in servers.items() if not _is_ours(v)}
@@ -122,8 +114,9 @@ def warn(args: argparse.Namespace) -> int:
 def adopt(args: argparse.Namespace) -> int:
     """Store the secret host-side, strip the inline entry, leave a brokered route behind.
 
-    Only a remote MCP whose upstream matches a reverse_proxy_mcp route can be adopted; a
-    local/stdio MCP needs a hosted_mcp definition (`kib broker add … --run …`) instead.
+    Only a remote MCP with an inline auth header can be adopted — a local/stdio server holds
+    its credential in its own process, which is not something a header-injecting proxy can take
+    over.
     """
     name = args.name
     hit = None
@@ -146,8 +139,8 @@ def adopt(args: argparse.Namespace) -> int:
     hdrname, authval = helpers.find_auth_header(list((entry.get("headers") or {}).items()))
     if not url or not authval:
         raise cli.AbortError(
-            f"{name!r} has no inline remote auth header to broker. A local/stdio MCP needs a "
-            "hosted_mcp definition (kib broker add … --run …), not adoption."
+            f"{name!r} has no inline remote auth header to broker. Adoption needs a remote "
+            "http(s) MCP whose credential travels in a header."
         )
 
     # Reuse an existing brokered route for this host, else SYNTHESIZE a provider def from the
@@ -189,7 +182,7 @@ def adopt(args: argparse.Namespace) -> int:
 
 # ── add: declare a brokered MCP directly ─────────────────────────────────────────
 def add(args: argparse.Namespace) -> int:
-    """Write a provider def for a remote (header-brokered) or hosted (local) MCP."""
+    """Write a provider def for a brokered route: a static header, or an OAuth exchange."""
     bad = helpers.validate_route_id(args.name, registry.BUILTIN_IDS)
     if bad:
         raise cli.AbortError(bad, cli.REFUSED)
@@ -200,59 +193,34 @@ def add(args: argparse.Namespace) -> int:
             "replace it, or pick another name.",
             cli.REFUSED,
         )
-    extra_env: dict[str, str] = {}
-    for item in args.env:
-        k, sep, v = item.partition("=")
-        if not sep or not k.strip():
-            raise cli.AbortError(f"--env expects KEY=VAL, got {item!r}", cli.USAGE)
-        extra_env[k.strip()] = v
+    if not args.url:
+        raise cli.AbortError("give --url <https-url> — the upstream this route proxies", cli.USAGE)
+    if args.scope and not args.oauth:
+        raise cli.AbortError("--scope applies to an OAuth route; add --oauth.", cli.USAGE)
 
-    if args.url and args.run:
-        raise cli.AbortError("give --url (remote MCP) OR --run (hosted MCP), not both.", cli.USAGE)
-    if args.url and extra_env:
-        raise cli.AbortError(
-            "--env only applies to a hosted MCP (--run); a reverse-proxy route has no "
-            "server to set env on.",
-            cli.USAGE,
-        )
+    hdrname, scheme = "Authorization", "Bearer"
+    if args.header:
+        hdrname, _, sc = args.header.partition(":")
+        hdrname, scheme = hdrname.strip(), sc.strip()
+    try:
+        prov = helpers.synthesize_reverse_proxy(args.name, args.url, hdrname, scheme)
+    except ValueError as e:
+        raise cli.AbortError("--url must be an http(s) URL", cli.USAGE) from e
 
-    if args.url:
-        hdrname, scheme = "Authorization", "Bearer"
-        if args.header:
-            hdrname, _, sc = args.header.partition(":")
-            hdrname, scheme = hdrname.strip(), sc.strip()
-        try:
-            prov = helpers.synthesize_reverse_proxy(args.name, args.url, hdrname, scheme)
-        except ValueError as e:
-            raise cli.AbortError("--url must be an http(s) URL", cli.USAGE) from e
-    elif args.run:
-        if not args.cred_env:
-            raise cli.AbortError(
-                "--run needs --cred-env <ENV> (the env var the server reads its credential from)",
-                cli.USAGE,
-            )
-        base = f"{args.name}.json" if args.cred_kind == "file" else f"{args.name}-token"
-        prov = {
-            "id": args.name,
-            "delivery": "hosted_mcp",
-            "credential_kind": "file_path" if args.cred_kind == "file" else "paste_token",
-            "token_basename": base,
-            "host_run": args.run.split(),
-            "credential_env": args.cred_env,
-            "mcp_path": "/mcp",
-            "mcp_transport": "http",
-            "mcp_server_name": args.name,
-            "extra_env": extra_env,
-        }
-    else:
-        raise cli.AbortError(
-            "give --url <url> (remote MCP) or --run <cmd> --cred-env <ENV> (hosted MCP)",
-            cli.USAGE,
-        )
+    # Registering as an MCP server is opt-in: a REST upstream would otherwise appear in the
+    # session as an MCP server that fails to connect.
+    prov["mcp_server_name"] = args.mcp_name
+    if args.allow_path:
+        prov["allow_paths"] = args.allow_path
+    if args.oauth:
+        prov["credential_kind"] = "oauth"
+        prov["token_basename"] = f"{args.name}.json"
+        prov["scopes"] = args.scope
 
     helpers.write_provider_def(args.providers_dir, args.name, prov)
+    kind = "OAuth 2.0 exchange" if args.oauth else "static header"
     sys.stderr.write(
-        f"🔐 wrote provider def {args.name}.json ({prov['delivery']}).\n"
+        f"🔐 wrote provider def {args.name}.json ({kind}).\n"
         f"   Now add its credential:  kib broker login {args.name}\n"
     )
     return cli.OK
@@ -383,7 +351,7 @@ def intercept(args: argparse.Namespace) -> int:
                     "it never entered the sandbox.\n"
                 )
                 w(
-                    f"   • '{name}' → {prov['upstream_origin']}{prov['mcp_path']} "
+                    f"   • '{name}' → {prov['upstream_origin']}{prov['path']} "
                     f"(reverse-proxy route {registry.MCP_PREFIX}/{name})\n"
                 )
                 w(f"   • credential stored host-only: {os.path.basename(dest)} (mode 600)\n")
@@ -414,8 +382,8 @@ def intercept(args: argparse.Namespace) -> int:
             '         kib claude mcp add --header "Authorization: Bearer <token>" '
             f"--transport http {nm} <url>\n"
         )
-        w("     • Or a single-value hosted server:\n")
-        w(f'         kib broker add {nm} --run "<cmd>" --cred-env <ENV>\n')
+        w("     • If it authenticates with OAuth 2.0, broker the exchange instead:\n")
+        w(f"         kib broker add {nm} --url <https-url> --oauth\n")
         w("     • To knowingly accept the secret INSIDE the sandbox, re-run with:\n")
         w("         KIB_ALLOW_INLINE_MCP_SECRET=1 kib claude mcp add …\n")
         print("blocked")
@@ -452,7 +420,6 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--config", required=True)
     p.add_argument("--kib-dir", required=True)
     p.add_argument("--broker-host", required=True)
-    p.add_argument("--hosted-up", default="", help="space-separated ids whose sidecar came up")
     p.set_defaults(fn=inject)
 
     p = sub.add_parser("warn", help="flag MCP entries carrying a readable inline credential")
@@ -468,16 +435,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mcp-json", default="")
     p.set_defaults(fn=adopt)
 
-    p = sub.add_parser("add", help="declare a brokered MCP directly")
+    p = sub.add_parser("add", help="declare a brokered route directly")
     p.add_argument("name")
     p.add_argument("--providers-dir", required=True)
-    p.add_argument("--url", default="", help="remote MCP endpoint (header-brokered)")
+    p.add_argument("--url", default="", help="the upstream this route proxies")
     p.add_argument("--header", default="", help='"Header-Name: Scheme" (Bearer|Basic|"")')
-    p.add_argument("--run", default="", help="hosted MCP: the stdio command to run")
-    p.add_argument("--cred-env", default="", help="hosted MCP: env var holding the credential")
-    p.add_argument("--cred-kind", default="token", choices=("token", "file"))
+    p.add_argument("--oauth", action="store_true", help="credential is an OAuth 2.0 config")
+    p.add_argument("--scope", action="append", default=[], help="OAuth scope (repeatable)")
+    p.add_argument("--mcp-name", default="", help="register in .claude.json under this name")
+    p.add_argument("--allow-path", action="append", default=[], help="path prefix (repeatable)")
     p.add_argument("--force", action="store_true", help="replace an existing route of this name")
-    p.add_argument("--env", action="append", default=[], metavar="KEY=VAL")
     p.set_defaults(fn=add)
 
     p = sub.add_parser("intercept", help="classify a pasted `claude mcp add` before it runs")

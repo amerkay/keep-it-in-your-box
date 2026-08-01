@@ -3,10 +3,10 @@
 Two output contracts are parsed by bash and must not drift:
 
 * `host-config <id>` emits `KEY='value'` lines, **shell-quoted**, so `eval` stays safe when
-  a value contains spaces (`KIB_BROKER_HOST_RUN='uvx mcp-search-console'` — unquoted, the
-  shell would read that as `VAR=word cmd` and try to run `cmd`).
+  a value contains spaces — unquoted, the shell would read `VAR=word cmd` and try to run `cmd`.
 * `list-providers` emits exactly one line per route, `id|delivery|credential_kind|
-  token_basename`, all fields `[a-z0-9._-]` so POSIX word-splitting is safe.
+  token_basename`, all fields `[a-z0-9._-]` so POSIX word-splitting is safe. Scopes and paths
+  deliberately stay OUT of it: they contain `/` and `:` and would break that contract.
 
 Verbs:
     serve --config <f>            run the proxy (PID 1 of the broker sidecar)
@@ -14,20 +14,23 @@ Verbs:
     list-providers                the registry, one route per line
     check-providers               one line per unusable providers.d def (empty = all fine)
     check-name <id>               is this usable as a route name? prints the reason if not
-    route-url <id> <broker-host>  the URL the agent gets for an MCP route
+    route-url <id> <broker-host>  the URL the agent gets for a proxy route
+    oauth-state <id> <out-dir>    one line: an OAuth route's scopes and live mint state
     route-fingerprint             `id|route_path|upstream` per route, for the attach hash
-    probe <tokenfile> <id>        is this token accepted upstream? 0 yes / 1 no / 2 unknown
+    probe <credfile> <id>         is this credential accepted? 0 yes / 1 no / 2 unknown
 """
 
 from __future__ import annotations
 
 import http.client
 import json
+import os
 import shlex
 import ssl
+import time
 import urllib.parse
 
-from kib.broker import helpers, proxy, registry
+from kib.broker import helpers, oauth, proxy, registry
 from kib.broker.credential import fake
 from kib.shared import cli
 
@@ -56,14 +59,8 @@ def host_config(pid: str) -> int:
     # The rest of the MCP wiring — server name, path, transport, the agent's URL — is not
     # emitted: `kib.host.mcp` builds the .claude.json entry in-process and reads the registry
     # itself. Bash only needs the port, to publish it.
-    # One shared port for both MCP deliveries (the hosted one inside its own netns); empty
-    # for an LLM row, which is reached by env var and not by URL.
+    # The one shared proxy port; empty for the LLM row, reached by env var and not by URL.
     _emit("KIB_BROKER_MCP_PORT", registry.MCP_PORT if p["delivery"] != "base_url_env" else "")
-    _emit("KIB_BROKER_CREDENTIAL_ENV", p.get("credential_env", ""))
-    # hosted_mcp only: how to run the MCP server inside its sidecar, plus its extra env
-    # (KEY=VAL pairs). Constants in the table; word-split by bash after the eval unquotes.
-    _emit("KIB_BROKER_HOST_RUN", " ".join(p.get("host_run", [])))
-    _emit("KIB_BROKER_EXTRA_ENV", " ".join(f"{k}={v}" for k, v in p.get("extra_env", {}).items()))
     return cli.OK
 
 
@@ -95,7 +92,7 @@ def check_name(name: str) -> int:
 
 
 def route_url(pid: str, broker_host: str) -> int:
-    """The URL the agent gets for an MCP route. Empty (but OK) for an LLM row.
+    """The URL the agent gets for a proxy route. Empty (but OK) for the LLM row.
 
     `broker_host` is passed in, never held here: host/broker.sh owns that string — it is what
     `--network-alias` actually creates — and a second copy could only ever drift into printing
@@ -104,9 +101,44 @@ def route_url(pid: str, broker_host: str) -> int:
     p = registry.PROVIDERS.get(pid)
     if p is None:
         raise cli.AbortError(f"unknown provider: {pid}", cli.USAGE)
-    # A hosted MCP answers on its OWN network alias, which is its id.
-    host = pid if p.get("delivery") == "hosted_mcp" else broker_host
-    print(registry.agent_url(pid, p, host) if registry.route_path(pid, p) else "")
+    print(registry.agent_url(pid, p, broker_host) if registry.route_path(pid, p) else "")
+    return cli.OK
+
+
+def oauth_state(pid: str, state_dir: str) -> int:
+    """One human line about an OAuth route: its scopes, and its live mint state if known.
+
+    Scopes come from the registry and are always available. The live half comes from the file
+    the broker writes into `$BROKER_OUT`, which only exists once a container has run — and
+    `kib broker status` is host-GLOBAL, dispatched before project paths resolve, so it usually
+    passes an empty dir. Degrading to scopes-only is the normal case, not an error.
+    """
+    p = registry.PROVIDERS.get(pid)
+    if p is None or p.get("credential_kind") != "oauth":
+        return cli.OK
+    scopes = p.get("scopes") or []
+    line = f"scopes: {', '.join(scopes) if scopes else '(none declared)'}"
+    # Everything that reads the state file is inside the guard: it is a diagnostic, and a
+    # truncated or hand-edited one must degrade to "scopes only", never crash a status run
+    # whose caller redirects stderr and would show the user nothing at all.
+    try:
+        if not state_dir:
+            raise OSError
+        with open(os.path.join(state_dir, f"{pid}.oauth")) as fh:
+            state = json.load(fh)
+        if not isinstance(state, dict):
+            raise ValueError
+        outcome = str(state.get("last_mint", ""))
+        if outcome and outcome != "ok":
+            line += f" · last mint FAILED: {outcome}"
+        else:
+            left = int(state.get("expires_at") or 0) - int(time.time())
+            grant = state.get("grant") or "?"
+            valid = f"token valid {left // 60}m" if left > 0 else "token expired"
+            line += f" · {grant} · {valid}"
+    except (OSError, ValueError, TypeError):
+        pass
+    print(line)
     return cli.OK
 
 
@@ -126,8 +158,50 @@ def serve(config_path: str) -> int:
     return cli.OK
 
 
+def _probe_oauth(token_path: str, p: dict[str, object]) -> int:
+    """An OAuth config's probe is a real mint — the only test that proves it works.
+
+    Except for a service account: RS256 needs `cryptography`, which lives in the image and
+    not on a stock host, so the shape is checked here and the mint is left to first launch.
+    """
+    try:
+        with open(token_path) as fh:
+            cfg = json.load(fh)
+    except (OSError, ValueError) as e:
+        print(f"cannot read the credential file as JSON: {type(e).__name__}")
+        return 2
+    bad = oauth.validate_config(cfg)
+    if bad:
+        print(f"❌ {bad}")
+        return 1
+    if cfg.get("type") == "service_account":
+        print(
+            f"⚠️  service-account config for {cfg.get('client_email', '?')} looks complete. "
+            "Signing needs the image, so it is verified at first launch — kib broker status."
+        )
+        return 2
+
+    scopes = p.get("scopes") or []
+    try:
+        _, lifetime, rotated = oauth.mint(cfg, scopes if isinstance(scopes, list) else [])
+    except oauth.OAuthError as e:
+        if e.retryable:
+            print(f"⚠️  inconclusive: {e}. The credential was not rejected — retry.")
+            return 2
+        print(f"❌ the token endpoint REJECTED this credential: {e}")
+        return 1
+    if rotated:
+        print(
+            "⚠️  this provider ROTATES its refresh token. The broker never writes a credential, "
+            "so the rotated one is discarded and this route will stop working once the provider "
+            "invalidates the stored one."
+        )
+    print(f"✅ minted an access token (valid {lifetime}s)")
+    return 0
+
+
 def probe(token_path: str, pid: str) -> int:
-    """Exit 0 if the upstream ACCEPTS the token, 1 if it rejects it, 2 if we cannot tell.
+    """Exit 0 if the upstream ACCEPTS the credential, 1 if it rejects it, 2 if we cannot tell.
 
     Distinguishing 'rejected' from 'something else went wrong' is the whole point: a 401
     means re-login, while a 429/500/network error means try again later and says nothing
@@ -137,6 +211,8 @@ def probe(token_path: str, pid: str) -> int:
     p = registry.PROVIDERS.get(pid)
     if p is None:
         raise cli.AbortError(f"unknown provider: {pid}", cli.USAGE)
+    if p.get("credential_kind") == "oauth":
+        return _probe_oauth(token_path, p)
     spec = p.get("probe")
     if not spec:
         print(f"no probe defined for {pid}")
@@ -200,6 +276,7 @@ TABLE: dict[str, tuple[cli.Command, int]] = {
     "check-providers": (check_providers, 0),
     "check-name": (check_name, 1),
     "route-url": (route_url, 2),
+    "oauth-state": (oauth_state, 2),
     "route-fingerprint": (route_fingerprint, 0),
     "probe": (probe, 2),
 }

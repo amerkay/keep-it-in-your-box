@@ -28,11 +28,10 @@ def remote_def(name: str, host: str = "mcp.example.test", path: str = "/http") -
     return json.dumps(
         {
             "id": name,
-            "delivery": "reverse_proxy_mcp",
             "upstream_origin": f"https://{host}",
             "inject_header": "Authorization",
             "inject_template": "Bearer {secret}",
-            "mcp_path": path,
+            "path": path,
             "mcp_server_name": name,
         }
     )
@@ -77,36 +76,25 @@ def test_inject_skips_a_route_with_no_credential(
     assert json.loads(cfg.read_text())["mcpServers"] == {}
 
 
-def test_inject_points_a_hosted_mcp_at_its_own_sidecar_only_if_it_came_up(
+def test_inject_skips_a_rest_only_route(
     tmp_path: Path, providers_dir: Path, write_json: Callable[[str, object], Path]
 ) -> None:
-    (providers_dir / "local.json").write_text(
+    """No mcp_server_name = not an MCP. Registering it anyway shows a failed server in-session."""
+    (providers_dir / "gsc.json").write_text(
         json.dumps(
             {
-                "id": "local",
-                "delivery": "hosted_mcp",
-                "host_run": ["uvx", "some-mcp"],
-                "credential_env": "L_CRED",
-                "mcp_path": "/mcp",
+                "id": "gsc",
+                "credential_kind": "oauth",
+                "upstream_origin": "https://searchconsole.googleapis.com",
             }
         )
     )
+    (kib_dir(tmp_path) / "gsc.json").write_text("{}")  # a credential IS present
     cfg = write_json("session/.claude.json", {})
-    base = [
-        "inject",
-        "--config",
-        str(cfg),
-        "--kib-dir",
-        str(kib_dir(tmp_path)),
-        "--broker-host",
-        "b",
-    ]
-
-    mcp.main(base)
+    mcp.main(
+        ["inject", "--config", str(cfg), "--kib-dir", str(kib_dir(tmp_path)), "--broker-host", "b"]
+    )
     assert json.loads(cfg.read_text())["mcpServers"] == {}
-
-    mcp.main([*base, "--hosted-up", "local"])
-    assert json.loads(cfg.read_text())["mcpServers"]["local"]["url"] == "http://local:8100/mcp"
 
 
 def test_inject_prunes_only_entries_we_own(
@@ -276,7 +264,7 @@ def test_adopt_refuses_a_local_server_with_no_auth_header(
     tmp_path: Path, providers_dir: Path, write_json: Callable[[str, object], Path]
 ) -> None:
     cfg = write_json(".mcp.json", {"mcpServers": {"loc": {"command": "npx", "args": []}}})
-    with pytest.raises(cli.AbortError, match="hosted_mcp definition"):
+    with pytest.raises(cli.AbortError, match="no inline remote auth header"):
         mcp.main(adopt_argv(tmp_path, providers_dir, "loc", cfg))
 
 
@@ -306,12 +294,15 @@ def test_add_writes_a_reverse_proxy_def(providers_dir: Path) -> None:
         == cli.OK
     )
     prov = json.loads((providers_dir / "svc.json").read_text())
-    assert prov["delivery"] == "reverse_proxy_mcp"
+    # `delivery` is not written by add — the registry owns it.
+    assert "delivery" not in prov
     assert prov["inject_header"] == "X-Key"
     assert prov["inject_template"] == "{secret}"
+    # Registration is opt-in: no --mcp-name given.
+    assert prov["mcp_server_name"] == ""
 
 
-def test_add_writes_a_hosted_def_with_extra_env(providers_dir: Path) -> None:
+def test_add_writes_an_oauth_def(providers_dir: Path) -> None:
     assert (
         mcp.main(
             [
@@ -319,34 +310,46 @@ def test_add_writes_a_hosted_def_with_extra_env(providers_dir: Path) -> None:
                 "gsc",
                 "--providers-dir",
                 str(providers_dir),
-                "--run",
-                "uvx mcp-search-console",
-                "--cred-env",
-                "GSC_CRED",
-                "--cred-kind",
-                "file",
-                "--env",
-                "FLAG=true",
+                "--url",
+                "https://searchconsole.googleapis.com",
+                "--oauth",
+                "--scope",
+                "https://www.googleapis.com/auth/webmasters.readonly",
+                "--allow-path",
+                "/webmasters/v3/",
             ]
         )
         == cli.OK
     )
     prov = json.loads((providers_dir / "gsc.json").read_text())
-    assert prov["delivery"] == "hosted_mcp"
-    assert prov["host_run"] == ["uvx", "mcp-search-console"]
-    assert prov["credential_kind"] == "file_path"
+    assert prov["credential_kind"] == "oauth"
     assert prov["token_basename"] == "gsc.json"
-    assert prov["extra_env"] == {"FLAG": "true"}
+    assert prov["scopes"] == ["https://www.googleapis.com/auth/webmasters.readonly"]
+    assert prov["allow_paths"] == ["/webmasters/v3/"]
+    assert "secret" not in json.dumps(prov).lower().replace("{secret}", "")
+
+
+def test_add_registers_an_mcp_only_when_named(providers_dir: Path) -> None:
+    mcp.main(
+        [
+            "add",
+            "lin",
+            "--providers-dir",
+            str(providers_dir),
+            "--url",
+            "https://l.test/sse",
+            "--mcp-name",
+            "linear",
+        ]
+    )
+    assert json.loads((providers_dir / "lin.json").read_text())["mcp_server_name"] == "linear"
 
 
 @pytest.mark.parametrize(
     ("argv", "match"),
     [
-        (["--url", "https://x", "--run", "cmd"], "not both"),
-        (["--url", "https://x", "--env", "A=B"], "only applies to a hosted MCP"),
-        (["--run", "cmd"], "needs --cred-env"),
         ([], "give --url"),
-        (["--run", "cmd", "--cred-env", "E", "--env", "novalue"], "KEY=VAL"),
+        (["--url", "https://x", "--scope", "s"], "add --oauth"),
         (["--url", "ftp://nope"], "http\\(s\\) URL"),
     ],
 )

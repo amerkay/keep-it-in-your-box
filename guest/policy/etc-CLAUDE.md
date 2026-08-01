@@ -34,10 +34,14 @@
 - **`~/.keep-it-in-your-box/` is not mounted here.** It holds those credentials and the route
   definitions that govern them, so a session cannot rewrite its own brokering. There is no
   provider file for you to edit and no port for you to choose.
-- **To add a service's MCP, hand the user one command — never author a definition, never ask
+- **To add a brokered service, hand the user one command — never author a definition, never ask
   for a secret value.** In a **host terminal**: `kib broker add` asks the questions, or
-  `kib broker add <name> --url <https-url> --header "Authorization: Bearer"` for a remote one
-  (`--run "<cmd>" --cred-env <ENV>` for a local one). It prompts for the credential itself,
+  `kib broker add <name> --url <https-url> --header "Authorization: Bearer"` for a static
+  credential, `--oauth [--scope <scope>]` for a service that only issues expiring OAuth 2.0
+  tokens (the broker mints and re-mints them; the client secret never comes in here). Suggest
+  `--allow-path <prefix>` for each path set the service needs — without it the route may reach
+  every path on that host. Add `--mcp-name <name>` only if the upstream really is an MCP server;
+  without it the route is REST and you reach it with curl. It prompts for the credential itself,
   hidden, and prints the URL the next session will get. `kib broker status` lists every route.
 
 ## 🔴 Guarded paths — deliberate policy, not bugs. Not yours to bypass.

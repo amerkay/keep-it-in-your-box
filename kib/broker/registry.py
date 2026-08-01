@@ -4,8 +4,9 @@ One row per route, with a FIXED upstream that is never chosen by the agent (a fo
 proxy would be an egress bypass). The host reads the host-facing fields through
 `kib broker host-config <id>`, so the bash side never duplicates this table.
 
-`token_basename` names the HOST file (under `~/.keep-it-in-your-box/`) holding a static,
-long-lived credential. It is mounted READ-ONLY into the broker and nowhere else.
+`token_basename` names the HOST file (under `~/.keep-it-in-your-box/`) holding the route's
+credential — a long-lived secret for `paste_token`, an OAuth config for `oauth`. It is mounted
+READ-ONLY into the broker and nowhere else, and the broker never writes it.
 """
 
 from __future__ import annotations
@@ -16,13 +17,12 @@ import urllib.parse
 from typing import Any
 
 from kib.broker.credential import FAR_FUTURE_MS
-from kib.broker.helpers import validate_route_id
+from kib.broker.helpers import validate_route_id, validate_token_basename
 
-#: The ONE port every user MCP route shares, dispatched by a `/mcp/<id>` path prefix. A
-#: per-route port knob is what took a launch down (two defs, one port, an unguarded bind), and
-#: no amount of auto-assignment fixes a number the user can still edit. Clear of the LLM band
-#: (8080–8082), which keeps its dedicated listeners. Each hosted_mcp sidecar reuses the number
-#: inside its OWN netns, so there is nothing to collide with.
+#: The ONE port every user route shares, dispatched by a `/mcp/<id>` path prefix. A per-route
+#: port knob is what took a launch down (two defs, one port, an unguarded bind), and no amount
+#: of auto-assignment fixes a number the user can still edit. Clear of the LLM band (8080),
+#: which keeps its dedicated listener.
 MCP_PORT = 8100
 MCP_PREFIX = "/mcp"
 
@@ -88,77 +88,49 @@ PROVIDERS: dict[str, dict[str, Any]] = {
             },
         },
     },
-    # ── ready-but-unstarted (enable by dropping a host token file; no code change) ──
-    # Same contract: a STATIC key. For Codex/Gemini that means an api-key, not the
-    # ChatGPT/Google OAuth credential — those rotate exactly like Anthropic's.
-    "codex": {
-        "delivery": "base_url_env",
-        "credential_kind": "paste_token",
-        "agent_base_url_env": "OPENAI_BASE_URL",
-        "agent_token_env": "OPENAI_API_KEY",
-        "token_prefix": "sk-",
-        "listen_port": 8081,
-        "upstream_origin": "https://api.openai.com",
-        "token_basename": "openai-token",
-        "inject_header": "Authorization",
-        "inject_template": "Bearer {secret}",
-        "strip_incoming": ["authorization"],
-        "allow_paths": ["/v1/"],
-        "placeholder_container_path": "",
-        "placeholder_template": None,
-        "placeholder_fake_pointers": [],
-        "probe": {"path": "/v1/models", "method": "GET", "headers": {}, "body": None},
-    },
-    "gemini": {
-        "delivery": "base_url_env",
-        "credential_kind": "paste_token",
-        "agent_base_url_env": "GOOGLE_GEMINI_BASE_URL",
-        "agent_token_env": "GEMINI_API_KEY",
-        "token_prefix": "",
-        "listen_port": 8082,
-        "upstream_origin": "https://generativelanguage.googleapis.com",
-        "token_basename": "gemini-token",
-        "inject_header": "x-goog-api-key",
-        "inject_template": "{secret}",
-        "strip_incoming": ["authorization", "x-goog-api-key"],
-        "allow_paths": ["/v1beta/", "/v1/"],
-        "placeholder_container_path": "",
-        "placeholder_template": None,
-        "placeholder_fake_pointers": [],
-        "probe": {"path": "/v1beta/models", "method": "GET", "headers": {}, "body": None},
-    },
-    # ── No MCP routes are built in ───────────────────────────────────────────────
-    # Only the LLMs Claude Code natively speaks (above) are hardcoded. Every MCP —
-    # DataForSEO, mcp-gsc, or a service we have never heard of — is USER-DEFINED, added
-    # without touching this file. Two worked examples ship in examples/providers/.
+    # ── Nothing else is built in ─────────────────────────────────────────────────
+    # Only the LLM Claude Code natively speaks is hardcoded. Every other service —
+    # DataForSEO, Google Search Console, or one we have never heard of — is USER-DEFINED,
+    # added without touching this file. Two worked examples ship in examples/providers/.
 }
 
 #: The ids a user def may never take, snapshotted before any merge folds user rows in.
 BUILTIN_IDS = tuple(PROVIDERS)
 
-# ── User-defined providers: broker ANY MCP, no code change ───────────────────
-# Any MCP is brokered by dropping a partial provider dict in ~/.keep-it-in-your-box/providers.d/
-# — written by `kib mcp add`, synthesized by `kib mcp adopt`, or copied from examples/providers/.
-# merge_user_providers() folds them onto PROVIDERS so list/host-config/serve/match treat a user
-# route exactly like a built-in; _finalize fills the rest. The LLM built-ins are NOT overridable,
-# so a poisoned file cannot redirect the Claude token's upstream.
+# ── User-defined providers: broker ANY service, no code change ───────────────
+# A service is brokered by dropping a partial provider dict in ~/.keep-it-in-your-box/
+# providers.d/ — written by `kib broker add`, synthesized by `kib mcp adopt`, or copied from
+# examples/providers/. merge_user_providers() folds them onto PROVIDERS so
+# list/host-config/serve/match treat a user route exactly like the built-in; _finalize fills the
+# rest. The LLM built-in is NOT overridable, so a poisoned file cannot redirect the Claude token.
 #
-# Two delivery modes cover every MCP:
-#   reverse_proxy_mcp — REMOTE, with a STATIC auth header to a fixed upstream. Brokered like an
-#     LLM: .claude.json gets `url: http://kib-broker:8100/mcp/<id><mcp_path>` and NO header.
-#   hosted_mcp — LOCAL / client-signed (e.g. a service-account JSON), so it CANNOT be
-#     header-brokered. The MCP server runs in its own sidecar holding the credential file.
-_REQUIRED = {
-    "reverse_proxy_mcp": ("upstream_origin", "inject_header", "inject_template"),
-    "hosted_mcp": ("host_run",),
-}
+# Every user route is a reverse proxy to a fixed upstream — `delivery` is ours to set, never
+# theirs to declare. What varies is where the injected secret COMES FROM (`credential_kind`):
+#   paste_token — a static credential the user pasted, injected verbatim.
+#   oauth       — an OAuth 2.0 config file the broker exchanges for a short-lived access token
+#                 (kib/broker/oauth.py). The config never leaves the sidecar.
+#
+# `upstream_origin` is the only field a def MUST carry; everything else has a default.
 
-#: Keys a def must NOT carry. Each was a per-route port a user could hand-pick; two defs with
-#: the same number took a whole launch down. Named on sight rather than ignored, because a def
-#: written against the old shape is exactly the thing someone will paste from an old note.
-_OBSOLETE = {
-    "listen_port": "user MCP routes no longer have their own port",
-    "mcp_port": "the hosted-MCP port is fixed",
+#: The credential sources a def may name. Anything else is a typo worth naming on sight —
+#: unrecognised, it would silently fall through to "inject the file's bytes as a header".
+CREDENTIAL_KINDS = ("paste_token", "oauth")
+
+#: Keys that are no longer part of the schema, and what to do instead. A def carrying one is
+#: REFUSED — not migrated, and never quietly ignored. Ignoring `mcp_path` is the worst case
+#: available: the def still loads, the route still comes up, and it answers at the wrong URL,
+#: which reads as a broken service rather than a stale file. The same reasoning retired the
+#: per-route port knob. Named on sight, because a def written against the old shape is exactly
+#: what someone pastes from an old note.
+_REMOVED = {
+    "mcp_path": 'renamed — use "path"',
+    "mcp_transport": 'renamed — use "transport"',
+    "delivery": "removed — every user route is a proxy route and the registry sets this",
+    "listen_port": "removed — every route shares one listener, told apart by name",
+    "mcp_port": "removed — every route shares one listener, told apart by name",
+    "host_run": "removed — a local MCP server is no longer brokered; use an oauth route",
+    "credential_env": "removed with the hosted-MCP sidecar",
+    "extra_env": "removed with the hosted-MCP sidecar",
 }
 
 #: One human-readable line per rejected/ignored def, refilled by every merge_user_providers().
@@ -168,27 +140,29 @@ DEF_PROBLEMS: list[str] = []
 
 def _finalize_provider(pid: str, p: dict[str, Any]) -> dict[str, Any]:
     """Fill fields a user file may omit so the rest of the package treats it as built-in."""
-    p.setdefault("credential_kind", "paste_token")
-    p.setdefault("token_basename", f"{pid}-token")
-    p.setdefault("mcp_server_name", pid)
-    p.setdefault("mcp_path", "")
-    p.setdefault("mcp_transport", "http")
-    # No allowlist = every path on the pinned upstream. The built-in LLM rows set one because
-    # their credential is the user's real account token and the path set Claude Code needs is
-    # known; a user MCP's endpoints are not, and guessing them wrong breaks the route silently.
+    # Ours, unconditionally: a user def that names a delivery cannot promote itself to the
+    # LLM row's shape (env var + shadowed credential file).
+    p["delivery"] = "reverse_proxy"
+    kind = p.setdefault("credential_kind", "paste_token")
+    # An OAuth config is a JSON document, not a pasted line — name the file for what it holds.
+    p.setdefault("token_basename", f"{pid}.json" if kind == "oauth" else f"{pid}-token")
+    p.setdefault("scopes", [])
+    p.setdefault("path", "")
+    p.setdefault("transport", "http")
+    # NO default server name: registering is opt-in. Defaulting it to the route id put every
+    # REST-only route into .claude.json as an MCP server that Claude Code then shows as failed.
+    p.setdefault("mcp_server_name", "")
+    # No allowlist = every path on the pinned upstream. The LLM row sets one because its
+    # credential is the user's real account token and the path set Claude Code needs is known;
+    # a user route's endpoints are not, and guessing them wrong breaks the route silently.
     p.setdefault("allow_paths", [])
     p.setdefault("placeholder_container_path", "")
     p.setdefault("placeholder_template", None)
     p.setdefault("placeholder_fake_pointers", [])
     p.setdefault("probe", None)
-    if p.get("delivery") == "reverse_proxy_mcp":
-        p.setdefault("inject_header", "Authorization")
-        p.setdefault("inject_template", "Bearer {secret}")
-        p.setdefault("strip_incoming", [p["inject_header"].lower()])
-    elif p.get("delivery") == "hosted_mcp":
-        p.setdefault("extra_env", {})
-        # Its own sidecar, its own netns: the shared number cannot collide with anything.
-        p["mcp_port"] = MCP_PORT
+    p.setdefault("inject_header", "Authorization")
+    p.setdefault("inject_template", "Bearer {secret}")
+    p.setdefault("strip_incoming", [p["inject_header"].lower()])
     return p
 
 
@@ -199,25 +173,35 @@ def _validate(fn: str, pid: str, p: dict[str, Any]) -> list[str]:
         return [bad]
     if p.get("id") and p["id"] != fn[:-5]:
         return [f"its \"id\" is '{p['id']}' but the file is named {fn} — they must match"]
-    delivery = p.get("delivery")
-    need = _REQUIRED.get(delivery) if isinstance(delivery, str) else None
-    if need is None:
-        return [
-            f'"delivery" is {delivery!r} — expected "reverse_proxy_mcp" (a remote MCP behind a '
-            'static auth header) or "hosted_mcp" (a local server in its own sidecar)'
-        ]
-    problems = [f'"{k}" is missing' for k in need if p.get(k) in (None, "", [])]
-    problems += [f'"{k}" is obsolete — {why}' for k, why in _OBSOLETE.items() if k in p]
-    if delivery == "reverse_proxy_mcp":
-        # The path belongs in mcp_path: the relay joins origin + forwarded path, so a path
-        # here would silently vanish rather than fail.
-        origin = urllib.parse.urlsplit(str(p.get("upstream_origin", "")))
-        if origin.scheme not in ("http", "https") or not origin.hostname:
-            problems.append('"upstream_origin" must be an http(s) origin, e.g. https://mcp.x.com')
-        elif origin.path:
-            problems.append(
-                f'"upstream_origin" carries the path {origin.path!r} — put it in "mcp_path"'
-            )
+    # Only fields a def actually CARRIES are checked — the rest are filled by _finalize, which
+    # runs after this. setdefault cannot repair an explicit empty value, so catch it here.
+    problems = [
+        f'"{k}" must be a non-empty string'
+        for k in ("inject_header", "inject_template")
+        if k in p and not (isinstance(p[k], str) and p[k])
+    ]
+    problems += [f'"{k}" is {why}' for k, why in _REMOVED.items() if k in p]
+    tmpl = p.get("inject_template")
+    if isinstance(tmpl, str) and tmpl and "{secret}" not in tmpl:
+        # Without the placeholder the credential is silently dropped and every request goes
+        # out unauthenticated — a 401 that looks like a bad credential, not a bad def.
+        problems.append('"inject_template" must contain {secret}')
+    if "token_basename" in p:
+        bad_name = validate_token_basename(str(p["token_basename"]))
+        if bad_name:
+            problems.append(bad_name)
+    kind = p.get("credential_kind", "paste_token")
+    if kind not in CREDENTIAL_KINDS:
+        problems.append(f'"credential_kind" is {kind!r} — expected one of {CREDENTIAL_KINDS}')
+    if not isinstance(p.get("scopes", []), list):
+        problems.append('"scopes" must be a list of strings')
+    # The path belongs in "path": the relay joins origin + forwarded path, so a path on the
+    # origin would silently vanish rather than fail.
+    origin = urllib.parse.urlsplit(str(p.get("upstream_origin", "")))
+    if origin.scheme not in ("http", "https") or not origin.hostname:
+        problems.append('"upstream_origin" must be an http(s) origin, e.g. https://api.x.com')
+    elif origin.path:
+        problems.append(f'"upstream_origin" carries the path {origin.path!r} — put it in "path"')
     return problems
 
 
@@ -254,28 +238,25 @@ def merge_user_providers() -> None:
 
 
 def route_path(pid: str, p: dict[str, Any]) -> str:
-    """The URL path the AGENT requests for an MCP route ('' for a non-MCP row).
+    """The URL path the AGENT requests for a proxy route ('' for the LLM row).
 
-    reverse_proxy_mcp rows are multiplexed behind `/mcp/<id>`; a hosted_mcp row has a whole
-    sidecar to itself and keeps its bare `mcp_path`. One definition so `inject`, `host-config`
-    and `kib broker status` cannot print three different URLs.
+    Every proxy route is multiplexed behind `/mcp/<id>`. One definition so `inject`,
+    `host-config` and `kib broker status` cannot print three different URLs.
     """
-    tail = p.get("mcp_path") or ""
-    delivery = p.get("delivery")
-    if delivery == "reverse_proxy_mcp":
-        return f"{MCP_PREFIX}/{pid}{tail}"
-    return tail if delivery == "hosted_mcp" else ""
+    if p.get("delivery") != "reverse_proxy":
+        return ""
+    return f"{MCP_PREFIX}/{pid}{p.get('path') or ''}"
 
 
 def agent_url(pid: str, p: dict[str, Any], host: str) -> str:
-    """The full `http://<host>:8100/…` URL the agent's .claude.json gets for an MCP route."""
+    """The full `http://<host>:8100/…` URL the agent gets for a proxy route."""
     return f"http://{host}:{MCP_PORT}{route_path(pid, p)}"
 
 
 def match_upstream_route(url: str) -> tuple[str, str, str] | None:
-    """`(id, token_basename, auth_scheme)` for an EXISTING reverse_proxy_mcp route.
+    """`(id, token_basename, auth_scheme)` for an EXISTING proxy route.
 
-    Matches on `url`'s host (always a user-defined route — no MCP is built in), so
+    Matches on `url`'s host (always a user-defined route — only the LLM row is built in), so
     `kib mcp adopt` can reuse a route the user already added instead of synthesizing a
     duplicate. `auth_scheme` is the literal prefix the inject template puts before the
     secret (Basic / Bearer / empty), so the caller can strip it off the inline header to
@@ -285,7 +266,7 @@ def match_upstream_route(url: str) -> tuple[str, str, str] | None:
     if not host:
         return None
     for pid, p in PROVIDERS.items():
-        if p.get("delivery") != "reverse_proxy_mcp":
+        if p.get("delivery") != "reverse_proxy":
             continue
         up = (urllib.parse.urlsplit(p["upstream_origin"]).hostname or "").lower()
         if up and up == host:

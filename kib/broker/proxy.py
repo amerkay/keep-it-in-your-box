@@ -4,10 +4,14 @@ Terminates the agent's plain-HTTP connection, strips the placeholder auth, injec
 REAL credential and re-originates its own TLS to ONE hardcoded upstream per route. No TLS
 MITM, no CA in the agent's trust store: the credential is injected, not decrypted.
 
-Two listener shapes, one relay. Each LLM row keeps a dedicated port and forwards the path
-verbatim. Every user MCP route shares ONE listener on `MCP_PORT`, picked by a `/mcp/<id>`
-prefix that is stripped before forwarding — so adding a route can never collide with another,
-and a route that cannot come up is skipped by name instead of taking the launch down.
+Two listener shapes, one relay. The LLM row keeps a dedicated port and forwards the path
+verbatim. Every user route shares ONE listener on `MCP_PORT`, picked by a `/mcp/<id>` prefix
+that is stripped before forwarding — so adding a route can never collide with another, and a
+route that cannot come up is skipped by name instead of taking the launch down.
+
+The relay is credential-agnostic: it asks `Credential` for a secret and injects it. Whether
+that secret is a stored token or one minted from an OAuth config is not its business — the
+single exception is the 401 replay in `_do_relay`, which only a mintable credential can serve.
 """
 
 from __future__ import annotations
@@ -68,9 +72,14 @@ class Route:
         self.inject_template: str = provider["inject_template"]
         self.listen_port: int = int(provider.get("listen_port") or MCP_PORT)
         self.allow_paths: tuple[str, ...] = tuple(provider.get("allow_paths") or ())
-        # Trailing slash off once, here: `allows` compares segment-wise, so `/v1/` and `/v1`
-        # are the same rule and normpath never leaves a trailing slash to match against.
-        self._allow_bases: tuple[str, ...] = tuple(p.rstrip("/") or "/" for p in self.allow_paths)
+        # Normalised once, here. Trailing slash off, because `allows` compares segment-wise so
+        # `/v1/` and `/v1` are one rule and normpath never leaves a trailing slash to match.
+        # Leading slash ON, because it compares against normpath output, which always has one —
+        # a def or a --allow-path saying `webmasters/v3/` would otherwise match NOTHING and 404
+        # the whole route, which reads as a broken upstream rather than a typo.
+        self._allow_bases: tuple[str, ...] = tuple(
+            ("/" + p.strip("/")).rstrip("/") or "/" for p in self.allow_paths
+        )
 
     def allows(self, upstream_path: str) -> bool:
         """True if this is a path the route may reach with the real credential attached.
@@ -104,27 +113,43 @@ def _do_relay(h: BaseHTTPRequestHandler, route: Route, upstream_path: str, body:
         if lk in HOP_BY_HOP or lk in route.strip:
             continue
         out_headers[k] = v
-    secret = route.cred.current_secret()
-    if secret is None:
-        # No usable token → fail loudly instead of sending the literal header "Bearer None"
-        # upstream and getting an opaque 401 the agent cannot diagnose. current_secret()
-        # already logged the specific cause.
-        h.send_error(502, "broker credential unavailable")
-        return
-    out_headers[route.inject_header] = route.inject_template.format(secret=secret)
     # Host is intentionally NOT set: it is in HOP_BY_HOP, so the agent's "Host: kib-broker:8100"
     # was already dropped, and http.client re-generates the correct upstream Host from the
     # connection. That is precisely what lets one listener serve N different upstreams — put
     # `host` back in the forwarded set and every route would announce the broker's own name.
 
-    ctx = ssl.create_default_context() if route.scheme == "https" else None
-    conn = (
-        http.client.HTTPSConnection(route.host, route.port, context=ctx, timeout=600)
-        if route.scheme == "https"
-        else http.client.HTTPConnection(route.host, route.port, timeout=600)
-    )
-    conn.request(h.command, upstream_path, body=body, headers=out_headers)
-    resp = conn.getresponse()
+    # Two attempts at most, and only for a minted credential: a 401 is the upstream telling us
+    # the access token is dead (revoked, or a clock we disagree about) before its advertised
+    # expiry. Re-minting and replaying here is what keeps an expired token from ever reaching
+    # the agent — which would handle it wrong. Safe to replay: `body` is already fully buffered
+    # by _read_body, and nothing has been written back to the client yet.
+    for attempt in (0, 1):
+        secret = route.cred.current_secret()
+        if secret is None:
+            # No usable credential → fail loudly instead of sending the literal header
+            # "Bearer None" upstream and getting an opaque 401 the agent cannot diagnose.
+            # current_secret() already logged the specific cause.
+            h.send_error(502, "broker credential unavailable")
+            return
+        out_headers[route.inject_header] = route.inject_template.format(secret=secret)
+
+        ctx = ssl.create_default_context() if route.scheme == "https" else None
+        conn = (
+            http.client.HTTPSConnection(route.host, route.port, context=ctx, timeout=600)
+            if route.scheme == "https"
+            else http.client.HTTPConnection(route.host, route.port, timeout=600)
+        )
+        conn.request(h.command, upstream_path, body=body, headers=out_headers)
+        resp = conn.getresponse()
+        if resp.status != 401 or attempt or not route.cred.is_oauth:
+            break
+        resp.read()  # drain before discarding the connection
+        conn.close()
+        stdout_line(f"BROKER-REMINT {route.pid} upstream answered 401 — re-minting and retrying")
+        # Rate-limited and token-matched inside: a 401 does not always mean a dead token, and
+        # an out-of-scope endpoint 401s every time. If it declines, the retry simply re-sends
+        # the same token and the client sees the upstream's own 401.
+        route.cred.invalidate(secret)
 
     # Stream the response back UNBUFFERED. Connection: close + read-to-EOF is the simplest
     # correct path for SSE / streamable-HTTP: the agent reads events as they arrive and the
@@ -269,7 +294,7 @@ def _bind(
 def _build_routes(
     cfg: dict[str, Any], out_dir: str
 ) -> tuple[list[Route], dict[str, Route], list[tuple[str, str]]]:
-    """Resolve the enabled ids into `(LLM routes, muxed MCP routes, [(id, reason) skipped])`.
+    """Resolve the enabled ids into `(LLM routes, muxed routes, [(id, reason) skipped])`.
 
     Separate from serve() so the fail-soft split is testable without binding a real port.
     """
@@ -281,20 +306,15 @@ def _build_routes(
         if provider is None:
             broken.append((pid, "no such route in the registry"))
             continue
-        # hosted_mcp routes run the MCP server in their OWN sidecar and hold the credential
-        # there; the broker never proxies them. Guard even though the host keeps them out of
-        # `enabled` — a stray row must not KeyError on the reverse-proxy fields.
-        if provider.get("delivery") == "hosted_mcp":
-            stdout_line(f"BROKER-SKIP {pid}: hosted_mcp is served by its own sidecar")
-            continue
         token_path = cfg.get("token_paths", {}).get(pid)
         if not token_path or not os.path.exists(token_path):
             broken.append((pid, "its credential is missing"))
             continue
 
-        cred = Credential(pid, provider, token_path)
-        if cred.current_secret() is None:
-            broken.append((pid, "its credential file is present but unusable"))
+        cred = Credential(pid, provider, token_path, out_dir)
+        why = cred.check()
+        if why:
+            broken.append((pid, why))
             continue
 
         # Mint the placeholder credential file the agent will get, into the shared out dir
@@ -306,7 +326,7 @@ def _build_routes(
             continue
 
         route = Route(pid, provider, cred)
-        if provider.get("delivery") == "reverse_proxy_mcp":
+        if provider.get("delivery") == "reverse_proxy":
             mux[pid] = route
         else:
             llm.append(route)

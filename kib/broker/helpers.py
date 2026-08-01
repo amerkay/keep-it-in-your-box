@@ -29,6 +29,10 @@ _HEX_VAL_RE = re.compile(r"[0-9a-fA-F]{24,}$")
 #: all three accept, so one validator covers the writer and the reader.
 _ROUTE_ID_RE = re.compile(r"[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$")
 
+#: A credential filename. Deliberately excludes `/` and a leading `.`, so neither a traversal
+#: nor a dotfile can be named. See validate_token_basename for why that matters.
+_TOKEN_BASENAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*$")
+
 
 def validate_route_id(name: str, builtins: Sequence[str]) -> str | None:
     """The reason `name` is unusable as a route id, or None if it is fine."""
@@ -42,6 +46,26 @@ def validate_route_id(name: str, builtins: Sequence[str]) -> str | None:
         return (
             f"'{name}' is not a usable route name — use lowercase letters, digits, '.', '_' "
             "and '-' only, starting and ending with a letter or digit"
+        )
+    return None
+
+
+def validate_token_basename(name: str) -> str | None:
+    """The reason `name` is unusable as a credential FILENAME, or None if it is fine.
+
+    This is a bare filename under `$KIB_DIR`, never a path. host/broker.sh interpolates it
+    straight into `-v "$KIB_DIR/$basename:/run/broker/token/<id>:ro"`, so a `..` segment mounts
+    an arbitrary host file into the broker and the relay then injects its bytes as the route's
+    auth header — a pasted def would exfiltrate it to the def's own upstream. An empty value is
+    just as bad: `$KIB_DIR/` is a directory, `[ -s ]` is true for it, and the whole credential
+    store gets bound. Also keeps `list-providers` word-splittable, as its docstring promises.
+    """
+    if not name:
+        return '"token_basename" is empty'
+    if not _TOKEN_BASENAME_RE.match(name):
+        return (
+            f'"token_basename" is {name!r} — it must be a bare filename (letters, digits, '
+            "'.', '_' and '-', starting with a letter or digit), never a path"
         )
     return None
 
@@ -124,22 +148,24 @@ def recover_secret(header_value: str, scheme: str) -> str:
 def synthesize_reverse_proxy(
     name: str, url: str, header_name: str, scheme: str, transport: str = "http"
 ) -> dict[str, Any]:
-    """Build a reverse_proxy_mcp provider def (NO secret in it) from an inline MCP entry.
+    """Build a proxy provider def (NO secret in it) from an inline MCP entry.
 
     The one place this dict shape is defined for adopt/add/intercept. Raises ValueError on
-    a non-http(s) url. No port: every reverse route shares the one MCP listener and is
-    reached by its `/mcp/<id>` prefix.
+    a non-http(s) url. No `delivery` — the registry sets that. No port: every route shares the
+    one listener and is reached by its `/mcp/<id>` prefix.
+
+    `mcp_server_name` IS set here, unlike the registry default: everything that reaches this
+    function is describing a real MCP server, so it earns its `.claude.json` entry.
     """
     u = urllib.parse.urlsplit(url)
     if u.scheme not in ("http", "https") or not u.hostname:
         raise ValueError(f"cannot parse an http(s) upstream from url {url!r}")
     return {
         "id": name,
-        "delivery": "reverse_proxy_mcp",
         "credential_kind": "paste_token",
         "upstream_origin": f"{u.scheme}://{u.netloc}",
-        "mcp_path": u.path or "",
-        "mcp_transport": transport if transport in ("http", "sse") else "http",
+        "path": u.path or "",
+        "transport": transport if transport in ("http", "sse") else "http",
         "inject_header": header_name or "Authorization",
         "inject_template": (scheme + " {secret}") if scheme else "{secret}",
         "token_basename": f"{name}-token",

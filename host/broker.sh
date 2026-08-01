@@ -7,18 +7,20 @@
 # broker, a PLACEHOLDER token, and a synthetic .credentials.json shadowing the real one: it
 # can *use* the API but never read the credential.
 #
-# THE BROKERED CREDENTIAL IS STATIC — a long-lived token from `kib broker login` (wrapping
+# THE LLM CREDENTIAL IS STATIC — a long-lived token from `kib broker login` (wrapping
 # `claude setup-token`), host-only at ~/.keep-it-in-your-box/claude-token, mounted READ-ONLY.
-# Not .credentials.json; brokering that live file logged the account out. Never reintroduce a
-# refresh path. The broker sits on its own bridge (the `kib-broker` alias) while the main
-# container stays multi-homed, so host dev servers and the LAN stay reachable.
-# (docs/design-notes/credential-broker.md)
+# Not .credentials.json; brokering that live file logged the account out. Never give the claude
+# row a refresh path. (A USER route may declare `credential_kind: oauth`, which mints a
+# short-lived access token inside the sidecar — that is a different credential and a different
+# blast radius; the broker still never WRITES one. kib/broker/oauth.py.) The broker sits on its
+# own bridge (the `kib-broker` alias) while the main container stays multi-homed, so host dev
+# servers and the LAN stay reachable. (docs/design-notes/credential-broker.md)
 #
 # Reads:  KIB_ROOT KIB_CONFIG KIB_CFG_BROKER KIB_BROKER
 #         CNAME BROKER_CNAME BROKER_NET BROKER_DIR BROKER_OUT BROKER_HASH IMAGE_NAME
 #         SHARED_BASE SHARED_CDIR CLAUDE_HOME CRED_WITNESS
-# Writes: KIB_DIR BROKER_TOKEN_FILE PROVIDERS_DIR BROKER_ENABLED HOSTED_MCP_UP ARGS
-# shellcheck disable=SC2034  # BROKER_ENABLED / HOSTED_MCP_UP are read across the boundary
+# Writes: KIB_DIR BROKER_TOKEN_FILE PROVIDERS_DIR BROKER_ENABLED ARGS
+# shellcheck disable=SC2034  # BROKER_ENABLED is read across the boundary
 
 # The in-container DNS alias for the broker. Load-bearing mid-session: guest/bin/resolv-sync.sh
 # keeps 127.0.0.11 first so this keeps resolving, and brokered base_url values embed it.
@@ -79,13 +81,13 @@ _broker_route_url() {
     kib_py broker.cli route-url "$1" "$BROKER_ALIAS" 2>/dev/null || true
 }
 
-# Active ids (host credential file non-empty) whose delivery is in the space-separated set $1,
-# in registry order.
-_active_providers() {
-    local want="$1" id delivery kind basename ids=""
+# Every route the broker serves: the ids whose host credential file is non-empty, in registry
+# order. The claude row is required for the broker to launch (see start_broker); user routes are
+# additive and never block a launch.
+broker_enabled_providers() {
+    local id delivery kind basename ids=""
     while IFS='|' read -r id delivery kind basename; do
         [ -n "$id" ] || continue
-        case " $want " in *" $delivery "*) ;; *) continue ;; esac
         [ -s "$KIB_DIR/$basename" ] && ids="${ids:+$ids }$id"
     done <<EOF
 $(_broker_list_providers)
@@ -93,15 +95,8 @@ EOF
     printf '%s' "$ids"
 }
 
-# Routes the BROKER SIDECAR serves, vs providers that get their OWN sidecar. The claude row is
-# required for the broker to launch (see start_broker); MCP rows are additive and never block
-# a launch.
-broker_enabled_providers() { _active_providers "base_url_env reverse_proxy_mcp"; }
-hosted_mcp_providers() { _active_providers "hosted_mcp"; }
-
 # Fixed at container creation, like the redaction rules: a second terminal must never attach
-# under a broker config that changed since the container started. Covers sidecar routes and
-# hosted MCPs, so adding or removing either forces a relaunch.
+# under a broker config that changed since the container started.
 #
 # The fingerprint (id|path|upstream per route) is what makes EDITING a def count too: hashing
 # ids alone let a changed upstream leave the running sidecar serving the old one while a
@@ -109,7 +104,7 @@ hosted_mcp_providers() { _active_providers "hosted_mcp"; }
 broker_config_hash() {
     local fp=""
     have_python && fp="$(kib_py broker.cli route-fingerprint 2>/dev/null)"
-    hash8 "$(broker_enabled_providers)|$(hosted_mcp_providers)|$fp"
+    hash8 "$(broker_enabled_providers)|$fp"
 }
 
 # Host-facing facts for one provider, from the registry. Sets KIB_BROKER_* in the CALLER's
@@ -214,19 +209,18 @@ start_broker() {
             || _broker_abort "could not create the broker network ($BROKER_NET)."
     fi
 
-    # One read-only token mount per SIDECAR-SERVED route, at /run/broker/token/<id> (the path
+    # One read-only credential mount per route, at /run/broker/token/<id> (the path
     # _write_broker_config puts in token_paths).
     #
-    # This re-walks the registry with the same predicate as broker_enabled_providers rather than
-    # consuming its output, because only the walk carries `basename` — the host filename. Left
-    # deliberately: collapsing it means widening _active_providers to `id|basename`, and its
-    # output is also broker_config_hash's input, so the attach-refusal hash would shift for a
-    # six-line saving on the credential path. The drift it invites is closed by a test instead —
-    # tests/check/mcp.sh, "both walks agree".
+    # This re-walks the registry rather than consuming broker_enabled_providers' output, because
+    # only the walk carries `basename` — the host filename. Left deliberately: collapsing it
+    # means widening that function to `id|basename`, and its output is also broker_config_hash's
+    # input, so the attach-refusal hash would shift for a six-line saving on the credential path.
+    # The drift it invites is closed by a test instead — tests/check/mcp.sh, "both walks agree".
     local id delivery kind basename
     local -a tok_mounts=()
     while IFS='|' read -r id delivery kind basename; do
-        case "$delivery" in base_url_env | reverse_proxy_mcp) ;; *) continue ;; esac
+        [ -n "$id" ] || continue
         [ -s "$KIB_DIR/$basename" ] || continue
         tok_mounts+=(-v "$KIB_DIR/$basename:/run/broker/token/$id:ro")
     done <<EOF
@@ -287,62 +281,11 @@ EOF
 
     # Both fail-SOFT — a broken MCP must never block the session the way a broker startup
     # failure does.
-    start_hosted_mcp
     inject_brokered_mcps
 }
 
-# ── Hosted MCP sidecars ──────────────────────────────────────────
-# For a LOCAL/client-signed MCP that cannot be header-brokered: the server runs in its own
-# cap-drop=ALL sidecar on the broker network holding its credential :ro, and the agent reaches
-# it at http://<id>:<port><mcp_path>, so the secret never enters the agent container.
-# supergateway bridges stdio to streamable-HTTP. FAIL-SOFT — warn and skip, never abort.
-HOSTED_MCP_UP="" # space-separated ids whose sidecar came up (read by inject_brokered_mcps)
-start_hosted_mcp() {
-    local ids id
-    ids="$(hosted_mcp_providers)"
-    [ -n "$ids" ] || return 0
-    for id in $ids; do
-        local KIB_BROKER_TOKEN_BASENAME="" KIB_BROKER_CREDENTIAL_ENV="" KIB_BROKER_MCP_PORT="" \
-            KIB_BROKER_HOST_RUN="" KIB_BROKER_EXTRA_ENV=""
-        if ! _broker_host_config "$id"; then
-            warn "hosted MCP '$id': could not read its host-config — skipping."
-            continue
-        fi
-        if [ -z "$KIB_BROKER_HOST_RUN" ] || [ -z "$KIB_BROKER_MCP_PORT" ] \
-            || [ -z "$KIB_BROKER_TOKEN_BASENAME" ]; then
-            warn "hosted MCP '$id': incomplete registry entry — skipping."
-            continue
-        fi
-
-        local hmcp_cname="${CNAME}-hmcp-${id}"
-        docker rm -f "$hmcp_cname" >/dev/null 2>&1 || true # clear a crashed leftover
-        # extra_env (KEY=VAL, constants) → -e flags; word-split is safe (no metacharacters).
-        local -a env_args=() kv
-        for kv in $KIB_BROKER_EXTRA_ENV; do env_args+=(-e "$kv"); done
-        local -a run=(
-            docker run -d --name "$hmcp_cname"
-            --cap-drop=ALL --security-opt no-new-privileges
-            --user "$(id -u):$(id -g)" --userns=host
-            --network "$BROKER_NET" --network-alias "$id"
-            -v "$KIB_DIR/$KIB_BROKER_TOKEN_BASENAME:/run/cred/$KIB_BROKER_TOKEN_BASENAME:ro"
-            -e "$KIB_BROKER_CREDENTIAL_ENV=/run/cred/$KIB_BROKER_TOKEN_BASENAME"
-            -e "HOME=/tmp" -e "UV_CACHE_DIR=/tmp/.uv" -e "npm_config_cache=/tmp/.npm"
-            ${env_args[@]+"${env_args[@]}"}
-            -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro
-            --entrypoint sh "$IMAGE_NAME"
-            -c "exec npx -y supergateway --stdio \"$KIB_BROKER_HOST_RUN\" --outputTransport streamableHttp --port $KIB_BROKER_MCP_PORT --host 0.0.0.0"
-        )
-        if "${run[@]}" >/dev/null 2>&1; then
-            HOSTED_MCP_UP="${HOSTED_MCP_UP:+$HOSTED_MCP_UP }$id"
-            echo "🔐 hosted MCP '$id': sidecar up (cred stays host-side: $hmcp_cname)." >&2
-        else
-            warn "hosted MCP '$id': sidecar failed to start — the agent will launch without it."
-        fi
-    done
-}
-
 # The registry walk, the URL construction and the marker-aware rewrite all live in
-# kib.host.mcp; this is only the "which sidecars came up" fact bash owns.
+# kib.host.mcp — bash only says where the files are.
 inject_brokered_mcps() {
     [ "$BROKER_ENABLED" = 1 ] || return 0
     have_python || return 0
@@ -350,7 +293,6 @@ inject_brokered_mcps() {
         --config "$SESSION_BASE/.claude.json" \
         --kib-dir "$KIB_DIR" \
         --broker-host "$BROKER_ALIAS" \
-        --hosted-up "$HOSTED_MCP_UP" \
         || warn "could not inject brokered MCP entries into .claude.json"
 }
 
@@ -482,12 +424,6 @@ verify_broker_attach() {
 stop_broker() {
     kill_pgrp "$BROKER_DIR/notify.pid" # whole group: the notifier is a setsid'd pipeline
     docker rm -f "$BROKER_CNAME" >/dev/null 2>&1 || true
-    # Hosted-MCP sidecars share the broker net and must go before `network rm`. Match by the
-    # ${CNAME}-hmcp-* name prefix so we get every one without tracking their ids here.
-    local hm
-    for hm in $(docker ps -aq -f "name=^${BROKER_CNAME%-broker}-hmcp-" 2>/dev/null); do
-        docker rm -f "$hm" >/dev/null 2>&1 || true
-    done
     # The main container must be gone first (teardown_container stops it before calling this),
     # or the network still has an endpoint and rm fails — harmless, it is retried next time.
     docker network rm "$BROKER_NET" >/dev/null 2>&1 || true
@@ -557,12 +493,12 @@ _provider_login_hint() {
                 echo "     claude setup-token"
             fi
             ;;
-        codex) echo "   Create an OpenAI API key (starts sk-…): https://platform.openai.com/api-keys" ;;
-        gemini) echo "   Create a Gemini API key: https://aistudio.google.com/apikey" ;;
-        # Everything else is a user-defined MCP (providers.d/); service-specific guidance
+        # Everything else is a user-defined route (providers.d/); service-specific guidance
         # lives with its provider def (e.g. examples/providers/*.json), not in this table.
-        *) if [ "$_P_KIND" = file_path ]; then
-            echo "   Provide the path to the credential file for '$1'."
+        *) if [ "$_P_KIND" = oauth ]; then
+            echo "   Provide the path to the OAuth 2.0 config for '$1' — a Google ADC file"
+            echo "   (\`gcloud auth application-default login --scopes=…\`), a service-account"
+            echo "   key, or a {\"type\":\"client_credentials\", …} JSON."
         else
             echo "   Paste the credential for '$1'."
         fi ;;
@@ -571,7 +507,7 @@ _provider_login_hint() {
 }
 
 # Add (or replace) a provider credential, stored HOST-ONLY. paste_token → hidden paste;
-# file_path → copy a file the user names. Then probe (advisory).
+# oauth → copy the config file the user names. Then probe (advisory).
 provider_login() {
     local id="${1:-claude}"
     need_python
@@ -585,7 +521,7 @@ provider_login() {
     echo
     _provider_login_hint "$id"
 
-    if [ "$_P_KIND" = file_path ]; then
+    if [ "$_P_KIND" = oauth ]; then
         local path=""
         printf '   Path to the credential file: '
         read -r path || true
@@ -663,6 +599,18 @@ provider_probe() {
     kib_py broker.cli probe "$_P_FILE" "$id"
 }
 
+# One line of OAuth detail for a route: its scopes, plus live mint state when a project's
+# broker dir happens to be resolved. `kib broker status` is host-global and dispatches before
+# kib_resolve_paths, so BROKER_OUT is usually unset — scopes-only is the normal answer, and the
+# python side treats an empty dir as "not known", not as an error.
+_oauth_state_line() {
+    have_python || return 0
+    local line
+    line="$(kib_py broker.cli oauth-state "$1" "${BROKER_OUT:-}" 2>/dev/null || true)"
+    [ -n "$line" ] && printf '   %-11s   %s\n' "" "$line"
+    return 0
+}
+
 # Status of EVERY registry provider (never prints contents — size/mode only), plus the defs
 # the registry REFUSED — which otherwise have no row anywhere and are invisible until a launch.
 provider_status() {
@@ -680,13 +628,14 @@ provider_status() {
         else
             printf '   %-11s —       add: kib broker login %s   [%s]\n' "$id" "$id" "$delivery"
         fi
-        # MCP rows only: an LLM row is reached by env var, and asking would be three python
-        # spawns per status to be told "no URL".
+        # Proxy rows only: an LLM row is reached by env var, and asking would be a python
+        # spawn per status to be told "no URL".
         case "$delivery" in
             base_url_env) ;;
             *)
                 url="$(_broker_route_url "$id")"
                 [ -n "$url" ] && printf '   %-11s   → %s\n' "" "$url"
+                [ "$kind" = oauth ] && _oauth_state_line "$id"
                 ;;
         esac
     done <<EOF
@@ -715,15 +664,11 @@ _ADD_ARGV=() # set by the wizard, consumed by provider_add
 # Ask the four or five things a route needs. Never touches a credential: provider_login does
 # that, with a hidden read, once the def is proven loadable.
 _broker_add_wizard() {
-    local kind="" name="" why="" url="" header="" runcmd="" cred_env="" cred_kind=""
-    echo "🔐 kib broker add — put a service's MCP behind the credential broker."
+    local kind="" name="" why="" url="" header="" mcpname="" scopes="" paths="" s=""
+    echo "🔐 kib broker add — put a service behind the credential broker."
     echo "   The credential is stored HOST-ONLY; the sandbox gets a header-free URL and"
     echo "   never sees the secret. No port to pick — every route shares one, by name."
     echo
-    echo "   1) remote — the service hosts the MCP; one static header authenticates you"
-    echo "   2) local  — a server you run (npx/uvx) that reads a key file or env var"
-    printf '   Which? [1] '
-    read -r kind || true
 
     while :; do
         printf '   Short name for the route (lowercase, e.g. directus): '
@@ -735,26 +680,41 @@ _broker_add_wizard() {
         echo "   ⚠️  $why" >&2
     done
 
+    printf '   The upstream URL (https://…): '
+    read -r url || true
+    [ -n "$url" ] || die "no URL entered — nothing was written."
+
+    echo
+    echo "   1) a static header — a token or key the service issued you"
+    echo "   2) OAuth 2.0 — the broker exchanges a config file for short-lived tokens"
+    printf '   How does it authenticate? [1] '
+    read -r kind || true
+
     if [ "$kind" = 2 ]; then
-        printf '   Command that runs the server (e.g. uvx mcp-search-console): '
-        read -r runcmd || true
-        [ -n "$runcmd" ] || die "no command entered — nothing was written."
-        printf '   Env var the server reads its credential from (e.g. GSC_CREDENTIALS_PATH): '
-        read -r cred_env || true
-        [ -n "$cred_env" ] || die "no env var entered — nothing was written."
-        printf '   Is that credential a pasted token or a file path? [token/file] '
-        read -r cred_kind || true
-        case "$cred_kind" in f | file) cred_kind="file" ;; *) cred_kind="token" ;; esac
-        _ADD_ARGV=("$name" --run "$runcmd" --cred-env "$cred_env" --cred-kind "$cred_kind")
+        printf '   OAuth scopes, space-separated (blank for none): '
+        read -r scopes || true
+        _ADD_ARGV=("$name" --url "$url" --oauth)
+        for s in $scopes; do _ADD_ARGV+=(--scope "$s"); done
     else
-        printf '   The MCP endpoint URL (https://…): '
-        read -r url || true
-        [ -n "$url" ] || die "no URL entered — nothing was written."
         printf '   Auth header the service wants [Authorization: Bearer]: '
         read -r header || true
         [ -n "$header" ] || header="Authorization: Bearer"
         _ADD_ARGV=("$name" --url "$url" --header "$header")
     fi
+
+    # Asked for BOTH kinds. Left blank a route may reach every path on its upstream with the
+    # credential attached — and for a user-consent OAuth route this is the only enforcement
+    # the broker itself can apply, since the scopes were fixed at the consent screen.
+    printf '   Path prefixes it may reach, space-separated (blank = all of %s): ' \
+        "$(printf '%s' "$url" | sed -e 's#^[a-z]*://##' -e 's#/.*##')"
+    read -r paths || true
+    for s in $paths; do _ADD_ARGV+=(--allow-path "$s"); done
+
+    # Opt-in, and asked last because it is the one thing a REST route must NOT get: an entry
+    # in .claude.json makes Claude Code speak MCP to it and report a failed server.
+    printf '   Is this an MCP server? Name to register it under (blank = REST only): '
+    read -r mcpname || true
+    [ -n "$mcpname" ] && _ADD_ARGV+=(--mcp-name "$mcpname")
     echo
 }
 
@@ -790,7 +750,7 @@ _broker_add_finish() {
     fi
 }
 
-# `kib broker add [<name> --url … | <name> --run … --cred-env …]`. Bare + a tty asks instead.
+# `kib broker add <name> --url … [--header … | --oauth]`. Bare + a tty asks instead.
 provider_add() {
     need_python
     mkdir -p "$PROVIDERS_DIR" && chmod 700 "$PROVIDERS_DIR"
@@ -798,7 +758,7 @@ provider_add() {
     if [ $# -eq 0 ]; then
         [ -t 0 ] || die "kib broker add needs a terminal, or the flags:" \
             "kib broker add <name> --url <https-url> [--header \"Name: Scheme\"]" \
-            "kib broker add <name> --run \"<cmd>\" --cred-env <ENV> [--cred-kind file]"
+            "kib broker add <name> --url <https-url> --oauth [--scope <scope>]"
         _broker_add_wizard
         argv=(${_ADD_ARGV[@]+"${_ADD_ARGV[@]}"})
     fi
@@ -816,16 +776,22 @@ _broker_usage() {
     cat <<'USAGE'
 kib broker — the credential broker's host-only credentials and routes.
 
-  kib broker add [name …]      define a brokered MCP  (bare = ask the questions)
+  kib broker add [name …]      define a brokered route (bare = ask the questions)
   kib broker login [name]      store a credential, host-only, mode 600
   kib broker logout [name]     remove one
   kib broker status            every route: credential, URL, and any refused definition
   kib broker probe [name]      does the stored credential still work upstream?
 
-  kib broker add linear --url https://mcp.linear.app/sse --header "Authorization: Bearer"
-  kib broker add gsc --run "uvx mcp-search-console" --cred-env GSC_CREDENTIALS_PATH \
-      --cred-kind file --env GSC_SKIP_OAUTH=true
+  kib broker add linear --url https://mcp.linear.app/sse --header "Authorization: Bearer" \
+      --mcp-name linear
+  kib broker add gsc --url https://searchconsole.googleapis.com --oauth \
+      --scope https://www.googleapis.com/auth/webmasters.readonly \
+      --allow-path /webmasters/v3/ --allow-path /v1/urlInspection/
 
+--oauth stores an OAuth 2.0 config instead of a secret and mints short-lived access tokens in
+the broker. Without --mcp-name a route is REST only: curl it at its URL, no .claude.json entry.
+--allow-path pins what the credential may reach on that host; with none, the route may reach
+every path on it.
 Routes need no port: they share one listener and are told apart by name. Every verb runs
 host-side and never starts a container, so they work while the sandbox is broken or unbuilt.
 USAGE

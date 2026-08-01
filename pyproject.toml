@@ -31,8 +31,10 @@ strict = true
 
 # fusepy ships no type stubs and is imported under either name (PyPI 'fuse' /
 # Debian 'fusepy'), so the FUSE sidecars cannot be strict about it.
+# cryptography exists only in the image (the broker's RS256 grant); kib/broker must still
+# type-check on a host that has never seen it — hence the lazy import in oauth.py.
 [[tool.mypy.overrides]]
-module = ["fuse", "fusepy"]
+module = ["fuse", "fusepy", "cryptography.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

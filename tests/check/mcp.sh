@@ -40,37 +40,39 @@ _mcp_run() {
     ) </dev/null
 }
 
-# No MCP is built in, so enabled/hosted sets come from USER defs in providers.d + a present
-# credential file (exactly a real user's setup). An orphan token with no def is ignored.
+# Only the LLM row is built in, so the enabled set comes from USER defs in providers.d + a
+# present credential file (exactly a real user's setup). An orphan token with no def is ignored,
+# and an OAuth route counts exactly like a static one — its credential is just a config file.
 en="$(_mcp_run '
   mkdir -p "$KIB_DIR/providers.d"
-  printf "{\"id\":\"remote\",\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://mcp.remote.example\",\"inject_header\":\"Authorization\",\"inject_template\":\"Bearer {secret}\",\"mcp_path\":\"/http\"}" > "$KIB_DIR/providers.d/remote.json"
-  printf "{\"id\":\"local\",\"delivery\":\"hosted_mcp\",\"credential_kind\":\"file_path\",\"host_run\":[\"uvx\",\"some-mcp\"],\"credential_env\":\"L_CRED\",\"token_basename\":\"local.json\"}" > "$KIB_DIR/providers.d/local.json"
-  printf x>"$KIB_DIR/claude-token"; printf y>"$KIB_DIR/remote-token"; printf "{}">"$KIB_DIR/local.json"
+  printf "{\"id\":\"remote\",\"upstream_origin\":\"https://mcp.remote.example\",\"path\":\"/http\"}" > "$KIB_DIR/providers.d/remote.json"
+  printf "{\"id\":\"gsc\",\"credential_kind\":\"oauth\",\"upstream_origin\":\"https://searchconsole.googleapis.com\"}" > "$KIB_DIR/providers.d/gsc.json"
+  printf x>"$KIB_DIR/claude-token"; printf y>"$KIB_DIR/remote-token"; printf "{}">"$KIB_DIR/gsc.json"
   printf z>"$KIB_DIR/orphan-token"   # no def → must NOT appear
-  echo "E=[$(broker_enabled_providers)] H=[$(hosted_mcp_providers)]"')"
+  echo "E=[$(broker_enabled_providers)]"')"
+# Order is registry order: the LLM row first, then user defs in sorted-filename order.
 case "$en" in
-    *"E=[claude remote]"*"H=[local]"*)
-        pass "enabled = LLM + user reverse route; hosted = user local; orphan token ignored"
+    *"E=[claude gsc remote]"*)
+        pass "enabled = LLM + static route + oauth route; orphan token ignored"
         ;;
-    *) fail "broker_enabled_providers / hosted_mcp_providers wrong" "$en" ;;
+    *) fail "broker_enabled_providers wrong" "$en" ;;
 esac
 
-# .claude.json injection: broker + hosted URLs written from the user defs' ports, the user's
-# own entry kept, and stale entries WE own pruned.
+# .claude.json injection: a named MCP route gets a broker URL, a REST-only route gets NO entry,
+# the user's own entry is kept, and stale entries WE own are pruned.
 inj="$(_mcp_run '
   mkdir -p "$KIB_DIR/providers.d"
-  printf "{\"id\":\"remote\",\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://mcp.remote.example\",\"inject_header\":\"Authorization\",\"inject_template\":\"Bearer {secret}\",\"mcp_path\":\"/http\",\"mcp_server_name\":\"remote\"}" > "$KIB_DIR/providers.d/remote.json"
-  printf "{\"id\":\"local\",\"delivery\":\"hosted_mcp\",\"credential_kind\":\"file_path\",\"host_run\":[\"uvx\",\"some-mcp\"],\"credential_env\":\"L_CRED\",\"mcp_path\":\"/mcp\",\"mcp_server_name\":\"local\",\"token_basename\":\"local.json\"}" > "$KIB_DIR/providers.d/local.json"
-  printf y>"$KIB_DIR/remote-token"
+  printf "{\"id\":\"remote\",\"upstream_origin\":\"https://mcp.remote.example\",\"path\":\"/http\",\"mcp_server_name\":\"remote\"}" > "$KIB_DIR/providers.d/remote.json"
+  printf "{\"id\":\"gsc\",\"credential_kind\":\"oauth\",\"upstream_origin\":\"https://searchconsole.googleapis.com\"}" > "$KIB_DIR/providers.d/gsc.json"
+  printf y>"$KIB_DIR/remote-token"; printf "{}">"$KIB_DIR/gsc.json"
   printf "{\"mcpServers\":{\"myown\":{\"type\":\"http\",\"url\":\"http://x\"},\"remote\":{\"_kibBroker\":true,\"url\":\"STALE_NEW\"}}}" > "$SESSION_BASE/.claude.json"
-  BROKER_ENABLED=1 HOSTED_MCP_UP="local" inject_brokered_mcps >/dev/null 2>&1
+  BROKER_ENABLED=1 inject_brokered_mcps >/dev/null 2>&1
   cat "$SESSION_BASE/.claude.json"')"
 if printf '%s' "$inj" | grep -q "kib-broker:8100/mcp/remote/http" \
-    && printf '%s' "$inj" | grep -q "local:8100/mcp" \
+    && ! printf '%s' "$inj" | grep -q "gsc" \
     && printf '%s' "$inj" | grep -q '"myown"' \
     && ! printf '%s' "$inj" | grep -q "STALE_NEW"; then
-    pass "inject: writes broker+hosted URLs, keeps the user entry, prunes ours"
+    pass "inject: named MCP gets a URL, REST-only route none, user entry kept, ours pruned"
 else
     fail "inject_brokered_mcps wrong" "$(printf '%s' "$inj" | tr -d '\n ' | head -c 220)"
 fi
@@ -79,7 +81,7 @@ fi
 # the inline blob moves into that route's token (mode 600) and leaves the project.
 reuse="$(_mcp_run '
   mkdir -p "$KIB_DIR/providers.d"
-  printf "{\"id\":\"svc\",\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://api.svc.example\",\"inject_header\":\"Authorization\",\"inject_template\":\"Bearer {secret}\",\"token_basename\":\"svc-token\",\"mcp_path\":\"/mcp\"}" > "$KIB_DIR/providers.d/svc.json"
+  printf "{\"id\":\"svc\",\"upstream_origin\":\"https://api.svc.example\",\"token_basename\":\"svc-token\",\"path\":\"/mcp\"}" > "$KIB_DIR/providers.d/svc.json"
   printf "{\"mcpServers\":{\"svc2\":{\"type\":\"http\",\"url\":\"https://api.svc.example/mcp\",\"headers\":{\"Authorization\":\"Bearer TOK123\"}}}}" > ".mcp.json"
   mcp_adopt svc2 >/dev/null 2>&1
   echo "dup=$([ -f "$KIB_DIR/providers.d/svc2.json" ] && echo yes || echo no)"
@@ -132,7 +134,7 @@ fi
 # The Claude token's upstream cannot be hijacked by a user provider file named after a preset.
 ovr="$(_mcp_run '
   mkdir -p "$KIB_DIR/providers.d"
-  printf "{\"id\":\"claude\",\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://evil.example\",\"inject_header\":\"a\",\"inject_template\":\"b\"}" > "$KIB_DIR/providers.d/claude.json"
+  printf "{\"id\":\"claude\",\"upstream_origin\":\"https://evil.example\"}" > "$KIB_DIR/providers.d/claude.json"
   kib_py broker.cli host-config claude 2>/dev/null | sed -n "s/KIB_BROKER_BASE_URL_ENV=//p" | tr -d "'"'"'"')"
 if [ "$ovr" = "ANTHROPIC_BASE_URL" ]; then
     pass "a user provider def cannot override a built-in preset (claude upstream unchanged)"
@@ -245,14 +247,16 @@ fi
 # nothing at all, so a hand-authored route vanished without a word.
 chk="$(_mcp_run '
   mkdir -p "$KIB_DIR/providers.d"
-  printf "{\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://x.example\",\"listen_port\":8100,\"inject_header\":\"a\",\"inject_template\":\"b\"}" > "$KIB_DIR/providers.d/oldport.json"
-  printf "{\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://x.example\"}" > "$KIB_DIR/providers.d/nofields.json"
+  printf "{\"upstream_origin\":\"https://x.example\",\"credential_kind\":\"file_path\"}" > "$KIB_DIR/providers.d/badkind.json"
+  printf "{\"upstream_origin\":\"https://x.example/v3\"}" > "$KIB_DIR/providers.d/pathorigin.json"
+  printf "{\"upstream_origin\":\"https://x.example\",\"mcp_path\":\"/http\"}" > "$KIB_DIR/providers.d/oldkeys.json"
   printf "{}" > "$KIB_DIR/providers.d/directus"
   _broker_check_providers 2>&1')"
-if printf '%s' "$chk" | grep -q "oldport.json.*listen_port.*obsolete" \
-    && printf '%s' "$chk" | grep -q "nofields.json.*inject_header.*missing" \
+if printf '%s' "$chk" | grep -q "badkind.json.*credential_kind" \
+    && printf '%s' "$chk" | grep -q "pathorigin.json.*upstream_origin.*path" \
+    && printf '%s' "$chk" | grep -q "oldkeys.json.*mcp_path.*renamed" \
     && printf '%s' "$chk" | grep -q "directus: only \*.json"; then
-    pass "check-providers: names every bad def and the field at fault, incl. a non-.json file"
+    pass "check-providers: names every bad def and the field at fault, incl. a renamed key"
 else
     fail "check-providers did not name all three bad defs" "$chk"
 fi
@@ -261,8 +265,8 @@ fi
 # of the table still resolves. (The bind itself is proved fail-soft in tests/broker/.)
 soft="$(_mcp_run '
   mkdir -p "$KIB_DIR/providers.d"
-  printf "{\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://x.example\"}" > "$KIB_DIR/providers.d/bad.json"
-  printf "{\"id\":\"good\",\"delivery\":\"reverse_proxy_mcp\",\"upstream_origin\":\"https://ok.example\",\"inject_header\":\"Authorization\",\"inject_template\":\"Bearer {secret}\"}" > "$KIB_DIR/providers.d/good.json"
+  printf "{\"upstream_origin\":\"nonsense\"}" > "$KIB_DIR/providers.d/bad.json"
+  printf "{\"id\":\"good\",\"upstream_origin\":\"https://ok.example\"}" > "$KIB_DIR/providers.d/good.json"
   printf x>"$KIB_DIR/claude-token"; printf y>"$KIB_DIR/good-token"
   echo "enabled=[$(broker_enabled_providers)]"; echo "rc=$?"')"
 # The dir is shared with the sections above, so match on membership, not on the whole set.
@@ -284,8 +288,8 @@ fi
 #
 # The mount loop is EXTRACTED from host/broker.sh, never retyped, so this compares the two
 # implementations that actually ship. Fixture: one LLM row with a token, one reverse route with a
-# token, one reverse route WITHOUT (belongs to neither list), one hosted row (its own sidecar, so
-# neither list either). A plain subshell, not _mcp_run: the extracted loop carries a heredoc, and
+# token, one reverse route WITHOUT (so it belongs to neither), one OAuth route with its config
+# present. A plain subshell, not _mcp_run: the extracted loop carries a heredoc, and
 # routing that through another layer of eval quoting is what makes this unreadable.
 _tokwalk="$(
     set +e
@@ -296,14 +300,14 @@ _tokwalk="$(
     . "$KIB_ROOT/host/_load.sh"
     mkdir -p "$KIB_DIR/providers.d" || exit 1
     for _r in withtok notok; do
-        printf '{"id":"%s","delivery":"reverse_proxy_mcp","upstream_origin":"https://%s.example","inject_header":"Authorization","inject_template":"Bearer {secret}","mcp_path":"/http"}' \
+        printf '{"id":"%s","upstream_origin":"https://%s.example","path":"/http"}' \
             "$_r" "$_r" >"$KIB_DIR/providers.d/$_r.json"
     done
-    printf '{"id":"hosted","delivery":"hosted_mcp","credential_kind":"file_path","host_run":["uvx","m"],"credential_env":"C","token_basename":"hosted.json"}' \
-        >"$KIB_DIR/providers.d/hosted.json"
+    printf '{"id":"oauthy","credential_kind":"oauth","upstream_origin":"https://o.example"}' \
+        >"$KIB_DIR/providers.d/oauthy.json"
     printf x >"$KIB_DIR/claude-token"
     printf y >"$KIB_DIR/withtok-token"
-    printf '{}' >"$KIB_DIR/hosted.json"
+    printf '{}' >"$KIB_DIR/oauthy.json"
     BROKER_DIR="$KIB_DIR/bk"
     BROKER_OUT="$BROKER_DIR/out"
     mkdir -p "$BROKER_OUT"
@@ -321,11 +325,11 @@ print("paths=" + ",".join(sorted(d["token_paths"])))' "$BROKER_DIR/config.json"
 _tw_en="$(printf '%s\n' "$_tokwalk" | sed -n 's/^enabled=//p')"
 _tw_pa="$(printf '%s\n' "$_tokwalk" | sed -n 's/^paths=//p')"
 _tw_mo="$(printf '%s\n' "$_tokwalk" | sed -n 's/^mounted=//p')"
-if [ "$_tw_en" = "claude,withtok" ] && [ "$_tw_pa" = "$_tw_en" ] && [ "$_tw_mo" = "$_tw_en" ]; then
-    pass "every enabled broker route gets its token mounted (both walks agree)"
+if [ "$_tw_en" = "claude,oauthy,withtok" ] && [ "$_tw_pa" = "$_tw_en" ] && [ "$_tw_mo" = "$_tw_en" ]; then
+    pass "every enabled broker route gets its credential mounted (both walks agree)"
 else
-    fail "the broker's enabled set and its token mounts disagree" \
-        "enabled=[$_tw_en] token_paths=[$_tw_pa] mounted=[$_tw_mo] — all should be claude,withtok"
+    fail "the broker's enabled set and its credential mounts disagree" \
+        "enabled=[$_tw_en] token_paths=[$_tw_pa] mounted=[$_tw_mo] — all: claude,oauthy,withtok"
 fi
 unset _tokwalk _tw_en _tw_pa _tw_mo _r
 

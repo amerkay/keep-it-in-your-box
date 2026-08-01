@@ -14,6 +14,9 @@ RUN apt-get update && apt-get install -y curl \
     jq ripgrep fzf fd-find bat tmux \
     # Languages and runtimes
     python3 python3-pip python3-venv \
+    # RS256 for the broker's OAuth service-account grant (kib/broker/oauth.py, lazily
+    # imported — kib/broker must still import on a host that has never seen this).
+    python3-cryptography \
     # Database clients (minimal set)
     postgresql-client sqlite3 \
     # Network and system tools
@@ -61,6 +64,7 @@ RUN node --version && npm --version \
     && python3 -c "from fusepy import FUSE, FuseOSError, Operations; print('fusepy OK')" \
     && rsvg-convert --version \
     && python3 -c "import PIL, cairosvg; print('Pillow', PIL.__version__, '/ cairosvg', cairosvg.__version__)" \
+    && python3 -c "from cryptography.hazmat.primitives.asymmetric import padding; print('cryptography OK')" \
     && grep -qx 'user_allow_other' /etc/fuse.conf
 
 # Install packages not available in Debian repos
@@ -77,10 +81,6 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
     && mv /root/.local/bin/uvx /usr/local/bin/uvx
 
 # Install JavaScript/TypeScript development tools.
-# supergateway bridges a stdio MCP server to streamable-HTTP; the credential-broker's
-# hosted-MCP sidecar (host/broker.sh start_hosted_mcp) runs it to expose a local/client-signed MCP
-# (e.g. Google Search Console) over the broker network without the credential entering the
-# agent container. Pre-installed so the sidecar needs no runtime npm fetch.
 #
 # These land in the SYSTEM prefix, which a version switch does not move — unlike npm/npx, which
 # ship inside each node tarball. Only pnpm cares (11.x needs node >=22.13 and CRASHES below),
@@ -89,8 +89,7 @@ RUN npm install -g \
     ts-node \
     tsx \
     yarn \
-    pnpm \
-    supergateway
+    pnpm
 
 
 # Mountpoint for the user-level Node cache (host/node.sh) — nothing is baked. Created empty so
