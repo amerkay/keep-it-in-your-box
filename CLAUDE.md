@@ -176,6 +176,11 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   they took a small file from 2.31 ms to 0.067 ms. **`FUSE_PASSTHROUGH` is not the next step**: it
   needs kernel 6.9+ (Ubuntu 24.04 GA is 6.8, WSL2 is 5.15/6.6) and libfuse 3.17 low-level, and
   fusepy is ctypes over libfuse **2**. Regression-guarded. (`redaction-config-guard.md`)
+- **The sidecar raises its own `RLIMIT_NOFILE` at startup — don't delete it, and don't add
+  `--ulimit` alongside it.** Its fd table is the container-global ceiling on concurrently-open
+  project files, and containerd's 1024 soft default killed parallel JS builds with `EMFILE` naming
+  project paths. In-box `ulimit -n` hides this — Node raises its own soft limit, so every shell
+  reads 524288; `/proc/1/limits` is the honest one. (`redaction-config-guard.md`)
 - **Never `kill -TERM "-$pid"` from a pidfile — call `kill_pgrp`**, and never require `KIB_ROOT`
   from the environment in an *executed* host script (`detach_pgrp` gives it a fresh env; derive it
   from `$0`). A dead detached child's pid gets recycled into the next launch's own process group,

@@ -20,6 +20,7 @@ import errno
 import json
 import os
 import re
+import resource
 import sys
 from collections.abc import Sequence
 from pathlib import PurePosixPath
@@ -658,6 +659,23 @@ class Redact(Operations):  # type: ignore[misc]
         return 0
 
 
+def raise_fd_limit() -> tuple[int, int]:
+    """Lift RLIMIT_NOFILE to its hard ceiling; returns the soft limit (before, after).
+
+    Every file open under the mount holds an fd in THIS process, so one soft limit is the
+    container-global ceiling on concurrently-open project files, shared by every process in the
+    box. containerd's default soft limit is 1024 — under what one parallel JS build holds — and
+    it surfaces as EMFILE naming a project path (`redaction-config-guard.md`).
+    """
+    before, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+    except (OSError, ValueError):  # a hard limit we may not take in full; keep what we have
+        pass
+    # Re-read rather than assume the set landed, so the startup line never overstates the cap.
+    return before, resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="kib-fuse", description="redacting FUSE passthrough")
     ap.add_argument("--src", required=True)
@@ -681,9 +699,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     guard_count = len(rule_list)
     rule_list += rules.load(args.patterns_file)
     ops = Redact(args.src, rule_list, uid=args.uid, gid=args.gid)
+    fd_before, fd_after = raise_fd_limit()
     print(
         f"kib-fuse: src={args.src} mnt={args.mnt} guard={guard_count} "
         f"remap={ops.base_uid}:{ops.base_gid}->{args.uid}:{args.gid} "
+        f"nofile={fd_before}->{fd_after} "
         f"rules={[str(r) for r in rule_list]}",
         file=sys.stderr,
         flush=True,

@@ -144,7 +144,10 @@ legitimate need is a conversation, not a workaround.
 logged where you cannot see it (the FUSE sidecar's stderr, a different container), so do not
 speculate about the cause beyond the rules above. `EACCES` is an ordinary permission problem:
 check the mode and owner, and treat it as a normal error. `EROFS` is a read-only mount — under
-`~/.nvm/versions/node/` that is the shared Node cache above.
+`~/.nvm/versions/node/` that is the shared Node cache above. **`EMFILE` naming a project path is
+not automatically your code's**: `ulimit -n` in here reports the limit Node raised for itself and
+says nothing about the FUSE sidecar's own fd table or about `fs.inotify.max_user_instances` (256,
+not raisable without root), and both are container-global. Say so before you refactor around it.
 
 ## What persists
 

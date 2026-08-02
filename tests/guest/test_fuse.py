@@ -10,6 +10,7 @@ imports without libfuse, and no real mount is touched.
 
 import errno
 import os
+import resource
 import sys
 import types
 from collections.abc import Callable
@@ -738,3 +739,35 @@ def test_adoption_failure_does_not_fail_the_create(
     monkeypatch.setattr(os, "fchown", _boom)
     os.close(redact("", uid=501, gid=20).create("/new", 0o644))
     assert (tmp_path / "src" / "new").exists()
+
+
+# ── the sidecar's fd table is the whole box's ceiling ────────────
+def test_the_fd_limit_is_raised_to_the_hard_ceiling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """containerd hands a python process soft 1024, and every open file under the mount holds an
+    fd here — so unraised it caps the entire container at ~1020 concurrent project files."""
+    calls: list[tuple[int, tuple[int, int]]] = []
+    limits = (1024, 524288)
+
+    def _get(_which: int) -> tuple[int, int]:
+        return limits
+
+    def _set(which: int, pair: tuple[int, int]) -> None:
+        nonlocal limits
+        calls.append((which, pair))
+        limits = pair
+
+    monkeypatch.setattr(resource, "getrlimit", _get)
+    monkeypatch.setattr(resource, "setrlimit", _set)
+    assert fuse.raise_fd_limit() == (1024, 524288)
+    assert calls == [(resource.RLIMIT_NOFILE, (524288, 524288))]
+
+
+def test_a_refused_fd_limit_raise_is_survivable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mount matters more than the ceiling: report the real soft limit, never abort."""
+
+    def _boom(_which: int, _pair: tuple[int, int]) -> None:
+        raise ValueError("current limit exceeds maximum limit")
+
+    monkeypatch.setattr(resource, "getrlimit", lambda _w: (1024, 524288))
+    monkeypatch.setattr(resource, "setrlimit", _boom)
+    assert fuse.raise_fd_limit() == (1024, 1024)
