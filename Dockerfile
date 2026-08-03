@@ -42,10 +42,11 @@ RUN apt-get update && apt-get install -y curl \
     direnv \
     # Required for Claude Code's built-in sandbox
     bubblewrap socat \
-    # FUSE runtime for the .kibignore redacting mount.
-    # trixie's 64-bit time_t transition renamed libfuse2 -> libfuse2t64, and fusepy is
-    # packaged, so it comes from apt instead of a PEP 668 --break-system-packages override.
-    fuse3 libfuse2t64 python3-fusepy \
+    # FUSE runtime for the .kibignore redacting mount. python3-yaml is the redaction
+    # renderer's YAML parser (kib/guest/fuse.py), not a build-time tool.
+    # trixie's 64-bit time_t transition renamed libfuse2 -> libfuse2t64, and both are
+    # packaged, so they come from apt instead of a PEP 668 --break-system-packages override.
+    fuse3 libfuse2t64 python3-fusepy python3-yaml \
     && rm -rf /var/lib/apt/lists/*
 
 # Runtime config for the packages above. Its own RUN so editing either line is a
@@ -62,6 +63,7 @@ RUN echo 'user_allow_other' > /etc/fuse.conf \
 # have both been silently absent before.
 RUN node --version && npm --version \
     && python3 -c "from fusepy import FUSE, FuseOSError, Operations; print('fusepy OK')" \
+    && python3 -c "import yaml; print('PyYAML', yaml.__version__)" \
     && rsvg-convert --version \
     && python3 -c "import PIL, cairosvg; print('Pillow', PIL.__version__, '/ cairosvg', cairosvg.__version__)" \
     && python3 -c "from cryptography.hazmat.primitives.asymmetric import padding; print('cryptography OK')" \

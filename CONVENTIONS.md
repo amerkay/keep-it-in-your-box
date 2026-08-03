@@ -44,9 +44,12 @@ config above — is in the README's [editor setup](README.md#editor-setup-vs-cod
 - 4-space indent; `snake_case` functions/variables, `PascalCase` classes, `UPPER_CASE` constants.
 - Docstrings on every module, class and non-trivial function (PEP 257). Comments carry the *why*
   — the rules this repo has re-learned the hard way are worth a sentence each.
-- **Stdlib only in anything the container runs.** Everything under `kib/` runs off the image's
-  bare `python3`; a pip dependency there breaks the launch path. `requirements-dev.txt` is for
-  the lint and test toolchain, not for runtime.
+- **Stdlib, or apt, in anything the container runs — never pip.** Everything under `kib/` runs
+  off the image's bare `python3`, where a pip install is a PEP 668 refusal and breaks the launch
+  path. A third-party module has to arrive as a Debian package in the Dockerfile
+  (`python3-fusepy`, `python3-cryptography`, `python3-yaml`) and gets a smoke-test line there.
+  `requirements-dev.txt` is the lint and test toolchain; a runtime module appears in it only so
+  the suites can import one on a host that has never built the image.
 - **`kib/shared/` may not import `kib.host` or `kib.guest`.** It is the layer both sides share;
   a back-edge drags host-only code into the container.
 

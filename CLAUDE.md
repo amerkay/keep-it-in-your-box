@@ -204,10 +204,22 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   can `git commit`, so it decides what "tracked" means, and a committed `.vscode/tasks.json`
   checks out pristine past a dirty-file detector. The anchor stays immutable; that is what makes a
   copy of it safe. (`redaction-config-guard.md`)
-- **Don't add a `[mask]` section — `[redact]` is format-aware** — JSON and `.env*` read as keys
-  with values replaced, everything else keeps the stub. Making it a policy choice needs a third
-  verdict, a precedence table and an enable path, and lets a hostile repo pick the leakier
+- **Don't add a `[mask]` section — `[redact]` is format-aware** — dotenv, JSON and YAML read as
+  keys with values replaced, everything else keeps the stub. Making it a policy choice needs a
+  third verdict, a precedence table and an enable path, and lets a hostile repo pick the leakier
   renderer for its own paths. Format is a property of the file. (`redaction-config-guard.md`)
+- **Shape is sniffed by `RENDERERS`, never read off the filename — and don't reorder it.**
+  Name-based dispatch stubbed every project spelling its secrets file its own way
+  (`env_vars/env_prod`, `env-dev.yml`), which is the ask-the-user leak redaction exists to stop.
+  Dotenv leads (`A=1` is also a YAML scalar), JSON precedes its superset YAML, each vouches for
+  the WHOLE file, and the YAML one bails on an alias **found on the event stream, never by
+  regex** — the loader expands aliases, a billion-laughs file fits in `RENDER_MAX` many times
+  over and would exhaust the sidecar, and the regex tried first missed flow style. Sniffing is
+  off the hot path
+  entirely (only a *redacted* file reaches `render()`, and it is memoised), but keep the two
+  cheap bails that make it so: `":" not in text` before the `YAML_MAPPING` scan, and
+  `CSafeLoader` over `safe_load`, which hardcodes the pure-python one.
+  (`redaction-config-guard.md`)
 - **Shared assets are ONE open tier — don't re-lock `plugins`/`hooks`, and don't "harden" the tier
   by refusing scripts** — all five are rw and symlinked at canonical so authoring or installing one
   shares it. The `:ro` lock cost ~460 lines (mount-mode flag, lock witness, attach refusal, the

@@ -3,6 +3,10 @@
 # The shell tools are pinned binaries, not pip packages — see Dockerfile / CI:
 #   shfmt v3.13.1, shellcheck v0.10.0
 ruff==0.16.0
+# Runtime dependency of kib/guest/fuse.py's YAML redaction renderer, which the image itself gets
+# from apt (python3-yaml). Pinned here so the pytest suites can exercise `render()` on a host
+# that has never built the image — they stub fusepy, but a parser cannot be stubbed.
+PyYAML==6.0.3
 mypy==2.3.0
 # pytest runs the Python suites. tests/check/pytest.sh HARD-FAILS if it is missing rather
 # than skipping — a silently skipped suite reads as a pass, which is how a broken redaction

@@ -177,6 +177,40 @@ def test_a_dotenv_reads_as_its_key_names(redact: Callable[[str], Any], tmp_path:
     assert out == "API_KEY=<redacted>\nDB_URL=<redacted>\n"
 
 
+@pytest.mark.parametrize("name", ["env_prod", ".env_prod", "env-dev.yml", "settings"])
+def test_the_shape_is_sniffed_not_read_off_the_name(
+    redact: Callable[[str], Any], tmp_path: Path, name: str
+) -> None:
+    """The renderer used to dispatch on the name (`*.json`, `.env`, `.env.*`), so every project
+    that spells its secrets file another way got the stub — and the stub is what sends the agent
+    to ask the user for the value."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / name).write_text("API_KEY=s3cr3t\n")
+    out = redact(f"{name}\n").read(f"/{name}", 4096, 0, 0).decode()
+    assert out == "API_KEY=<redacted>\n"
+
+
+def test_a_yaml_secret_reads_as_its_keys(redact: Callable[[str], Any], tmp_path: Path) -> None:
+    """Nesting survives, every scalar leaf does not — serverless keeps its env in one of these."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "env-dev.yml").write_text(
+        "provider:\n  stage: dev\n  env:\n    API_KEY: s3cr3t\nregions:\n  - eu-west-1\n"
+    )
+    out = redact("env-dev.yml\n").read("/env-dev.yml", 4096, 0, 0).decode()
+    assert "s3cr3t" not in out and "eu-west-1" not in out
+    assert "API_KEY: <redacted>" in out and "provider:" in out and "stage: <redacted>" in out
+
+
+def test_a_byte_order_mark_does_not_cost_a_file_its_keys(
+    redact: Callable[[str], Any], tmp_path: Path
+) -> None:
+    """Each renderer vouches for the file entirely, so before utf-8-sig one BOM from a Windows
+    editor turned a perfectly ordinary .env into the stub."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / ".env").write_text("﻿API_KEY=s3cr3t\n")
+    assert redact("").read("/.env", 4096, 0, 0).decode() == "API_KEY=<redacted>\n"
+
+
 def test_a_json_secret_reads_as_its_structure(redact: Callable[[str], Any], tmp_path: Path) -> None:
     (tmp_path / "src").mkdir(exist_ok=True)
     (tmp_path / "src" / "creds.json").write_text('{"tok":"s3cr3t","n":{"list":[1,2]},"ok":true}')
@@ -191,18 +225,43 @@ def test_a_json_secret_reads_as_its_structure(redact: Callable[[str], Any], tmp_
         'CERT="-----BEGIN-----\nMIIsecret\n-----END-----"\n',  # value spans lines
         "NOTKEYVALUE\n",  # nothing parses as an assignment
         '{"unterminated": ',  # not JSON after all
+        "Deploy notes for MIIsecret.\nAPI_KEY=k\nMore prose.\n",  # one assignment among prose
+        "base: &a\n  k: MIIsecret\nprod: *a\n",  # a YAML alias: expanding it is the bomb
+        "k: [&x [*x]]\nMIIsecret: 1\n",  # recursive alias — loads, then blows the stack
+        "just a MIIsecret line of text\n",  # valid YAML, but a scalar rather than a mapping
+        "-----BEGIN RSA PRIVATE KEY-----\nMIIsecret\n-----END RSA PRIVATE KEY-----\n",  # a pem
     ],
 )
 def test_a_shape_the_parser_cannot_vouch_for_falls_back_to_the_stub(
     redact: Callable[[str], Any], tmp_path: Path, body: str
 ) -> None:
-    """A multi-line value's own interior lines match the key pattern, so a lenient parser
-    would print fragments of the secret as if they were names."""
+    """Every renderer vouches for the WHOLE file or declines it. A lenient one would print
+    fragments of a multi-line value as if they were names, or claim a prose file off a single
+    assignment and pass the rest off as absent."""
     (tmp_path / "src").mkdir(exist_ok=True)
     (tmp_path / "src" / ".env").write_text(body)
     out = redact("").read("/.env", 4096, 0, 0)
     assert out == fuse.STUB
     assert b"MIIsecret" not in out
+
+
+def test_a_yaml_bomb_is_stubbed_without_being_expanded(
+    redact: Callable[[str], Any], tmp_path: Path
+) -> None:
+    """The loader expands aliases, so this must be caught on the EVENT stream instead. A regex
+    over the text was the first attempt and missed flow style — where the sigil follows `[`
+    rather than whitespace — so these 212 bytes built 1.5 MB, and getattr alone is enough to
+    trigger it. The sidecar dying takes the project view down for every session."""
+    (tmp_path / "src").mkdir(exist_ok=True)
+    names = "abcdefghi"
+    bomb = 'a: [&a ["lol","lol","lol","lol","lol","lol","lol","lol","lol"]]\n' + "".join(
+        f"{names[i]}: [&{names[i]} [" + ",".join([f"*{names[i - 1]}"] * 9) + "]]\n"
+        for i in range(1, len(names))
+    )
+    assert len(bomb) < fuse.RENDER_MAX
+    (tmp_path / "src" / ".env").write_text(bomb)
+    assert redact("").read("/.env", 4096, 0, 0) == fuse.STUB
+    assert redact("").getattr("/.env")["st_size"] == len(fuse.STUB)
 
 
 def test_deeply_nested_json_falls_back_instead_of_erroring(

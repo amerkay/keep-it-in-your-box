@@ -47,8 +47,11 @@
 ## 🔴 Guarded paths — deliberate policy, not bugs. Not yours to bypass.
 
 - **Redacted** — `.env`, `.env.*`, anything in `.kibignore`: writes are refused, and a read gives
-  you the **key names with every value replaced** (`KEY=<redacted>`) for JSON and `.env*` files, a
-  flat stub for anything else. So you can see which settings exist — you can add a key, or tell
+  you the **key names with every value replaced** (`KEY=<redacted>`) whenever the file parses as
+  dotenv, JSON or YAML — **by shape, never by name**, so `env_vars/env_prod` and
+  `sls_config/env-dev.yml` render the same as `.env` does. Anything no parser can vouch for
+  keeps the flat stub, and a file that is *partly* one of these shapes is refused rather than
+  half-rendered. So you can see which settings exist — you can add a key, or tell
   the user which one is missing — but never a value. Need one? Ask. Exactly three placeholder
   spellings are exempt and work normally — `.env.example`, `.env.sample`, `.env.template` — each
   along with the write siblings an editor makes *of it* (`<name>.tmp.*`, `<name>~`), so Edit and

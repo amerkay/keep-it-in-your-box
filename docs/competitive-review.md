@@ -199,7 +199,7 @@ against a live view, and cover `sub/.git/config`, `.git/modules/<name>/config` a
 
 | Project | Mechanism | Enforced below the agent? | On by default? | Covers files created after launch? |
 |---|---|---|---|---|
-| **`kib`** | FUSE — key names on read with values replaced for JSON and `.env*`, stub otherwise, `EPERM` on write | ✅ | ✅ | ✅ |
+| **`kib`** | FUSE — key names on read with values replaced for any dotenv/JSON/YAML file by shape, stub otherwise, `EPERM` on write | ✅ | ✅ | ✅ |
 | [cplt](https://github.com/navikt/cplt) | Kernel deny on 6 patterns (`.env*`, `.pem`, `.key`, `.p12`, `.pfx`, `.jks`) | ✅ **macOS only** | ✅ | macOS ✅ / Linux n/a |
 | [aicontainer](https://github.com/stefanoginella/aicontainer) | `PreToolUse` hook blocks `.env*` reads | ❌ agent-level | ✅ | ✅ (pattern-based) |
 | [yoloai](https://github.com/kstenerud/yoloai) | Copy honours `.gitignore` — excluded files simply absent | ✅ by omission | ✅ | ❌ create-time filter |
