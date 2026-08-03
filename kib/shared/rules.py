@@ -1,8 +1,8 @@
-"""`.kibignore` — parsed, matched and translated in exactly one place.
+"""`.kibignore` — parsed and matched in exactly one place.
 
-The FUSE guard, the launch-time audit gate and the `.gitignore` sync all read this module, so
-anchoring, negation and unsafe-rule skipping mean one thing everywhere. A second copy of this
-logic drifts from the first, and the drift shows up as a guard that admits a write.
+The FUSE guard and the launch-time audit gate both read this module, so anchoring, negation and
+unsafe-rule skipping mean one thing everywhere. A second copy of this logic drifts from the
+first, and the drift shows up as a guard that admits a write.
 
 Syntax (gitignore-shaped, with two additions the guard file needs):
 
@@ -183,37 +183,6 @@ def redact_optouts(guard_rules: Sequence[Rule], project_rules: Iterable[Rule]) -
     ]
 
 
-def to_gitignore(rules: Iterable[Rule], guard_rules: Sequence[Rule] = ()) -> list[str]:
-    """Translate project rules to gitignore syntax.
-
-    Bare names match anywhere (as they do in gitignore); a rule containing `/` anchors at
-    the repo root. `parse()` has already dropped the unsafe forms and detached the `!`, so
-    the anchoring `/` lands *after* the negation — `!/foo`, never `/!foo`, which would be a
-    literal path beginning with `!` and negate nothing.
-
-    A `[redact]` opt-out is dropped, never mirrored: the managed block exists to keep hidden
-    paths OUT of git, and kib must never un-ignore something. `!.env` mirrored verbatim lands
-    after the repo's own `.env` line and re-includes it — so opting the sandbox in to a `.env`
-    would quietly opt git in too, on the one file most repos ignore on purpose.
-    """
-    rule_list = list(rules)  # walked twice below; never trust the caller's iterable
-    optouts = set(redact_optouts(guard_rules, rule_list)) if guard_rules else set()
-    out = []
-    for rule in rule_list:
-        if rule.negated and rule.pattern in optouts:
-            continue
-        anchor = "/" if rule.anchor == EXACT else ""
-        out.append(f"{'!' if rule.negated else ''}{anchor}{rule.pattern}")
-    return out
-
-
-def _to_gitignore_cmd(guard_file: str, path: str) -> int:
-    """`to-gitignore <guard-file> <rule-file>` — one translated pattern per line, for bash."""
-    for line in to_gitignore(load(path), load(guard_file, guard=True)):
-        print(line)
-    return cli.OK
-
-
 def _optouts_cmd(guard_file: str, rule_file: str) -> int:
     """`optouts <guard-file> <rule-file>` — one un-redacting project rule per line."""
     for pattern in redact_optouts(load(guard_file, guard=True), load(rule_file)):
@@ -224,7 +193,7 @@ def _optouts_cmd(guard_file: str, rule_file: str) -> int:
 def main(argv: list[str]) -> int:
     return cli.dispatch(
         "kib.shared.rules",
-        {"to-gitignore": (_to_gitignore_cmd, 2), "optouts": (_optouts_cmd, 2)},
+        {"optouts": (_optouts_cmd, 2)},
         argv,
     )
 

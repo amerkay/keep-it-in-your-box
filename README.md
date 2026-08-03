@@ -110,7 +110,7 @@ No project here does everything. `kib` is the only one that **validates `.git/co
 - **One long-lived container per project**, `sleep infinity` as PID 1; every terminal attaches with `docker exec`, so Claude sees one PID namespace, one `/tmp`, one daemon — shared `/resume`, history and jobs, for free.
 - **A FUSE server** mounts the redacted project view in its own sidecar container, which the sandbox sees over your project path by mount propagation. Only the sidecar gets `CAP_SYS_ADMIN` and `/dev/fuse`; the sandbox is created without them and has no unredacted path to your project. Redaction covers files created after launch because it's a live view, not a bind mount.
 - **A Wayland proxy sidecar** holds the only real compositor socket, forwarding reads and refusing every write request.
-- **Host-side, at every launch:** a `.kibignore` → `.gitignore` sync, a `settings.json` validator that rejects inline `hooks[].command`, an audit gate over the repo's git config, and a DNS watcher that follows host network changes.
+- **Host-side, at every launch:** a `settings.json` validator that rejects inline `hooks[].command`, an audit gate over the repo's git config, and a DNS watcher that follows host network changes.
 
 Every design decision and its rationale — including the dead ends — lives in
 [`docs/design-notes/`](docs/design-notes/README.md); [`CLAUDE.md`](CLAUDE.md) carries the working

@@ -1,11 +1,9 @@
-"""The single `.kibignore` implementation — matcher AND gitignore emitter.
+"""The single `.kibignore` implementation — the parser and matcher.
 
-This suite carries the weight for three consumers at once: the FUSE guard, the launch-time
-audit gate, and the `.gitignore` sync. One ruleset, so a case that passes in one context
-can't silently diverge in another.
+This suite carries the weight for two consumers at once: the FUSE guard and the launch-time
+audit gate. One ruleset, so a case that passes in one context can't silently diverge in another.
 """
 
-from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -222,39 +220,3 @@ def test_matches_is_the_boolean_face_of_verdict() -> None:
     parsed = rules.parse(["secrets", "!secrets/ok"])
     assert rules.matches(parsed, "secrets") is True
     assert rules.matches(parsed, "other") is False
-
-
-# ── the gitignore emitter (the third consumer) ───────────────────
-@pytest.mark.parametrize(
-    ("rule", "expected"),
-    [
-        ("secret.txt", "secret.txt"),  # bare name matches anywhere, as in gitignore
-        ("dir/secret", "/dir/secret"),  # a '/'-containing rule anchors at the repo root
-        ("!keep", "!keep"),
-        ("!dir/keep", "!/dir/keep"),  # the anchoring '/' lands AFTER the '!'
-        ("trailing/", "trailing"),  # the trailing slash is stripped BEFORE anchoring
-    ],
-)
-def test_to_gitignore_translation(rule: str, expected: str) -> None:
-    assert rules.to_gitignore(rules.parse([rule])) == [expected]
-
-
-def test_to_gitignore_drops_the_unsafe_rules_the_matcher_drops() -> None:
-    """The emitter and the matcher must agree on which rules exist at all."""
-    assert rules.to_gitignore(rules.parse(["/abs", "../up", "ok"])) == ["ok"]
-
-
-def test_to_gitignore_never_mirrors_a_redact_opt_out() -> None:
-    """`!.env` in the managed block would re-include it past the repo's own `.env` line —
-    opting the sandbox in to a .env must not opt git in to committing it."""
-    guard = rules.load(str(GUARD), guard=True)
-    project = rules.parse(["!.env", "dir/*", "!dir/keep"])
-    assert rules.to_gitignore(project, guard) == ["/dir/*", "!/dir/keep"]
-
-
-def test_to_gitignore_cli(
-    tmp_path: Path, write_file: Callable[[str, str], Path], capsys: pytest.CaptureFixture[str]
-) -> None:
-    path = write_file(".kibignore", "secret\n!dir/keep\n!.env\n# note\n")
-    assert rules.main(["to-gitignore", str(GUARD), str(path)]) == 0
-    assert capsys.readouterr().out.splitlines() == ["secret", "!/dir/keep"]

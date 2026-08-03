@@ -251,11 +251,10 @@ publish_ports_resolve
 kib_identity
 kib_prepare_session
 
-# Warn (never block) if an MCP config carries an inline credential the agent can read, and
-# mirror the redaction rules into .gitignore. Both run on every launch — create and attach —
-# since either can change between sessions.
+# Warn (never block) if an MCP config carries an inline credential the agent can read, and name
+# the redaction opt-outs. Both run on every launch — create and attach — since either can change
+# between sessions.
 warn_inline_mcp_secrets
-sync_kibignore_gitignore
 report_kibignore_optouts
 
 kib_bring_up

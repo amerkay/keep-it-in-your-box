@@ -77,9 +77,10 @@
   - **It is read once, when the container is created**, so say this whenever you write one: the
     live layer keeps enforcing the OLD rules for the rest of the session, and the next `kib`
     **refuses to attach** until every session for this project is closed and the container
-    recreated. That next launch also mirrors the rules into the repo's `.gitignore` as a managed
-    block, and names any **already-tracked** file they match — `.gitignore` cannot catch those,
-    so the user has to `git rm --cached` them.
+    recreated. That next launch also names any **already-tracked** file the rules match, since
+    hiding a file from the sandbox does nothing about a copy already in git — the user has to
+    `git rm --cached` them. Nothing is written to `.gitignore` on their behalf; if untracked
+    matches should stay out of git too, say so and let them add the lines.
 - **Protected** — `.git/config`, `.git/hooks` (+ submodule/worktree equivalents), `.githooks/`,
   `.gitmodules`, `.vscode/`, `.devcontainer/`, `.envrc`,
   `.cursor/mcp.json`, `.zed/tasks.json`, `.zed/debug.json`, `.run/`, `.mvn/jvm.config`, `.exrc`,

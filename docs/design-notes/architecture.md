@@ -25,7 +25,7 @@ back-edge would drag host-only code into the container. Bash reaches Python exac
 - **`host/_load.sh`** — The one loader, in a fixed order: `core.sh` first (it defines `die`/`warn`), then `portable.sh` (all OS branching), then the subsystems — `image`, `config`, `redaction`, `gitguard`, `broker`, `mcp`, `desktop`, `net`, `node`, `lifecycle`.
 - **`host/core.sh`** — `die`/`warn`/`notify`, the `$KIB_STATE_ROOT` paths, `kib_py`, and the single `wait_until` the four hand-rolled poll loops collapsed into.
 - **`host/portable.sh`** — The **only** file allowed OS branching. Sourced by `bin/kib`, `tools/build-image.sh`, `host/sleep-guard.sh`. Provides `lock_fd`, `hash8`, `detach_pgrp`, `notify_desktop`, `preflight_platform`, `read_kib_config`, and sets `KIB_OS`/`is_macos`.
-- **`kib/shared/`** — Imported by both sides: `rules.py` (the ONE `.kibignore` parser, matcher and gitignore emitter), `dangerous.py` (the ONE git-INI and settings-JSON key table), `jsonio.py`, `cli.py` (the exit-code convention), `log.py`.
+- **`kib/shared/`** — Imported by both sides: `rules.py` (the ONE `.kibignore` parser and matcher), `dangerous.py` (the ONE git-INI and settings-JSON key table), `jsonio.py`, `cli.py` (the exit-code convention), `log.py`.
 - **`kib/host/`** — `config_scope.py`, `settings_scan.py`, `pins.py`, `gitaudit.py`, `mcp.py`.
 - **`kib/broker/`** — Credential broker: `registry` (the provider table) · `proxy` (guest) · `credential` (guest) · `helpers` (host) · `cli`. See [credential-broker.md](credential-broker.md).
 - **`guest/bin/resolv-sync.sh`** — POSIX-sh DNS watcher inside the main container. See [clipboard-and-dns.md](clipboard-and-dns.md#dns-sync).
