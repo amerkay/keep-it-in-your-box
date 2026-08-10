@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/readme/hero.svg" width="100%" alt="Keep It in Your Box — a Docker sandbox for AI coding agents. Run Claude Code in YOLO mode without the YOLO. The box redacts .env, validates .git/config, and filters what the clipboard can carry.">
+  <img src="docs/assets/readme/hero.svg" width="100%" alt="Keep It in Your Box — a Docker sandbox for AI coding agents. Run Claude Code in YOLO mode without the YOLO. The box redacts .env to key names with no values, keeps your API keys host-side behind a credential broker, and filters what the clipboard can carry.">
 </p>
 
 <p align="center">
@@ -7,88 +7,123 @@
   <img src="https://img.shields.io/badge/requires-Docker-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Requires Docker">
   <img src="https://img.shields.io/badge/isolation-FUSE%20%2B%20cap--drop%3DALL-e3b341?style=flat-square" alt="Isolation: FUSE plus cap-drop ALL">
   <img src="https://img.shields.io/badge/--dangerously--skip--permissions-safe-3fb950?style=flat-square" alt="Safe to run with dangerously-skip-permissions">
+  <img src="https://img.shields.io/badge/license-MIT-8b949e?style=flat-square" alt="MIT licensed">
 </p>
 
 <p align="center">
-  <b>A Docker sandbox for AI coding agents:</b> FUSE-redacted secrets, guarded host-executed config, a filtered clipboard.
+  <b>Let the agent off the leash. Keep your secrets, your API keys and your host out of its reach.</b>
 </p>
 
 <p align="center">
-  <a href="#box">What's in the box</a> &#183;
-  <a href="#compare">How it compares</a> &#183;
-  <a href="#hood">Under the hood</a> &#183;
+  <a href="#why-host">Why not your host?</a> &#183;
+  <a href="#secrets">Your <code>.env</code></a> &#183;
+  <a href="#broker">Your API keys</a> &#183;
   <a href="#start">Quick start</a> &#183;
-  <a href="#dev">Development</a> &#183;
-  <a href="#accepted-risks">Accepted risks</a>
+  <a href="#compare">How it compares</a> &#183;
+  <a href="#limits">Honest limits</a>
 </p>
 
----
+<h2 id="why-host"><img src="docs/assets/readme/section-why-host.svg" width="100%" alt="Why not run it on your host?"></h2>
 
-You want to run an AI coding agent with `--dangerously-skip-permissions` so it stops asking. The problem was never the agent editing your code — that's the job. It's everything *around* the code: your `.env`, your OAuth token, a `.git/config` the host runs on the next commit, a clipboard write that becomes keystrokes at your next paste. Keep It in Your Box puts the agent in a container that can touch the project and nothing that would let it reach back out to the host.
+`claude --dangerously-skip-permissions` is how everyone actually wants to work: the agent stops asking, you stop babysitting. The problem was never the agent editing your code — that's the job. It's everything *around* your code. On your host, the agent runs as **you**:
+
+- it can read `~/.ssh/id_rsa`, your browser profile, `~/.aws/credentials`, and every `.env` on the disk
+- it can write a `.git/config` your host executes at the next commit, or an `.envrc` your shell runs at the next `cd`
+- it can put text on your clipboard that becomes **keystrokes** at your next terminal paste
+
+And it reads untrusted text all day — a dependency's README, an issue thread, a scraped page, a CI log. Any one of those can carry an instruction it follows, and the agent has no way to tell that text apart from yours.
+
+**kib puts the agent in a container that can touch your project and nothing that reaches back out.**
 
 <p align="center">
-  <img src="docs/assets/readme/boundary.svg" width="100%" alt="At the box boundary: .env and .kibignore read as key names with every value replaced and writes refused; .git/config is validated and host-executed keys refused; clipboard writes are stripped to plain text while reads pass; the OAuth token is readable so rotate after untrusted runs; your project code is read-write.">
+  <img src="docs/assets/readme/boundary.svg" width="100%" alt="At the box boundary: .env and .kibignore read as key names with every value replaced and writes refused; .git/config is validated so hooks, aliases and ssh keys are refused while ordinary keys pass; clipboard writes arrive as plain text while reads pass through; API keys appear only as a placeholder because the broker holds the real key; your project code stays read and write.">
 </p>
 
-### Two ways to box an agent
+`.git/config` is content-**validated** rather than blocked outright, so `git remote add` and `push -u` still work while a new `core.hooksPath`, `core.sshCommand` or `alias.*` is refused. A guard that stops the attack by breaking your workflow has failed too, which is why `.githooks/`, `.vscode/`, `.devcontainer/` and `.envrc` are read-through and write-denied rather than hidden.
 
-The sharpest comparison is with Docker's brand-new **[Docker Sandboxes](https://www.docker.com/products/docker-sandboxes/) (`sbx`)** — because it makes the *opposite* trade. It wraps the agent in a microVM with a credential broker and deny-by-default egress, but mounts your workspace (including `.env`) readable and leaves `.git/config` for you to review afterwards. `kib` locks down exactly what `sbx` leaves open, and vice versa:
+<h2 id="secrets"><img src="docs/assets/readme/section-secrets.svg" width="100%" alt="How does it protect my .env?"></h2>
 
-| At the boundary | `kib` (this repo) | Docker Sandboxes (`sbx`) |
-|---|---|---|
-| Workspace secrets (`.env`) | **Redacted** — key names readable, every value replaced, even for files created after launch | Readable — the git root is mounted into the VM |
-| `.git/config` + host-run config | **Validated** — `hooksPath` / `sshCommand` / `alias.*` refused | Left to you — *"review Git hooks / Makefiles / CI after the session"* |
-| Clipboard | **Mediated** — reads pass, writes stripped to plain text | n/a — no host display is exposed |
-| Egress | Open — an accepted risk | **Deny-by-default** host proxy |
-| Credential | In the box, readable — *rotate after untrusted runs* | **Brokered** — injected on egress, never in the box |
-| Kernel isolation | Shared host kernel, `cap-drop=ALL` | **microVM**, own kernel |
+<p align="center">
+  <img src="docs/assets/readme/env-redacted.svg" width="100%" alt="Running cat .env on the host prints real values for STRIPE_KEY, DATABASE_URL, OPENAI_API_KEY and SESSION_SECRET. The same command inside the box prints the same key names with every value replaced by the word redacted. Writes are refused, files created after launch are covered, and dotenv, JSON and YAML are all recognised.">
+</p>
 
-Neither is strictly safer — they defend different halves. The [full 7-sandbox matrix is below](#compare).
+The file stays where it is; what changes is what comes back when the agent reads it. Your project reaches the box through a FUSE layer, so a read of a secrets file returns the **key names with every value replaced**, and a write to one is refused.
 
-<h2 id="box"><img src="docs/assets/readme/section-box.svg" width="100%" alt="What's in the box"></h2>
+- **Recognised by shape, not by filename.** dotenv, JSON and YAML are identified by actually parsing them, so a project's own `env_vars/env_prod` or `sls_config/env-dev.yml` redacts exactly like `.env` does, which guessing from the filename would miss.
+- **Files created *after* launch are covered.** It's a live view, not a bind mount — nothing is enumerated at startup, so a secret written an hour into the session is redacted the same way. No other sandbox in the [comparison below](#compare) does this.
+- **You pick the rest.** Anything matched by `.kibignore` joins the set; committed templates stay fully readable (`.env.example`, `.env.sample`, `.env.template`).
 
-- **Secrets are redacted, not just hidden.** A FUSE layer over the project refuses writes to `.env`, `.env.*`, and anything in `.kibignore` — including files created *after* launch, which no bind mount can cover. Reads give the agent the **key names with every value replaced** — dotenv, JSON and YAML, recognised by shape rather than by filename, so a project's own `env_vars/env_prod` renders like `.env` does; anything no parser can vouch for reads as a flat stub. It can see that `STRIPE_KEY` exists and needs setting without ever seeing one — which is what stops it asking you to paste the value into the chat. Three committed-template spellings stay fully readable: `.env.example`, `.env.sample`, `.env.template`.
-- **Host-executed config is guarded.** The real boundary isn't the container — it's what the *host* runs later. `.git/config` is content-validated on write (a new `core.hooksPath`, `core.sshCommand`, `alias.*`, `filter.*.clean`, or `include` is refused; `git remote add` and `push -u` still work). `.vscode/`, `.devcontainer/`, `.envrc`, `.githooks/`, `.claude/hooks/`, `.cursor/mcp.json`, `.ripgreprc`, git hooks and submodule/worktree equivalents are read-through, write-denied — files nothing but the host executes. Config that is *also* edited in normal work (`.claude/settings.json`, `.mcp.json`, `mise.toml`, …) stays writable and is reported by the audit gate instead, because a refused write there would stop the session over routine work. At launch and teardown an audit gate refuses to start a session into a poisoned config, and names any hidden path git is tracking anyway — without writing a hook into your repo.
-- **The clipboard is filtered, not handed over.** The host Wayland socket is proxied: *reads* pass (so image paste works), and a *write* reaches your clipboard only as plain text with control characters stripped out in flight — a verbatim write is host code execution at your next terminal paste (an embedded `ESC[201~` ends bracketed paste and the rest is typed). So select-to-copy works and the escape can't ride along. macOS gets the same filter through its `pbpaste` bridge, which cleans the text before it ever reaches `pbcopy`.
-- **Projects can't read each other, and `~/.claude` stays stock.** kib keeps your canonical `~/.claude`/`~/.claude.json` untouched and assembles each container from only *this* project's slice per launch (its transcripts, prompt history and `.claude.json` entry), merging changes back out on exit. So a plain host `claude` and `cc` share one login, one `--resume` list and one history — while no project's box can see another's data.
-- **One container per project, shared by every terminal.** Every terminal `docker exec`s into the same long-lived container, so `/resume`, prompt history and background jobs are shared across tabs. It's torn down only when the last session exits.
-- **Follows your network.** On Linux a lightweight watcher keeps the container's DNS in step with the host across wifi/VPN changes — no host-netns sidecar, works behind a per-connection host firewall. (Not needed on macOS: the engine VM tracks the host resolver.)
-- **Hardened by default.** `--cap-drop=ALL`, `no-new-privileges`, seccomp, AppArmor `docker-default`, an empty `CapEff` and a bounding set that never held `CAP_SYS_ADMIN`, no Docker socket, no host block devices. The default command is `claude --dangerously-skip-permissions` — safe *because* of the box.
-- **Linux and macOS.** One redaction topology on both: a FUSE sidecar serves the redacted view and it propagates into the sandbox over your project path. Docker or Docker Desktop.
+So the agent can see that `STRIPE_KEY` exists and still needs a value, and it never has to ask **you** to paste one into the chat.
 
-### Run it two ways
+<h2 id="broker"><img src="docs/assets/readme/section-broker.svg" width="100%" alt="Then how does it call my APIs?"></h2>
 
-Both names point at the **same** launcher, `bin/kib`. `kib` is the tool; `cc` is an alias for
-`kib claude`, so a line you copied from a vendor still works when you swap `claude`→`cc`.
+The box never holds the key. A broker on the host holds it and adds it to requests on their way out.
+
+<p align="center">
+  <img src="docs/assets/readme/broker-flow.svg" width="100%" alt="The box holds only a placeholder token and a base URL pointing at the broker. The broker sidecar, running with cap-drop=ALL, strips the placeholder and injects the real credential on the way out to api.anthropic.com or your own MCP or REST route. The real key stays host-side at ~/.keep-it-in-your-box, mode 600, in a directory the sandbox never mounts.">
+</p>
+
+Your real credentials live host-side, mode 600, in a directory the container never mounts. The box gets a **placeholder** plus a URL pointing at a `cap-drop=ALL` sidecar, which swaps the placeholder for the real credential on the way out. Egress can be wide open and there is still nothing in there worth stealing.
+
+That covers your Claude login by default. For everything else — any MCP server, any REST API — take the vendor's own install line and **change the first word**:
 
 ```bash
-cc                        # launch Claude Code in the sandbox
-kib exec bash             # drop into a shell in the sandbox
-kib exec python app.py    # run anything else in the sandbox
-kib broker status         # host-side credential management
-kib audit                 # what would the host execute out of this repo?
-kib help                  # the full verb table
-
-kib --node-version=20 claude   # this terminal runs on Node 20 (18|20|22|24 are baked; 26 is
-                               # the system default). Per terminal, no download, no restart.
-
-kib --publish=3000             # reach a dev server in the box at http://127.0.0.1:3000
-                               # (that host only, never the LAN). Remembered per project.
+cc mcp add --header "Authorization: Bearer <token>" --transport http linear https://mcp.linear.app/sse
+#  → 🔐 Intercepted an inline MCP credential and brokered it host-side — it never entered the sandbox.
 ```
 
-A container publishes **no** ports by default, and on macOS the host cannot route to its bridge
-IP at all — so `--publish` is the only way a host browser reaches a server running inside. Bind
-the server to `0.0.0.0` in there (`nuxt dev --host 0.0.0.0`, `vite --host`) or the published port
-has nothing to forward to. Ports are fixed when the container is created, so changing them needs
-every session for the project closed; `--publish=none` stops publishing.
+`cc` is an alias for `kib claude`, so any `claude …` line works verbatim. kib peels the token off **host-side, before anything reaches the box**, and wires up a header-free route in its place. Or declare one yourself; it prompts for the secret without echoing it:
 
-Verbs win over programs: `kib bash` is an **error**, not a shell — pass-through is explicit,
-via `kib exec`. Run either name from any project directory; the project is mounted at the same
-absolute path it has on the host.
+```bash
+kib broker add                        # asks the questions, no flags to memorise
+kib broker add gsc --url https://searchconsole.googleapis.com --oauth \
+   --scope https://www.googleapis.com/auth/webmasters.readonly \
+   --allow-path /webmasters/v3/       # …or spell it out
+kib broker status                     # every route; never prints a secret
+```
+
+`--oauth` is for services that only issue expiring tokens: the broker runs the exchange and re-mints them itself, so no long-lived key exists anywhere to leak. `--allow-path` pins which paths that credential may reach. No MCP is built in and none is special-cased — yours works the same way ([worked examples](examples/providers/), [full design](docs/design-notes/credential-broker.md)).
+
+<sub>Claude Code's banner will read **"Claude API"**. That's the custom base URL, not metered billing — a `setup-token` credential is subscription OAuth, so usage still counts against your Pro/Max plan ([why](docs/design-notes/credential-broker.md#the-claude-api-banner-is-transport-not-metered-billing)).</sub>
+
+<h2 id="start"><img src="docs/assets/readme/section-start.svg" width="100%" alt="Quick start"></h2>
+
+```bash
+git clone https://github.com/amerkay/keep-it-in-your-box.git
+cd keep-it-in-your-box
+
+# kib = the launcher (kib exec, kib broker, kib audit …).  cc = kib claude.
+echo "alias kib='$PWD/bin/kib'"        >> ~/.bashrc
+echo "alias cc='$PWD/bin/kib claude'"  >> ~/.bashrc
+```
+
+Now `cd` into any project and run `cc`. The image builds itself on first run, and the first launch offers a one-time login so the broker has a token to work with.
+
+Nothing to set up and nothing to migrate: your `~/.claude` stays exactly as it is, and each project's session is assembled from it per launch and merged back on exit — so a host `claude` and a boxed `cc` share one login, one `--resume` list and one history, while no project's box can see another's.
+
+**Requirements:** Docker (Docker Desktop, OrbStack or Colima on macOS; any engine on Linux), plus `git`, `bash` and `perl` — system perl is fine, no Homebrew needed. A Wayland session on Linux is optional; without one you just lose clipboard paste.
+
+<h2 id="use"><img src="docs/assets/readme/section-use.svg" width="100%" alt="Everyday use"></h2>
+
+```bash
+cc                      # launch Claude Code in the sandbox
+kib exec bash           # a shell in the sandbox
+kib exec python app.py  # run anything else in there
+kib broker status       # every brokered route
+kib audit               # what would the host execute out of this repo?
+kib help                # the full verb table
+
+kib --publish=3000      # reach a dev server in the box at http://127.0.0.1:3000
+kib --node-version=20   # this terminal runs Node 20 (18|20|22|24 baked, no download)
+```
+
+- **Verbs win over programs.** `kib bash` is an *error*, not a shell — pass-through is explicit, via `kib exec`.
+- **Ports are opt-in and loopback-only.** A box publishes nothing by default, so `--publish` is the only route from your browser. Bind the server to `0.0.0.0` inside (`vite --host`, `next dev -H 0.0.0.0`) or the published port has nothing to forward to.
+- **Paste images with `Ctrl+V`, not `⌘V`.** The terminal handles `⌘V` itself and sends nothing at all for an image.
 
 <h2 id="compare"><img src="docs/assets/readme/section-compare.svg" width="100%" alt="How it compares"></h2>
 
-Measured against six other agent sandboxes on the controls that decide whether an untrusted repo can reach the host:
+Measured against six other agent sandboxes, on the controls that decide whether an untrusted repo can reach your host:
 
 | Sandbox | Workspace secrets | Host-exec config | Clipboard | Egress | Credential | Isolation |
 |---|:--:|:--:|:--:|:--:|:--:|---|
@@ -103,228 +138,34 @@ Measured against six other agent sandboxes on the controls that decide whether a
 <sub>✅ enforced · ◑ partial or caveated · ✕ none / exposed · — not applicable.
 ¹ The only sandbox whose redaction also covers files created *after* launch. ² `/dev/null` mask, but `.env` is `denyWrite`, not `denyRead`, in the shipped template. ³ Files are copied in honouring `.gitignore`, so gitignored secrets never enter — not masked, but not present. ⁴ On by default; a launch with no stored token and no interactive login falls back to mounting the real credential, with a warning.</sub>
 
-No project here does everything. `kib` is the only one that **validates `.git/config`** instead of blocking it, and the only one that **mediates the clipboard** rather than granting or withholding it wholesale — and one of the few that redacts secrets *created after launch*. Egress is the one column it deliberately concedes; see [Accepted risks](#accepted-risks) for why a default-deny allowlist is the wrong trade here. Full matrix, sources, and per-project caveats: [`docs/competitive-review.md`](docs/competitive-review.md).
+No project here does everything. `kib` is the only one that **validates `.git/config`** instead of blocking it, and the only one that **mediates the clipboard** rather than granting or withholding it wholesale. Egress is the column it deliberately concedes — [here's why](#limits). Full matrix, sources and per-project caveats: [`docs/competitive-review.md`](docs/competitive-review.md).
 
 <h2 id="hood"><img src="docs/assets/readme/section-hood.svg" width="100%" alt="Under the hood"></h2>
 
-- **One long-lived container per project**, `sleep infinity` as PID 1; every terminal attaches with `docker exec`, so Claude sees one PID namespace, one `/tmp`, one daemon — shared `/resume`, history and jobs, for free.
-- **A FUSE server** mounts the redacted project view in its own sidecar container, which the sandbox sees over your project path by mount propagation. Only the sidecar gets `CAP_SYS_ADMIN` and `/dev/fuse`; the sandbox is created without them and has no unredacted path to your project. Redaction covers files created after launch because it's a live view, not a bind mount.
-- **A Wayland proxy sidecar** holds the only real compositor socket, forwarding reads and refusing every write request.
-- **Host-side, at every launch:** a `settings.json` validator that rejects inline `hooks[].command`, an audit gate over the repo's git config, and a DNS watcher that follows host network changes.
+- **One long-lived container per project**, `sleep infinity` as PID 1. Every terminal `docker exec`s into the same one, so `/resume`, prompt history and background jobs are shared across tabs for free; it's torn down when the last session exits.
+- **A FUSE sidecar serves the redacted view**, which the sandbox sees over your project path by mount propagation. Only the sidecar gets `CAP_SYS_ADMIN` and `/dev/fuse` — the sandbox is created without them and has no unredacted path to your project. Same topology on Linux and macOS.
+- **A Wayland proxy sidecar holds the only real compositor socket.** Clipboard *reads* pass through, so image paste works; a *write* arrives as plain text with control characters stripped, because verbatim it would be host code execution at your next paste. macOS gets the same filter via its `pbpaste` bridge.
+- **Host-side at every launch:** a `settings.json` validator that rejects inline `hooks[].command`, an audit gate that refuses to start a session into a poisoned git config, and — on Linux — a DNS watcher that keeps the container following your wifi and VPN changes.
 
-Every design decision and its rationale — including the dead ends — lives in
-[`docs/design-notes/`](docs/design-notes/README.md); [`CLAUDE.md`](CLAUDE.md) carries the working
-rules that reference it.
+Every decision and its rationale, including the dead ends, lives in [`docs/design-notes/`](docs/design-notes/README.md).
 
-<h2 id="start"><img src="docs/assets/readme/section-start.svg" width="100%" alt="Quick start"></h2>
+<h2 id="limits"><img src="docs/assets/readme/section-limits.svg" width="100%" alt="An honest boundary"></h2>
 
-```bash
-git clone https://github.com/amerkay/keep-it-in-your-box.git
-cd keep-it-in-your-box
+This is a real boundary, but not a perfect one. What kib does **not** close:
 
-# No setup step: kib keeps your ~/.claude stock and assembles each project's isolated
-# session from it per launch — so you can switch between plain `claude` and `cc` freely
-# (same login, same --resume transcripts, same history).
+- **Egress is open, deliberately.** A default-deny allowlist fights the whole purpose — building untrusted repos that fetch from arbitrary registries — and the two channels that matter can't be closed anyway: `api.anthropic.com` is itself a bidirectional path, and GitHub plus the package registries must stay reachable for the agent to work at all. So the answer is the broker: remove the thing worth stealing, rather than a firewall that only looks like one.
+- **Decline the broker login and the real credential is copied in**, with a warning — rotate it if an untrusted session has run that way.
+- **`host.docker.internal` is routable** to your host network stack.
+- **Your project directory is writable**, by design: editing your code is the agent's job.
+- **Shared kernel.** A hardened container (`--cap-drop=ALL`, `no-new-privileges`, seccomp, AppArmor, empty `CapEff`, no Docker socket, no host block devices) — not a microVM.
 
-# Add both aliases to your shell rc, pointing at the absolute path.
-# kib = the launcher (kib exec, kib broker, kib audit …); cc = kib claude.
-echo "alias kib='$PWD/bin/kib'"        >> ~/.bashrc
-echo "alias cc='$PWD/bin/kib claude'"  >> ~/.bashrc
-```
+The full audit, including the controls that **are** closed, is in [`docs/security/audit.md`](docs/security/audit.md).
 
-The image builds automatically on first run. Then `cd` into any project and run `cc`.
+---
 
-### Pasting images
-
-Press **`Ctrl+V`**, not `⌘V`. `⌘V` is handled by the terminal, which pastes the clipboard as
-text over the pty — for an image it sends nothing, so the agent never reads the clipboard at
-all. (The Claude Code docs note `⌘V` also works in iTerm2; that is untested in a box.
-Terminal.app cannot send it to the pty at any setting.) Text paste works either way, which is
-why a broken bridge looks like a working one — see
-[`clipboard-and-dns.md`](docs/design-notes/clipboard-and-dns.md) to check the bridge itself.
-
-### Requirements
-
-- Docker — Docker Desktop, OrbStack, or Colima on macOS; any engine on Linux.
-- A Wayland session for host clipboard / image paste on Linux (optional — absent Wayland just disables paste). macOS uses a `pbpaste` bridge instead and needs nothing extra.
-- `git`, `bash`, `perl` (system perl is fine on macOS — no Homebrew dependencies).
-
-<h2 id="dev"><img src="docs/assets/readme/section-dev.svg" width="100%" alt="Development"></h2>
-
-### Linting and formatting
-
-One entrypoint, behaving identically in all three places you might run it — inside the box, on
-the host, and in your editor:
-
-```bash
-./dev.sh format   # rewrite:  ruff format, ruff check --fix, shfmt -w
-./dev.sh lint     # verify:   ruff format --check, ruff check, mypy --strict, shfmt -d
-./dev.sh check    # lint + tests/check.sh — exactly what CI runs
-```
-
-Inside the box there is nothing to install: the image bakes ruff, mypy, shfmt and shellcheck at
-the pinned versions. On the host:
-
-```bash
-uv venv --python 3.13
-uv pip install -r requirements-dev.txt
-# or, without uv:  python3 -m venv .venv && ./.venv/bin/pip install -r requirements-dev.txt
-```
-
-shfmt and shellcheck are Go/Haskell binaries, not Python packages — install the pinned releases
-(shfmt `v3.13.1`, shellcheck `v0.10.0`), or `brew install shfmt shellcheck` on macOS and keep the
-versions in step. `dev.sh` prefers a repo-local `.venv` but probes each tool before using it, so a
-host venv — whose interpreter the container cannot see — falls back to the baked copies by itself.
-
-Configuration is repo-root, shared by editor, container and host, and never duplicated into an
-editor profile:
-
-| File | Governs |
-|---|---|
-| `pyproject.toml` | ruff (format, lint, import order) and mypy `strict` |
-| `.editorconfig` | 100-column lines — and **shfmt's own config**, which it reads whenever no style flags are passed, so `dev.sh` passes none |
-| `requirements-dev.txt` | exact pins for ruff, mypy and pytest |
-| `Dockerfile`, `.github/workflows/lint.yml` | pinned shfmt + shellcheck binaries, kept in step with each other |
-
-What to annotate, when a `# noqa` earns its place, and the shell rules are in
-[`CONVENTIONS.md`](CONVENTIONS.md).
-
-### Editor setup (VS Code)
-
-Run VS Code **on the host**, against the real directory — not attached to the box. The sandbox's
-redacted view exists only inside the container, so the editor sees ordinary files.
-
-[`.vscode/extensions.json`](.vscode/extensions.json) and [`.vscode/settings.json`](.vscode/settings.json)
-are checked in — a fresh clone gets prompted to install, and they wire straight into the same
-`pyproject.toml` / `.editorconfig` the CLI and CI read. Nothing to configure by hand:
-
-```bash
-code --install-extension charliermarsh.ruff
-code --install-extension ms-python.mypy-type-checker
-code --install-extension mkhl.shfmt
-code --install-extension timonwong.shellcheck
-code --install-extension EditorConfig.EditorConfig
-```
-
-Five things that will bite otherwise:
-
-- **`.vscode/` is write-denied from inside the box** — it's on the host-executed-config guard list.
-  An agent in the sandbox getting EPERM if it edits these files is the guard working, not a bug;
-  edit them from a host terminal.
-- **Point VS Code at `.venv`** (`Python: Select Interpreter`). `fromEnvironment` resolves ruff and
-  mypy through the selected interpreter; without it both fall back to bundled versions and you get
-  diagnostics CI doesn't have — or miss ones it does.
-- **Use `mkhl.shfmt`, not `foxundermoon.shell-format`.** The latter is the more popular extension
-  and it [ignores `.editorconfig`](https://github.com/foxundermoon/vs-shell-format/issues/66),
-  configuring itself from `settings.json` instead — which would reformat every script against
-  shfmt's tab default and fight `./dev.sh format` on every save.
-- **shfmt and shellcheck are separate binaries.** `mkhl.shfmt` ships none, so install shfmt
-  (`shfmt.executablePath` if it isn't on `PATH`); `timonwong.shellcheck` bundles *its own*, which
-  drifts from the pinned `v0.10.0` — set `shellcheck.executablePath` at the pinned one if the
-  editor and CI ever disagree.
-- **A Flatpak or Snap editor has the sandbox's `PATH`, not yours.** Host-installed shfmt is
-  invisible to it, so `mkhl.shfmt` fails with `command not found` (shellcheck keeps working only
-  because it bundles a binary). Reach the host copy with `"shfmt.executablePath":
-  "/usr/bin/flatpak-spawn"` plus `"shfmt.executableArgs": ["--host", "shfmt"]` — in **user**
-  settings, since it describes the machine rather than the project.
-
-The mypy extension writes a `.mypy_cache/` into the repo. That's gitignored and harmless on the
-host, but it is the reason a bare `mypy` **inside** the box dies with SIGBUS — its cache is mmap'd
-and mmap over the FUSE view faults. In the box, go through `./dev.sh`, which points
-`MYPY_CACHE_DIR` outside the mount.
-
-### Tests
-
-All test suites live in [`tests/`](tests/). The host-side ones need no image or container:
-
-```bash
-./dev.sh check     # lint + the whole host-side suite — exactly what CI runs
-./tests/check.sh   # just the suite: syntax, shellcheck, the bash-3.2/BSD portability
-                   #   contract, the host/portable.sh shim unit tests, the broker and
-                   #   MCP bash wiring, the regression guards, then pytest
-pytest             # just the Python suites (tests/shared, host, guest, broker)
-```
-
-The bash sections live one per file in [`tests/check/`](tests/check/); `tests/check.sh` is a
-thin runner over them, and both bash suites share the harness in `tests/lib.sh` so they report
-identically.
-
-[`tests/security-test.sh`](tests/security-test.sh) is the **in-sandbox** regression suite — one
-check per control the [audit](docs/security/audit.md) established. Run it **inside** the box:
-
-```bash
-kib exec ./tests/security-test.sh                 # everything
-kib exec ./tests/security-test.sh --list          # what it covers, run nothing
-kib exec ./tests/security-test.sh -k git          # one section
-```
-
-Each check re-attempts a real attack and asserts the refusal, *and* re-attempts the legitimate
-operation the guard must not break — a guard that blocks the attack by breaking the workflow has
-failed too.
-
-<h2 id="accepted-risks">Accepted risks</h2>
-
-<details>
-<summary><b>This is a real boundary, not a perfect one — read before you trust it.</b></summary>
-
-<br>
-
-- **The credential broker keeps the token out of the box, and it is on by default.** It holds a long-lived token host-side and gives the sandbox a placeholder plus an `ANTHROPIC_BASE_URL` pointed at a `cap-drop=ALL` sidecar, which strips the placeholder and injects the real token on the way out — so even with egress wide open an injected session can't exfiltrate it. Your **first** launch has no token yet, so it runs a one-time login for you (`claude setup-token`, stored host-only at `~/.keep-it-in-your-box/claude-token`, mode 600). Decline that login, or launch headless, and the session falls back to the pre-broker behaviour with a warning: the real credential is copied into the box so in-sandbox Claude can still authenticate — **rotate it if an untrusted session has run that way**. Turn the broker off with `broker = off` in `~/.keep-it-in-your-box/config`, or `KIB_BROKER=0` for one launch.
-
-  ```bash
-  kib broker login           # mint + store a token (wraps `claude setup-token`); host-only, mode 600
-  kib broker status          # is it still accepted? never prints the token
-  kib broker logout          # remove it
-  ```
-
-  The brokered credential is deliberately a **static** long-lived token, never `~/.claude/.credentials.json` — Anthropic's subscription refresh tokens are single-use and rotate, so a second process refreshing them logs you out of every other session. Egress itself is still open: a default-deny allowlist conflicts with the sandbox's whole purpose (building untrusted repos that fetch from arbitrary registries).
-
-  With the broker on, Claude Code's banner reads **"Claude API"** — that's the custom base URL, *not* metered billing. A `setup-token` credential is subscription OAuth, so usage still counts against your Pro/Max plan ([why](docs/design-notes/credential-broker.md#the-claude-api-banner-is-transport-not-metered-billing)).
-
-  <img src="docs/assets/readme/claude-api-banner.png" width="560" alt="Claude Code startup banner reading 'Opus 4.8 (1M context) with high effort · Claude API' while brokered onto a Pro/Max subscription">
-
-
-- **The same broker holds your *other* secrets — a Codex key, and any MCP's token.** The broker isn't limited to a fixed list: it brokers **any** MCP, whether or not we've heard of it. **The easiest path is the one you'd do anyway: take a service's own install line and swap `claude`→`cc`.** A vendor tells you to run `claude mcp add --header "Authorization: Bearer <token>" --transport http foo <url>`; change the first word to `cc` and kib **intercepts it host-side, before anything reaches the box** — peeling the token off, storing it host-only (mode 600), and wiring a header-free broker route. The secret never enters the sandbox; you don't need to learn a new command (this is exactly why `cc` is aliased to `kib claude` — swapping `claude`→`cc` is lossless):
-
-  ```bash
-  cc mcp add --header "Authorization: Bearer <token>" --transport http foo <url>
-  #  → 🔐 Intercepted an inline MCP credential and brokered it host-side — it never entered the sandbox.
-  ```
-
-  (The local/stdio form that ships secrets as `--env` can't be brokered that way, so kib **refuses** it rather than leak — `KIB_ALLOW_INLINE_MCP_SECRET=1` is the deliberate override. And if a secret got into a config some *other* way, kib still **warns** on the next launch and offers `kib mcp adopt <name>` to migrate it.) You can also declare one directly:
-
-  ```bash
-  kib broker add             # asks the questions, then prompts for the credential (hidden)
-  # …or the same thing from flags. Remote MCP, static auth header (broker injects it):
-  kib broker add linear --url https://mcp.linear.app/sse --header "Authorization: Bearer" \
-     --mcp-name linear
-  # a service with no static key at all: the broker does the OAuth 2.0 exchange itself
-  kib broker add gsc --url https://searchconsole.googleapis.com --oauth \
-     --scope https://www.googleapis.com/auth/webmasters.readonly \
-     --allow-path /webmasters/v3/ --allow-path /v1/urlInspection/
-  kib broker status          # every route: credential (size/mode only), URL, refused defs
-  ```
-
-  `--oauth` stores an OAuth config instead of a secret and mints short-lived access tokens
-  inside the broker, re-minting on expiry or on a 401 from upstream. The client secret and
-  refresh token stay host-side; the box only ever reaches the route's URL. `--allow-path` pins
-  which paths the credential may reach on that host — with none given, a route may reach every
-  path on it. Without `--mcp-name` a route is **REST only** — curl it, no `.claude.json` entry.
-
-  There is **no port to pick**: every route shares one listener and is told apart by
-  name (`http://kib-broker:8100/mcp/<name>`). A route that can't come up is named and skipped —
-  it never costs you the session.
-
-  **No MCP is built in — only the LLMs are.** DataForSEO (remote, Basic auth) and mcp-gsc (a Google service-account JSON, run in its own sidecar) ship as worked **examples** in [`examples/providers/`](examples/providers/) — copy one into `~/.keep-it-in-your-box/providers.d/` and `kib broker login` it; your own MCP works exactly the same way. With the broker on, kib writes a **header-free** broker URL into the session config, so the agent reaches the MCP without ever holding its credential. Brokering an MCP needs the broker running, which it is unless you turned it off. Full design in [`docs/design-notes/credential-broker.md`](docs/design-notes/credential-broker.md).
-
-  **An egress firewall is a "delayed-or-never" task, on purpose.** The two channels that matter cannot be closed: `api.anthropic.com` is itself a bidirectional exfil path, and `github.com` plus the package registries must stay open for the agent to work at all. So the real fix is the **broker** — remove the thing worth stealing — not a firewall. The proxy-sidecar design is worked out and deliberately unscheduled; the reasoning is in [`docs/design-notes/credential-broker.md`](docs/design-notes/credential-broker.md).
-- **`host.docker.internal` is routable** to the host network stack.
-- **The project directory is writable**, by design — the agent's job is to edit your code.
-
-The full audit, including the controls that *are* closed, is in [`docs/security/audit.md`](docs/security/audit.md).
-
-</details>
-
-## License
-
-No license file yet, so default copyright applies (all rights reserved by the author). If you'd like to use or adapt it, open an issue — a permissive license is likely.
+<p align="center">
+  <a href="DEVELOP.md">Development</a> &#183;
+  <a href="docs/design-notes/README.md">Design notes</a> &#183;
+  <a href="docs/competitive-review.md">Competitive review</a> &#183;
+  <a href="LICENSE">MIT</a>
+</p>

@@ -28,7 +28,7 @@ Bump a pin deliberately and in every place it appears. A floating version means 
 passes in one environment and fails in another.
 
 Editor wiring — the extensions to install and the two `.vscode/` files that point them at the
-config above — is in the README's [editor setup](README.md#editor-setup-vs-code) section. Note
+config above — is in [`DEVELOP.md`](DEVELOP.md#editor-setup-vs-code)'s editor setup section. Note
 `.vscode/` is write-denied inside the sandbox, so those files are created host-side.
 
 ## Python

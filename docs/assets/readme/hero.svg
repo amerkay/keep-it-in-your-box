@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="330" viewBox="0 0 1200 330"
      role="img" aria-labelledby="title desc">
   <title id="title">Keep It in Your Box</title>
-  <desc id="desc">A Docker sandbox for AI coding agents. Run Claude Code in YOLO mode without the YOLO. The box redacts .env, validates .git/config, and filters what the clipboard can carry.</desc>
+  <desc id="desc">A Docker sandbox for AI coding agents. Run Claude Code in YOLO mode without the YOLO. The box redacts .env to key names with no values, keeps your API keys host-side behind a credential broker, validates .git/config, and filters what the clipboard can carry.</desc>
 
   <style>
     .mono { font-family: ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace; }
@@ -30,18 +30,18 @@
   <!-- guarantee chips -->
   <g class="mono" font-size="19">
     <!-- .env redacted -->
-    <rect x="56" y="248" width="228" height="42" rx="10" fill="#161b22" stroke="#30363d"/>
-    <circle cx="80" cy="269" r="6" fill="#f85149"/>
+    <rect x="56" y="248" width="252" height="42" rx="10" fill="#161b22" stroke="#30363d"/>
+    <circle cx="80" cy="269" r="6" fill="#3fb950"/>
     <text x="96" y="275" fill="#e6edf3">.env <tspan fill="#8b949e">&#8594;</tspan> redacted</text>
 
-    <!-- .git/config validated -->
-    <rect x="300" y="248" width="330" height="42" rx="10" fill="#161b22" stroke="#30363d"/>
-    <circle cx="324" cy="269" r="6" fill="#e3b341"/>
-    <text x="340" y="275" fill="#e6edf3">.git/config <tspan fill="#8b949e">&#8594;</tspan> validated</text>
+    <!-- API keys brokered -->
+    <rect x="328" y="248" width="300" height="42" rx="10" fill="#161b22" stroke="#30363d"/>
+    <circle cx="352" cy="269" r="6" fill="#3fb950"/>
+    <text x="368" y="275" fill="#e6edf3">API keys <tspan fill="#8b949e">&#8594;</tspan> brokered</text>
 
     <!-- clipboard: writes stripped to plain text -->
-    <rect x="646" y="248" width="298" height="42" rx="10" fill="#161b22" stroke="#30363d"/>
-    <circle cx="670" cy="269" r="6" fill="#3fb950"/>
-    <text x="686" y="275" fill="#e6edf3">clipboard <tspan fill="#8b949e">&#8594;</tspan> filtered</text>
+    <rect x="648" y="248" width="310" height="42" rx="10" fill="#161b22" stroke="#30363d"/>
+    <circle cx="672" cy="269" r="6" fill="#3fb950"/>
+    <text x="688" y="275" fill="#e6edf3">clipboard <tspan fill="#8b949e">&#8594;</tspan> filtered</text>
   </g>
 </svg>
