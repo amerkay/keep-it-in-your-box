@@ -101,7 +101,7 @@ Now `cd` into any project and run `cc`. The image builds itself on first run, an
 
 Nothing to set up and nothing to migrate: your `~/.claude` stays exactly as it is, and each project's session is assembled from it per launch and merged back on exit — so a host `claude` and a boxed `cc` share one login, one `--resume` list and one history, while no project's box can see another's.
 
-**Requirements:** Docker (Docker Desktop, OrbStack or Colima on macOS; any engine on Linux), plus `git`, `bash` and `perl` — system perl is fine, no Homebrew needed. A Wayland session on Linux is optional; without one you just lose clipboard paste.
+**Requirements:** Docker (on macOS: [Docker Desktop](https://www.docker.com/products/docker-desktop/) or [OrbStack](https://orbstack.dev), both a `.dmg` — no Homebrew and no Xcode tools; Colima works too but needs both. Any engine on Linux), plus `git`, `bash` and `perl` — system perl is fine, no Homebrew needed. A Wayland session on Linux is optional; without one you just lose clipboard paste.
 
 <h2 id="use"><img src="docs/assets/readme/section-use.svg" width="100%" alt="Everyday use"></h2>
 

@@ -96,6 +96,45 @@ else
     fail "_login_ok_after_probe not found in host/broker.sh" "the helper was removed or renamed"
 fi
 
+# The paste guards. A credential that stores fine and only fails hours later (a rotating
+# accessToken, a pasted path) is the worst outcome there is — the box just shows a login prompt
+# and nothing says why — so each refusal has to land at the prompt. Driven straight, with `die`
+# stubbed: provider_login itself needs a tty.
+_vet_tmp="$(mktemp -d)"
+printf 'sk-ant-oat01-inafile\n' >"$_vet_tmp/tok"
+_vet_says() { # <pasted string> → ok|refused
+    (
+        # shellcheck disable=SC2317  # called by the eval'd function below, not from here
+        die() { exit 9; }
+        eval "$(sed -n '/^_vet_pasted_secret()/,/^}/p' "$KIB_ROOT/host/broker.sh")"
+        _vet_pasted_secret claude "$1" 2>/dev/null
+    ) </dev/null && echo ok || echo refused
+}
+_vet_got="$(_vet_says 'sk-ant-oat01-good')/$(_vet_says '{"claudeAiOauth":{"accessToken":"x"}}')"
+_vet_got="$_vet_got/$(_vet_says '{')/$(_vet_says "$_vet_tmp/tok")/$(_vet_says "$_vet_tmp/nope")"
+if [ "$_vet_got" = "ok/refused/refused/refused/ok" ]; then
+    pass "broker login: refuses .credentials.json content and a pasted file PATH, at the prompt"
+else
+    fail "the pasted-credential guards are wrong" \
+        "token/credsjson/brace/realpath/deadpath = $_vet_got (want ok/refused/refused/refused/ok)"
+fi
+rm -rf "$_vet_tmp"
+unset _vet_tmp _vet_got
+
+# There is never a host `claude` — that is the premise of the project — so the one launch that
+# needs a token must not ask for one. The mint runs the IMAGE's copy; anything that reintroduces
+# a host-side install or a bare `command -v claude` here puts a new user back at a dead end.
+_mint_src="$(sed -n '/^_mint_claude_token()/,/^}/p' "$KIB_ROOT/host/broker.sh")"
+# shellcheck disable=SC2016  # $IMAGE_NAME is the literal being matched in the source, not ours
+if printf '%s' "$_mint_src" | grep -q 'docker run .*\$IMAGE_NAME.*claude setup-token' \
+    && ! printf '%s' "$_mint_src" | grep -qE 'install\.sh|command -v claude|host_claude_path'; then
+    pass "broker login mints the token in the image, needing no host claude"
+else
+    fail "the claude login no longer mints in the image" \
+        "_mint_claude_token must docker-run \$IMAGE_NAME, and must not reach for a host claude"
+fi
+unset _mint_src
+
 # The sensitive-dir guard must NOT reject the host-global verbs, so they work from $HOME (the
 # natural place to manage a host-global credential). Run one from a blocked dir with a
 # throwaway KIB_CONFIG (no token → prints status, exits 1, touches no docker) and assert it

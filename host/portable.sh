@@ -329,13 +329,27 @@ fuse_root_destroy() { # <root>
 # ── macOS launch preflight ────────────────────────────────────────
 # Darwin only: fail fast on what would otherwise surface as a confusing mid-launch error. The
 # redaction mount validates itself in host/redaction.sh, so this stays cheap.
+
+# The direct .dmg for THIS Mac's cpu. The landing page makes you pick, and picking wrong is a
+# multi-GB download that will not launch.
+_docker_desktop_dmg() {
+    case "$(uname -m)" in
+        arm64 | aarch64) echo "https://desktop.docker.com/mac/main/arm64/Docker.dmg" ;;
+        *) echo "https://desktop.docker.com/mac/main/amd64/Docker.dmg" ;;
+    esac
+}
+
+# Lead with the two engines that install from a .dmg. Colima is listed last and labelled: it
+# comes from Homebrew, which bootstraps itself by installing the Xcode command line tools —
+# multiple GB, and a surprise to anyone who just wanted a container runtime.
 _preflight_die_no_engine() {
     die "no reachable Docker engine on this Mac." \
-        "kib is engine-agnostic — install any one of:" \
-        "  • Docker Desktop   https://www.docker.com/products/docker-desktop/" \
-        "  • OrbStack         https://orbstack.dev" \
-        "  • Colima           brew install colima docker && colima start" \
-        "then start it and relaunch."
+        "kib is engine-agnostic. Easiest — download, drag to Applications, launch once:" \
+        "  • Docker Desktop  $(_docker_desktop_dmg)" \
+        "  • OrbStack        https://orbstack.dev  (lighter, also a .dmg)" \
+        "Colima works too, but needs Homebrew + the Xcode command line tools (several GB):" \
+        "  brew install colima docker && colima start" \
+        "Start the engine, then relaunch kib."
 }
 
 preflight_platform() {

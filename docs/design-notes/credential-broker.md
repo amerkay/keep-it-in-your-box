@@ -14,9 +14,10 @@ launch (`KIB_BROKER=1` forces it on).
 - **Fail-safe spelling:** `broker_wanted` enumerates the recognised *off* spellings
   (`off`/`0`/`no`/`false`) rather than testing `!= on`, so a typo (`broker = of`) falls through to
   the safe side — brokered — instead of silently mounting the real credential.
-- **First run:** an *interactive* launch with no token auto-runs `provider_login claude` (wraps
-  `claude setup-token`) in a subshell; the static token lands host-only. With no token and no
-  interactive login (headless, or declined), `start_broker` falls back to the pre-broker path —
+- **First run:** an *interactive* launch with no token auto-runs `provider_login claude` (which
+  runs `claude setup-token` in the image — never a host claude, see below) in a subshell; the
+  static token lands host-only. With no token and no interactive login (headless, or declined),
+  `start_broker` falls back to the pre-broker path —
   `stage_credential` copies the real `~/.claude/.credentials.json` into the shared-assembly
   **directory** (never a single-file bind — the rename footgun below) and `merge_out_credential`
   folds a changed copy back on exit.
@@ -24,6 +25,46 @@ launch (`KIB_BROKER=1` forces it on).
   token). Wired via `start_broker`/`stage_credential`/`add_broker_env_args`/
   `connect_broker_network`/`verify_broker_attach`/`stop_broker`; bind-mounted, so edits land next
   launch while the running sidecar keeps old code.
+
+## The first run, where there is no host `claude` — because there never is
+
+Three separate dead ends, all on the same launch: the one where the user has just installed kib
+and nothing else. Each was reported from a fresh macOS install (2026-08-15).
+
+- **The token is minted in the IMAGE. Never require a host `claude` — the absence of one is the
+  premise of the whole project.** `_provider_login_hint` used to check `command -v claude` and,
+  on a miss, print "run `claude setup-token` on the host", which dead-ends a new user at a hidden
+  paste prompt with nothing to paste and a CLI they installed kib specifically to avoid. There is
+  no host-install path here and there should never be one (an offer to `curl | bash` the official
+  installer was written and thrown away for exactly that reason). `_mint_claude_token` runs
+  `docker run --rm -it --entrypoint="" $IMAGE_NAME claude setup-token`: the same Claude Code the
+  box runs, on an image `build_image_if_missing` has already guaranteed (a bare `kib broker login`
+  is the one path that can precede it, and it says `kib build` instead of failing obscurely).
+  `--entrypoint=""` skips kib's entrypoint, which expects mounts this run does not have — the same
+  shape as `check_for_updates`' version probe.
+  - **That throwaway container is not "the sandbox", and the invariant it must not break is about
+    the sandbox.** No project bind, no session dir, no shared assets, no broker network, no agent,
+    `--rm`: nothing it sees outlives the command, and the token was always going to cross the
+    user's terminal on its way to the paste prompt. What the rule forbids is the real credential
+    reaching the container the *agent* runs in, which this is not.
+  - The cost is one extra step: no browser can open in there, so it prints a URL to open on the
+    host and takes the code back. That is the trade for never needing a host install.
+- **Two pastes that store fine and fail far away** — `_vet_pasted_secret`, split out of
+  `provider_login` so the check suite can drive it without a tty. A pasted **path** was stored
+  verbatim, and `read` takes one line, so a pasted `.credentials.json` stored `{`. Both then
+  failed at the probe, or worse: the accessToken *inside* that file is the rotating one, so it
+  probes green and 401s hours later. Refuse all three at the prompt, where the reason can still
+  reach the user.
+- **A brokered box must never run Claude Code's own login, and onboarding IS that login.** Its
+  first-run flow puts "Select login method" on screen whenever `hasCompletedOnboarding` is falsy —
+  it does not care that a token is present. On a new machine canonical `.claude.json` does not
+  exist yet, so the first launch ever opened on a login prompt with a working brokered token
+  behind it, and choosing anything there tries to mint a credential the sandbox may not see.
+  `seed_brokered_config` → `kib.host.pins seed-brokered` seeds the flag into the *session*
+  `.claude.json` (never canonical — merge-out is `projects[path]`-only, so nothing about this
+  leaks back out). A **seed**, not a pin: written only when absent, so the user still owns the
+  key. Gated on `BROKER_ENABLED=1`, and that gate is the point — with no token the real credential
+  is staged instead and an in-box login is exactly the right offer.
 
 ## The "Claude API" banner is transport, not metered billing
 
@@ -34,7 +75,7 @@ flow and reads the plan back from Anthropic. Through the broker the agent just s
 billed — a brokered session still says "Claude API" even though nothing changed about your plan.
 
 Billing is decided by the **token** the broker injects, not the label. The Anthropic row mints
-`sk-ant-oat01-…` (from `kib broker login`, which wraps `claude setup-token`) and injects
+`sk-ant-oat01-…` (from `kib broker login`, which runs `claude setup-token` in the image) and injects
 `Authorization: Bearer …` + `anthropic-beta: oauth-2025-04-20` — that `oat01` + OAuth-beta shape
 *is* subscription (Pro/Max) auth, so usage counts against your plan. Metered per-token billing
 would instead be an `sk-ant-api…` console key sent as `x-api-key` with no OAuth beta header; a
@@ -45,7 +86,7 @@ which is why the banner reads "Claude API".
 
 - **`CLAUDE_CODE_OAUTH_TOKEN` reading as *unset* inside a session is normal, not a regression.** Claude Code consumes it at startup and scrubs it from the environment it hands tool shells and subagents, so a `security-test.sh` run launched from a Bash tool call sees nothing, while `kib exec ./tests/security-test.sh` — its own `docker exec` — sees the placeholder. The suite therefore falls back to the agent's `/proc/<pid>/environ` (the exec-time snapshot, unaffected by `unsetenv`), so a *real* token in the container is still caught in the scrubbed case, where a plain skip would have missed it.
 - **The synthetic `.credentials.json` is read-only by MOUNT, never by mode.** It used to be a `cp` + `chmod 0400`; Docker Desktop's `fakeowner` bind layer records the mode but ignores it in `access(2)`, so on macOS the placeholder shipped writable and the control was a silent no-op. It is a flat `:ro` bind via `bind_via_link` now (the destination nests inside the shared-dir mount, which would otherwise abort `docker run`). Nothing refreshes it under the broker, so a single-file bind carries none of the rename risk the real rotating credential does. `macos.md`, guarded in `regressions.sh`.
-- **The brokered credential is STATIC and the broker has no write path. DO NOT reintroduce a refresh loop, and never broker `.credentials.json`.** The secret is a long-lived token from `kib broker login` (wraps `claude setup-token`) at `~/.keep-it-in-your-box/claude-token`, mounted `:ro`. Structural, not fixable: Anthropic subscription refresh tokens are **single-use and rotating**, so the first refresher invalidates the family for the host CLI and every other sidecar (upstream issues #56339/#54443/#60503) — a refresh loop logs the account out permanently. Guarded three ways: `tests/broker/test_broker.py` asserts the LLM row can never carry a mintable credential, `mint_placeholder` takes no real-credential path + serves with a `0400` token, and `check.sh` asserts `.credentials.json` is never bind-mounted and the token mount carries `:ro`.
+- **The brokered credential is STATIC and the broker has no write path. DO NOT reintroduce a refresh loop, and never broker `.credentials.json`.** The secret is a long-lived token from `kib broker login` (runs `claude setup-token` in the image) at `~/.keep-it-in-your-box/claude-token`, mounted `:ro`. Structural, not fixable: Anthropic subscription refresh tokens are **single-use and rotating**, so the first refresher invalidates the family for the host CLI and every other sidecar (upstream issues #56339/#54443/#60503) — a refresh loop logs the account out permanently. Guarded three ways: `tests/broker/test_broker.py` asserts the LLM row can never carry a mintable credential, `mint_placeholder` takes no real-credential path + serves with a `0400` token, and `check.sh` asserts `.credentials.json` is never bind-mounted and the token mount carries `:ro`.
   **Amended 2026-08-01 — the rule is now scoped, and the scoping is the point.** What caused the logout was *writing* a credential, not *minting* one: a rotating refresh token persisted back to disk invalidates the family for every other holder. So the invariant that survives is **the broker has no write path to any credential, ever**, and it is absolute. A USER route may declare `credential_kind: oauth` and mint short-lived access tokens (`kib/broker/oauth.py`) because that never writes anything — the token is a return value held in memory by `Credential`, and a `refresh_token` in a grant response is **discarded** with a one-time `BROKER-ERR` naming the route. The LLM row stays `paste_token` and is barred from the OAuth path by test. Do not widen this back to "the broker may refresh the Claude credential": subscription OAuth still rotates, and there is still nowhere safe to put the result.
 - **The upstream origin is pinned, and the LLM routes pin the PATH set too** (`allow_paths`, audit MAC-L2/R3). A fixed upstream stops the credential being redirected; it does not stop the box driving *any* authenticated request the token permits at that upstream — account reads, key minting. Each built-in LLM row now names the prefixes Claude Code actually uses (`/v1/` plus the read-only `/api/oauth/profile` for claude); everything else 404s with a `BROKER-DENY-PATH` breadcrumb and never leaves the sidecar. Matched on the path component only, so `?beta=true` cannot turn an allowed path away — but on the path the upstream *resolves*, not the bytes we forward: percent-escapes are decoded and `.`/`..` collapsed first (else `/v1/../api/oauth/…/create_api_key` walks through a `/v1/` prefix and the origin's own RFC 3986 normalisation lands it on the mint), and prefixes match segment-wise (`/api/oauth/profile` is not `/api/oauth/profileEVIL`). **User MCP routes default to unrestricted** — their endpoint sets are not knowable here and a wrong guess breaks the route silently, whereas the LLM rows carry the user's real account token and a known client. Add `allow_paths` to a user def to opt in.
 - **Dual-homing — do not drop `connect_broker_network`.** The main container stays on the default bridge + `host.docker.internal` (host dev servers, LAN) *and* joins the broker net.

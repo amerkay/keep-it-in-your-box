@@ -77,6 +77,22 @@ else
     fail "inject_brokered_mcps wrong" "$(printf '%s' "$inj" | tr -d '\n ' | head -c 220)"
 fi
 
+# start_broker's other tail write, same file, same gate: Claude Code's first-run onboarding IS
+# its login flow, so a brokered box must skip it — a fresh host has no flag to inherit and the
+# box opens on "Select login method" with a working token behind it. Only when BROKERED: with
+# no token the real credential is staged and an in-box login is the right thing to offer.
+seed="$(_mcp_run '
+  printf "{\"projects\":{}}" > "$SESSION_BASE/.claude.json"
+  BROKER_ENABLED=0 seed_brokered_config >/dev/null 2>&1
+  echo "off=$(grep -c hasCompletedOnboarding "$SESSION_BASE/.claude.json")"
+  BROKER_ENABLED=1 seed_brokered_config >/dev/null 2>&1
+  echo "on=$(grep -c hasCompletedOnboarding "$SESSION_BASE/.claude.json")"')"
+if printf '%s' "$seed" | grep -q "off=0" && printf '%s' "$seed" | grep -q "on=1"; then
+    pass "seed: a brokered session skips the in-box login; an unbrokered one is left alone"
+else
+    fail "seed_brokered_config wrong" "$seed"
+fi
+
 # adopt reuses an EXISTING user route for the same host instead of synthesizing a duplicate:
 # the inline blob moves into that route's token (mode 600) and leaves the project.
 reuse="$(_mcp_run '

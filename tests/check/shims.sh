@@ -329,5 +329,25 @@ t_notify_desktop
 )
 is "an empty KIB_HOST_CLAUDE is honoured, not re-probed" "" "$(KIB_HOST_CLAUDE="" host_claude_path)"
 
+# The candidate walk. Nothing in kib REQUIRES a host claude — the broker mints its token in the
+# image precisely because there usually is none — but every "this runs OUTSIDE the sandbox"
+# warning is gated on spotting one, and `~/.local/bin` (where the official installer puts it) is
+# routinely absent from a non-login shell's PATH. mkdir/chmod run BEFORE PATH is cleared: not
+# builtins.
+_hcp_off="$(mktemp -d)"
+mkdir -p "$_hcp_off/.local/bin"
+printf '#!/bin/sh\n' >"$_hcp_off/.local/bin/claude"
+chmod +x "$_hcp_off/.local/bin/claude"
+is "host_claude_path finds an off-PATH ~/.local/bin install" "$_hcp_off/.local/bin/claude" \
+    "$(
+        unset KIB_HOST_CLAUDE
+        HOME="$_hcp_off"
+        # shellcheck disable=SC2123  # emptying PATH is the probe: no `claude` findable on it
+        PATH=/nonexistent-for-this-probe
+        host_claude_path
+    )"
+rm -rf "$_hcp_off"
+unset _hcp_off
+
 KIB_OS="$_saved_os"
 unset _saved_os

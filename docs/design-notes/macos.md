@@ -29,6 +29,15 @@ Five shims carry the entire divergence — `fuse_root_path`, `fuse_root_create`,
 
 `microvm.md` records why kib is not pursuing a hypervisor-isolated substrate.
 
+## First contact: the engine the user does not have yet
+
+`_preflight_die_no_engine` is the very first thing a new Mac user sees, so it names engines in
+install *cost* order, not alphabetical. Docker Desktop first as the **architecture-correct direct
+`.dmg`** (`_docker_desktop_dmg`, `uname -m`) — the landing page makes you pick and picking wrong is
+a multi-GB download that will not launch. OrbStack second, also a `.dmg`. Colima last and
+explicitly labelled, because `brew install` on a clean Mac bootstraps Homebrew by installing the
+Xcode command line tools: several GB nobody asked for, which is what the old message led with.
+
 ## Portability contract
 
 Header of `host/portable.sh`, enforced by `check.sh`: host-side scripts are bash-3.2/BSD-clean — stock macOS, no brew. GNU-only tools (`flock setsid sha256sum grep -P notify-send`) and bash-4isms (`declare -A`, `${var,,}`, `readarray`) only inside `host/portable.sh`'s linux branches. Shims: `lock_fd` (perl flock on the inherited fd — open-file-description semantics identical; release with `lock_fd -u` or `exec N>&-`), `hash8`, `detach_pgrp`, `notify_desktop`, `preflight_platform`. `check.sh` unit-tests the shims by forcing the perl/darwin paths on Linux, so the macOS code paths are proven without a Mac. The Wayland notifier's raw `setsid`/`notify-send` are the one allowed exception (structurally Linux-only; advisory warnings).

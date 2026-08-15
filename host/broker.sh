@@ -7,8 +7,9 @@
 # broker, a PLACEHOLDER token, and a synthetic .credentials.json shadowing the real one: it
 # can *use* the API but never read the credential.
 #
-# THE LLM CREDENTIAL IS STATIC — a long-lived token from `kib broker login` (wrapping
-# `claude setup-token`), host-only at ~/.keep-it-in-your-box/claude-token, mounted READ-ONLY.
+# THE LLM CREDENTIAL IS STATIC — a long-lived token from `kib broker login`, which runs
+# `claude setup-token` in the IMAGE (never a host claude: there is never one, that is the point).
+# Host-only at ~/.keep-it-in-your-box/claude-token, mounted READ-ONLY.
 # Not .credentials.json; brokering that live file logged the account out. Never give the claude
 # row a refresh path. (A USER route may declare `credential_kind: oauth`, which mints a
 # short-lived access token inside the sidecar — that is a different credential and a different
@@ -18,7 +19,7 @@
 #
 # Reads:  KIB_ROOT KIB_CONFIG KIB_CFG_BROKER KIB_BROKER
 #         CNAME BROKER_CNAME BROKER_NET BROKER_DIR BROKER_OUT BROKER_HASH IMAGE_NAME
-#         SHARED_BASE SHARED_CDIR CLAUDE_HOME CRED_WITNESS
+#         SHARED_BASE SHARED_CDIR SESSION_BASE CLAUDE_HOME CRED_WITNESS
 # Writes: KIB_DIR BROKER_TOKEN_FILE PROVIDERS_DIR BROKER_ENABLED ARGS
 # shellcheck disable=SC2034  # BROKER_ENABLED is read across the boundary
 
@@ -282,6 +283,18 @@ EOF
     # Both fail-SOFT — a broken MCP must never block the session the way a broker startup
     # failure does.
     inject_brokered_mcps
+    seed_brokered_config
+}
+
+# Claude Code's first-run onboarding IS its login flow, and a brokered box must never run that:
+# the credential is host-side on purpose. Gated on the broker actually serving one — with no
+# token the box falls back to the real credential, and then an in-box login is the right offer.
+# (kib/host/pins.py)
+seed_brokered_config() {
+    [ "$BROKER_ENABLED" = 1 ] || return 0
+    have_python || return 0
+    kib_py host.pins seed-brokered "$SESSION_BASE/.claude.json" \
+        || warn "could not seed .claude.json for the brokered credential."
 }
 
 # The registry walk, the URL construction and the marker-aware rewrite all live in
@@ -478,20 +491,34 @@ _store_secret_file() {
     fi
 }
 
+# Mint the token with NO host `claude` — there is never one, and that is the whole point of the
+# project: Claude Code lives in the box. So the login runs the image's own copy in a throwaway
+# container. It is not the sandbox — no project bind, no session dir, no broker network, no agent,
+# `--rm` — and `--entrypoint=""` skips kib's entrypoint, which expects mounts this run does not
+# have (the same shape as check_for_updates' version probe). No browser can open in there, so it
+# prints a URL to open on the host. (docs/design-notes/credential-broker.md)
+_mint_claude_token() {
+    if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+        # Only reachable from a bare `kib broker login`: every launch path builds first.
+        echo "   No image to mint with yet — build it once, then re-run this:"
+        echo "     kib build && kib broker login claude"
+        return 1
+    fi
+    echo "   Minting in a throwaway container from kib's image — the same Claude Code the"
+    echo "   sandbox runs, so there is nothing to install on the host."
+    echo "   No browser in there: open the URL it prints, authorize, paste the code back,"
+    echo "   then paste the token it prints (starts sk-ant-oat01-) below."
+    echo
+    docker run --rm -it --entrypoint="" "$IMAGE_NAME" claude setup-token
+}
+
 # Per-provider "how to obtain it" guidance (human hints, not machine facts — kept here rather
 # than in the registry so the table stays word-splittable).
 _provider_login_hint() {
     case "$1" in
         claude)
-            if command -v claude >/dev/null 2>&1; then
-                echo "   Running \`claude setup-token\`; complete the browser flow, then copy the"
-                echo "   token it prints (starts sk-ant-oat01-)."
-                echo
-                claude setup-token || echo "   ⚠️  claude setup-token exited non-zero — paste a token anyway, or Ctrl-C." >&2
-            else
-                echo "   \`claude\` is not on PATH — run this on the host and copy the token:"
-                echo "     claude setup-token"
-            fi
+            _mint_claude_token \
+                || echo "   ⚠️  minting did not complete — paste a token anyway, or Ctrl-C." >&2
             ;;
         # Everything else is a user-defined route (providers.d/); service-specific guidance
         # lives with its provider def (e.g. examples/providers/*.json), not in this table.
@@ -504,6 +531,38 @@ _provider_login_hint() {
         fi ;;
     esac
     echo
+}
+
+# Refuse the pastes that store fine and then fail somewhere far away — the reason has to arrive
+# here, at the prompt, not as a 401 hours later. Dies on refusal; separate from provider_login
+# so the check suite can drive it without a tty.
+_vet_pasted_secret() { # <provider-id> <pasted-string>
+    local id="$1" secret="$2"
+    case "$secret" in
+        "") die "nothing entered — nothing was written." ;;
+        *[!\ -~]*) die "that contains control characters — not stored." ;;
+        # A path is stored verbatim otherwise, and only the probe (a network round trip) ever
+        # says why. `if`, not `&&`: a false test ending the branch would exit under `set -e`.
+        /* | ./* | ~/*)
+            if [ -f "${secret/#\~\//$HOME/}" ]; then
+                die "that is a file path, not a credential — nothing was written." \
+                    "Paste the token itself (the file's contents), not where it lives."
+            fi
+            ;;
+    esac
+    [ "$id" = claude ] || return 0
+    case "$secret" in
+        # .credentials.json, whole or (since `read` takes one line) its first line. That
+        # accessToken is the ROTATING one: it works today and 401s tomorrow, by which time the
+        # box just shows a login prompt with no hint of why. The broker takes static tokens only.
+        '{'* | *claudeAiOauth* | *accessToken*) die \
+            "that looks like ~/.claude/.credentials.json — nothing was written." \
+            "That credential rotates, so brokering it breaks within hours and can log the" \
+            "account out. kib needs a static token — re-run: kib broker login claude" ;;
+        # Shape is advisory only; the probe decides.
+        sk-ant-oat01-* | sk-ant-api*) ;;
+        *) echo "   ⚠️  that doesn't start with sk-ant-oat01-/sk-ant-api — storing anyway; the probe decides." >&2 ;;
+    esac
 }
 
 # Add (or replace) a provider credential, stored HOST-ONLY. paste_token → hidden paste;
@@ -543,17 +602,7 @@ provider_login() {
         printf '   Paste the credential (input hidden), then Enter: '
         read -rs secret || true
         echo
-        case "$secret" in
-            "") die "nothing entered — nothing was written." ;;
-            *[!\ -~]*) die "that contains control characters — not stored." ;;
-        esac
-        # Claude token shape is advisory only; the probe decides. Others accept anything.
-        if [ "$id" = claude ]; then
-            case "$secret" in
-                sk-ant-oat01-* | sk-ant-api*) ;;
-                *) echo "   ⚠️  that doesn't start with sk-ant-oat01-/sk-ant-api — storing anyway; the probe decides." >&2 ;;
-            esac
-        fi
+        _vet_pasted_secret "$id" "$secret"
         _store_secret_file "$_P_FILE" "$secret"
         unset secret
         echo "   ✅ stored (mode 600)."
