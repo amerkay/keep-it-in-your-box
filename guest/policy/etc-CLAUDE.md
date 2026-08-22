@@ -160,3 +160,6 @@ not part of it and are not the user's memory — they mount read-only from outsi
 user's own `~/.claude/CLAUDE.md` is copied in fresh each launch, so `#` memory written to it in
 here is transient; durable user memory has to be written from a host terminal. Project memory and
 a repo's own `CLAUDE.md` persist normally.
+
+## For kib documentation, see README.md
+at https://raw.githubusercontent.com/amerkay/keep-it-in-your-box/refs/heads/main/README.md
