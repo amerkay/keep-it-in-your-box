@@ -4,8 +4,8 @@
 # Host-side scripts must be bash-3.2/BSD-clean (stock macOS, no brew). Two tiers:
 #   FATAL    — bash-4isms, empty-array expansion, and shimmed tools with a drop-in
 #              replacement (flock→lock_fd, sha256sum→hash8, grep -P).
-#   ADVISORY — setsid / notify-send: shimmed too, but the Wayland and broker notifiers use them
-#              raw BY DESIGN (structurally Linux-only), so these report rather than fail.
+#   ADVISORY — setsid / notify-send: shimmed too, but the Wayland notifier uses them raw
+#              BY DESIGN (structurally Linux-only), so these report rather than fail.
 #
 # Host-side python must import on the python3 stock macOS ships (3.9) — see the second section.
 #

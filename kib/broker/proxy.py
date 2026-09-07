@@ -218,13 +218,13 @@ class _RelayHandler(BaseHTTPRequestHandler):
             _do_relay(self, route, upstream_path, body)
         except (BrokenPipeError, ConnectionResetError) as e:
             # A peer went away mid-relay: the agent cancelled a turn, a subagent finished, or
-            # the upstream idle-closed a stream. Expected and NOT actionable — so never fire
-            # the notifier with it (BROKER-ERR pages the user; a benign transient reset must
-            # not cry wolf). Leave a non-matching breadcrumb for log spelunking.
+            # the upstream idle-closed a stream. Expected and NOT actionable, so it must not
+            # take the BROKER-ERR prefix — that one means a route stopped working. Leave a
+            # non-matching breadcrumb for log spelunking.
             stdout_line(f"BROKER-PEER-GONE {pid} {e}")
         except Exception as e:  # noqa: BLE001
             # Exception TYPE only, never str(e): a failure raised while handling credential
-            # bytes must not put those bytes into a log the notifier tails.
+            # bytes must not put those bytes into the log at all.
             stdout_line(f"BROKER-ERR {pid} relay failed: {type(e).__name__}")
             try:
                 self.send_error(502, "broker upstream error")

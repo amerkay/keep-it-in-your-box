@@ -5,10 +5,10 @@ are already written as sentences (several open with an emoji), so `logging`'s de
 `WARNING:` prefix would only get in the way; what the module buys is levels — set
 `KIB_LOG_LEVEL=DEBUG` to see the quiet ones without touching a call site.
 
-`stdout_line()` is the broker sidecar's breadcrumb channel and is NOT logging: the host
-notifier tails `docker logs` and greps for `BROKER-*`, so each record must stay one line,
-on stdout, flushed immediately. Routing it through `logging` would let a formatter or a
-level filter silently break that contract.
+`stdout_line()` is the broker sidecar's breadcrumb channel and is NOT logging: `BROKER-*` is
+a grep contract for whoever reads `docker logs`, so each record must stay one line, on stdout,
+flushed immediately. Routing it through `logging` would let a formatter or a level filter
+silently break that.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ def stdout_line(msg: str) -> None:
     """One flushed line on stdout, under a lock — the broker's `BROKER-*` grep contract.
 
     The lock matters: the proxy is threaded, and two half-written lines interleaved would
-    hide a `BROKER-FATAL` from the notifier that greps for it.
+    hide a `BROKER-FATAL` from anyone grepping the log for it.
     """
     with _stdout_lock:
         sys.stdout.write(msg + "\n")

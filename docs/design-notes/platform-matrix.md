@@ -50,7 +50,6 @@ creation. What differs is only *where the propagation root lives*, and how it is
 |---|---|---|---|---|
 | DNS | `resolv-sync.sh` follows the host resolver across wifi/VPN changes, keeping `127.0.0.11` first | Skipped — the engine VM tracks the host resolver; one info line at launch | `clipboard-and-dns.md` | ✅ |
 | Broker | On by default, static `:ro` token, same delivery modes | Identical | `credential-broker.md` | ✅ |
-| Broker mid-session alerts | `docker logs -f` follower raising `notify-send` on `BROKER-FATAL`/`BROKER-ERR`, backing off after 3 | None — `start_broker_notifier` returns immediately | `credential-broker.md` | — |
 | Dual-homing | Broker net + default bridge, so host dev servers and LAN stay reachable | Identical | `credential-broker.md` | ✅ |
 
 ## Sleep, power and notifications

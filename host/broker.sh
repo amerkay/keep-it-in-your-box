@@ -147,32 +147,11 @@ _broker_abort() {
         "(the pre-broker behaviour: the token is mounted into the container)."
 }
 
-# Mid-session broker problems as a desktop alert (startup problems already abort loudly).
-# Linux-only raw setsid/notify-send, the sanctioned portability-contract exception.
-#
-# 200>&- 201>&- is LOAD-BEARING: this follower outlives the kib that starts it, and inheriting
-# the project's shared lock would stop the last terminal out from tearing the container down.
-#
-# The budget backs off to one alert per 15 minutes after 3 — the old refresh loop paged every
-# 30s indefinitely, which trains you to dismiss the one that matters.
-start_broker_notifier() {
-    is_macos && return 0
-    command -v notify-send >/dev/null 2>&1 || return 0
-    # shellcheck disable=SC2016  # the body is the inner sh's script — its $vars are its own
-    setsid sh -c '
-        last=0; count=0
-        docker logs -f "$1" 2>&1 | while IFS= read -r line; do
-            case "$line" in BROKER-FATAL*|BROKER-ERR*) ;; *) continue ;; esac
-            gap=30; [ "$count" -ge 3 ] && gap=900
-            now=$(date +%s)
-            [ $((now - last)) -lt $gap ] && continue
-            last=$now; count=$((count + 1))
-            notify-send -u critical -i dialog-error "kib · credential broker" "$2" || true
-        done' _ "$BROKER_CNAME" \
-        "The credential broker could not reach the API or use its token. Check: kib broker status. Project: $(basename "$PWD")" \
-        >/dev/null 2>&1 200>&- 201>&- &
-    echo $! >"$BROKER_DIR/notify.pid"
-}
+# Mid-session broker problems are NOT paged (removed 2026-09-06). The desktop alert could not
+# say more than "something failed, run kib broker status", fired on transients the proxy already
+# retries, and arrived while the session it described was still working. `BROKER-ERR` /
+# `BROKER-FATAL` stay in the sidecar's log — `docker logs $BROKER_CNAME` — where they carry the
+# route and the reason. Startup failures still abort the launch loudly (`_broker_abort`).
 
 # Placeholder minted and port bound — or died trying, in which case the caller dumps the log.
 _broker_ready_or_dead() { [ -f "$BROKER_OUT/ready" ] || ! broker_running; }
@@ -276,7 +255,6 @@ EOF
     fi
 
     broker_config_hash >"$BROKER_HASH"
-    start_broker_notifier
     BROKER_ENABLED=1
     echo "🔐 credential broker: active — the real token is NOT in the sandbox (sidecar: $BROKER_CNAME)." >&2
 
@@ -435,7 +413,6 @@ verify_broker_attach() {
 }
 
 stop_broker() {
-    kill_pgrp "$BROKER_DIR/notify.pid" # whole group: the notifier is a setsid'd pipeline
     docker rm -f "$BROKER_CNAME" >/dev/null 2>&1 || true
     # The main container must be gone first (teardown_container stops it before calling this),
     # or the network still has an endpoint and rm fails — harmless, it is retried next time.

@@ -145,7 +145,7 @@ def _post_form(token_uri: str, fields: dict[str, str]) -> dict[str, Any]:
         raise OAuthError(f"{u.hostname} answered HTTP {status} with non-JSON", retryable) from e
     if status != 200 or not isinstance(data, dict):
         # Only the two standard error fields are surfaced. The full body is never logged: it
-        # is attacker-influenced text heading for a log the notifier tails.
+        # is attacker-influenced text heading for the sidecar's log.
         detail = ""
         if isinstance(data, dict):
             detail = f": {data.get('error', '')} {data.get('error_description', '')}".rstrip()

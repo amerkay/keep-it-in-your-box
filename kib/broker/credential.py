@@ -205,8 +205,8 @@ class Credential:
     def _mint_failed(self, why: str) -> str | None:
         """Breadcrumb + publish the failure, and hand back the None the caller returns.
 
-        The BROKER-ERR prefix is what the desktop notifier tails, so a route that stops
-        minting pages the user instead of silently 502ing.
+        BROKER-ERR is the log's "a route stopped working" prefix, so `docker logs` names the
+        route that stopped minting instead of showing an unexplained 502.
         """
         stdout_line(f"BROKER-ERR {self.pid} could not mint an access token: {why}")
         self._write_state("", why)
