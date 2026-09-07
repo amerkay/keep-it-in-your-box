@@ -11,16 +11,23 @@
 #
 # Usage:  ./sleep-postmortem.sh [hours_back]        # default 14
 #         sudo ./sleep-postmortem.sh 14             # only if the journal check below says so
+#         ./sleep-postmortem.sh --live [seconds]    # no journal, no suspend: rank the devices
+#                                                   # that refuse to idle RIGHT NOW (default 60s)
 #
 # Linux/systemd only.
 
 set -uo pipefail
 
+LIVE=0
+[ "${1:-}" = "--live" ] && {
+    LIVE=1
+    shift
+}
 HOURS="${1:-14}"
 USER="${USER:-$(id -un)}" # set -u + a login shell that never exported it (cron, sudo -E) would abort
 MAXLINES=120              # per-command output cap, so one chatty source can't bury the rest
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPORT="$SELF_DIR/sleep-postmortem-$(date +%Y%m%d-%H%M%S).txt"
+REPORT="$SELF_DIR/sleep-$([ "$LIVE" = 1 ] && echo live || echo postmortem)-$(date +%Y%m%d-%H%M%S).txt"
 SINCE="$(date -d "-${HOURS} hours" '+%Y-%m-%d %H:%M:%S')"
 SINCE_EPOCH="$(date -d "-${HOURS} hours" +%s)"
 
@@ -31,6 +38,109 @@ command -v journalctl >/dev/null 2>&1 || {
 
 FINDINGS=() # verdict lines, printed as the last section
 note() { FINDINGS+=("$1"); }
+
+# ---------------------------------------------------------------- --live mode
+# A device that cannot reach D3 while the machine is merely IDLE will not reach it in s2idle
+# either, so the "what is holding the SoC awake" question is answerable WITHOUT suspending:
+# runtime_active_time is a free-running per-device counter in ms, and its delta over a window is
+# exactly "how long this device was active". Sample twice, diff, rank. Nothing is written and no
+# power state is changed.
+_pm_sample() {
+    local d n
+    for d in /sys/bus/pci/devices/*/ /sys/bus/usb/devices/*/; do
+        [ -r "$d/power/runtime_active_time" ] || continue
+        n="$(basename "$d")"
+        printf '%s %s %s %s\n' "$n" "$(cat "$d/power/runtime_active_time" 2>/dev/null || echo 0)" \
+            "$(cat "$d/power/runtime_suspended_time" 2>/dev/null || echo 0)" \
+            "$(cat "$d/power/runtime_status" 2>/dev/null || echo '?')"
+    done
+}
+
+live_probe() {
+    local window="${1:-60}" before after
+    printf '=== live device-activity probe — %s ===\n' "$(date '+%F %T %Z')"
+    printf 'window: %ss   AC online: %s   (compare runs in the SAME power state)\n\n' \
+        "$window" "$(cat /sys/class/power_supply/ACAD/online 2>/dev/null || echo '?')"
+
+    sec "USB-C PORTS — which one has something in it"
+    run 'for p in /sys/class/typec/port[0-9]; do [ -d "$p" ] || continue; printf "%s partner=%s" "$(basename "$p")" "$([ -e "${p}-partner" ] && echo YES || echo no)"; for k in power_role data_role port_type; do [ -r "$p/$k" ] && printf "  %s=%s" "$k" "$(cat "$p/$k")"; done; echo; done'
+    run 'for f in /sys/class/power_supply/ucsi-source-psy-*/online; do echo "$(basename "$(dirname "$f")") online=$(cat "$f")"; done'
+
+    sec "USB4 / THUNDERBOLT TOPOLOGY — is a real USB4 device attached, or just a charger?"
+    echo "(only domainN and N-0 entries = host routers only, nothing downstream: then an ACTIVE"
+    echo " USB4 block is the controller failing to idle, not a device legitimately using it.)"
+    run 'ls -1 /sys/bus/thunderbolt/devices/ 2>/dev/null'
+    run 'boltctl list 2>/dev/null || echo "(boltctl absent or no devices)"'
+    # A typec port with a partner but no charger is an expansion card / peripheral, and those hang
+    # off the internal xHCI — a different blocker class from anything USB4.
+    run 'lsusb -t 2>/dev/null || echo "(no lsusb)"'
+    run 'for d in /sys/bus/usb/devices/*/product; do echo "$(basename "$(dirname "$d")")  $(cat "$d")"; done 2>/dev/null'
+
+    sec "RUNTIME-PM ACTIVITY over ${window}s — the live answer, no suspend needed"
+    echo "Sampling... (leave the machine alone for ${window}s)"
+    before="$(_pm_sample)"
+    sleep "$window"
+    after="$(_pm_sample)"
+    echo
+    # A device whose runtime_suspended_time is still 0 after the whole boot has no working runtime
+    # PM at all (host bridges, CPU function devices) — it reads as 100% active forever and is pure
+    # noise. The offenders are devices that demonstrably CAN idle and simply did not.
+    local rows
+    rows="$(printf '%s\n' "$after" | awk -v before="$before" -v w="$window" '
+        BEGIN { n = split(before, L, "\n")
+                for (i = 1; i <= n; i++) { split(L[i], f, " "); BA[f[1]] = f[2]; BS[f[1]] = f[3] } }
+        { da = $2 - BA[$1]; ds = $3 - BS[$1]
+          if ($3 == 0 && ds == 0) { norpm++; norpmlist = norpmlist " " $1; next }  # no runtime PM
+          if (da <= 0) { idle++; next }
+          pct = (w > 0) ? da / (w * 10) : 0; if (pct > 100) pct = 100
+          tag = (pct >= 90) ? "NEVER IDLED <<<" : (pct >= 10) ? "partly busy" : "blip"
+          printf "%7d ms  %5.1f%%   %-14s %-11s %s\n", da, pct, $1, $4, tag }
+        END { printf "SUMMARY %d devices idled the whole window; %d have no runtime PM (skipped)\n",
+                     idle, norpm
+              printf "SKIPPED %s\n", norpmlist }')"
+    echo "  active   of window   device         state       verdict"
+    printf '%s\n' "$rows" | grep -v '^SUMMARY\|^SKIPPED' | sort -k1 -rn -s | head -30
+    printf '\n  (%s)\n' "$(printf '%s\n' "$rows" | sed -n 's/^SUMMARY //p')"
+    echo
+    echo "  USING THE MACHINE during the window can only INFLATE a device's active time, never"
+    echo "  deflate it — so every 'idled' verdict above is trustworthy even if you were typing,"
+    echo "  while a 'NEVER IDLED' row may just be that device doing its job. Re-run hands-off to"
+    echo "  tell a stuck device from a busy one."
+    echo
+    echo "  BLIND SPOT — these have no runtime PM at all, so this probe says nothing about them:"
+    printf '%s\n' "$rows" | sed -n 's/^SKIPPED //p' | tr ' ' '\n' | sed '/^$/d;s/^/    /' | paste -sd' ' -
+    echo
+    echo "  A row at ~100% is a device that never left D0 while the machine sat idle. That is a"
+    echo "  real power fault worth fixing, but it is a HEURISTIC for s2idle, not proof: system"
+    echo "  suspend calls each driver's suspend callback regardless of runtime state, so a device"
+    echo "  can be pinned here and still suspend fine — and vice versa. Only amd_pmc's smu_fw_info"
+    echo "  says what actually blocked s0ix. Where the two disagree, believe smu_fw_info."
+    echo
+
+    # Name whatever the ranking flagged, rather than a hardcoded watchlist that cannot know in
+    # advance which device will misbehave.
+    sec "IDENTITY of every device flagged above"
+    local a p
+    for a in $(printf '%s\n' "$rows" | grep -v '^SUMMARY' | awk '{print $4}'); do
+        case "$a" in
+            0000:*)
+                if command -v lspci >/dev/null 2>&1; then
+                    lspci -nnk -s "${a#0000:}" 2>/dev/null | sed 's/^/   /'
+                else
+                    p="/sys/bus/pci/devices/$a"
+                    printf '   %s vendor=%s device=%s driver=%s\n' "$a" \
+                        "$(cat "$p/vendor" 2>/dev/null)" "$(cat "$p/device" 2>/dev/null)" \
+                        "$(basename "$(readlink "$p/driver" 2>/dev/null || echo none)")"
+                fi
+                ;;
+            *)
+                p="/sys/bus/usb/devices/$a"
+                printf '   USB %s  %s %s\n' "$a" "$(cat "$p/manufacturer" 2>/dev/null)" \
+                    "$(cat "$p/product" 2>/dev/null)"
+                ;;
+        esac
+    done
+}
 
 sec() {
     printf '\n\n=================================================================\n'
@@ -68,6 +178,9 @@ PAT="$PAT|sleep\.target|suspend\.target|systemd-suspend|Failed to (suspend|hiber
 PAT="$PAT|powerdevil|PowerDevil|org_kde_powerdevil|upowerd|[Ii]dle action|IdleHint|idle timeout"
 PAT="$PAT|[Ww]akeup|rtcwake|Wake-?up|battery (critical|low)|discharg"
 PAT="$PAT|s2idle|s0ix|Low-power S0|amd_pmc|hw_sleep|SMU|[Aa]borting suspend"
+# USB-C/PD: a charger or dock that keeps the PD controller busy blocks s0ix by a path that
+# disabling PCI power/wakeup does not touch, and it only shows up when something is plugged in.
+PAT="$PAT|typec|ucsi|port0-partner|should not be sleeping|[Pp]ower [Dd]elivery"
 
 main() {
     printf '=== kib sleep post-mortem — generated %s ===\n' "$(date '+%F %T %Z')"
@@ -159,7 +272,15 @@ main() {
     run 'swapon --show'
     run 'free -h | head -3'
     run 'cat /sys/power/disk 2>/dev/null; cat /sys/power/resume 2>/dev/null'
-    run 'grep -c . /sys/kernel/debug/amd_pmc/s0ix_stats 2>/dev/null || echo "(s0ix_stats needs root: sudo cat /sys/kernel/debug/amd_pmc/s0ix_stats)"'
+    echo
+    echo "-- AMD PMC: the only source that NAMES what blocked s0ix. Needs root, so run by hand"
+    echo "   right after a bad suspend (both files describe the LAST s2idle attempt only):"
+    echo "     sudo cat /sys/kernel/debug/amd_pmc/s0ix_stats"
+    echo "     sudo cat /sys/kernel/debug/amd_pmc/smu_fw_info   # per-IP-block, names the offender"
+    run 'grep -c . /sys/kernel/debug/amd_pmc/s0ix_stats 2>/dev/null || echo "(unreadable as this user, as expected)"'
+    # Residency is only comparable like-for-like: a charger or dock keeps the PD controller busy,
+    # so an on-AC number must never be read against an on-battery one.
+    run 'echo "AC online now = $(cat /sys/class/power_supply/ACAD/online 2>/dev/null) — compare residency only against runs in the SAME power state"'
 
     # ---------------------------------------------- 4. lid-close correlation
     sec "4. LID-CLOSE EVENTS — and what the machine did in the 3 minutes after each"
@@ -419,6 +540,12 @@ main() {
     fi
     printf '\n=== end of report — %s ===\n' "$(date '+%F %T')"
 }
+
+if [ "$LIVE" = 1 ]; then
+    live_probe "${1:-60}" 2>&1 | tee "$REPORT"
+    printf '\nReport written to:\n  %s\n' "$REPORT"
+    exit 0
+fi
 
 main 2>&1 | tee "$REPORT"
 printf '\nReport written to:\n  %s\n' "$REPORT"
