@@ -183,6 +183,19 @@ def redact_optouts(guard_rules: Sequence[Rule], project_rules: Iterable[Rule]) -
     ]
 
 
+def tightens(old: Sequence[Rule], new: Sequence[Rule]) -> bool:
+    """True if `new` can only withhold MORE than `old` — the live-reload gate.
+
+    A project rule that is not negated only ever ADDS a redact verdict (see `verdict`), so a
+    list keeping every old rule and adding none that are negated cannot hand the session a path
+    it could not already read. SUBSEQUENCE, not subset: rules are last-match-wins, so swapping
+    `!foo` and `foo` flips the verdict with the set unchanged.
+    """
+    remaining = iter(new)
+    kept_in_order = all(rule in remaining for rule in old)  # `old` is a subsequence of `new`
+    return kept_in_order and not any(rule.negated for rule in set(new) - set(old))
+
+
 def _optouts_cmd(guard_file: str, rule_file: str) -> int:
     """`optouts <guard-file> <rule-file>` — one un-redacting project rule per line."""
     for pattern in redact_optouts(load(guard_file, guard=True), load(rule_file)):
@@ -190,10 +203,15 @@ def _optouts_cmd(guard_file: str, rule_file: str) -> int:
     return cli.OK
 
 
+def _tightens_cmd(old_file: str, new_file: str) -> int:
+    """`tightens <old-rules> <new-rules>` — status 0 if the new set can only redact more."""
+    return cli.OK if tightens(load(old_file), load(new_file)) else cli.REFUSED
+
+
 def main(argv: list[str]) -> int:
     return cli.dispatch(
         "kib.shared.rules",
-        {"optouts": (_optouts_cmd, 2)},
+        {"optouts": (_optouts_cmd, 2), "tightens": (_tightens_cmd, 2)},
         argv,
     )
 

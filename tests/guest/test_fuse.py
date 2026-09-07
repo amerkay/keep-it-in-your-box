@@ -830,3 +830,15 @@ def test_a_refused_fd_limit_raise_is_survivable(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(resource, "getrlimit", lambda _w: (1024, 524288))
     monkeypatch.setattr(resource, "setrlimit", _boom)
     assert fuse.raise_fd_limit() == (1024, 1024)
+
+
+# ── reload: the live rule swap (host/redaction.sh, over SIGHUP) ──
+def test_reload_swaps_the_rules_and_drops_the_memoised_verdicts(
+    redact: Callable[[str], Any],
+) -> None:
+    """The memo is the whole point of the test: a reload that left it in place would keep
+    serving the old verdict for every path already looked at."""
+    ops = redact("")
+    assert ops._verdict("data.log") is None  # memoised as readable
+    ops.reload(list(ops.rules) + rules.parse(["*.log"]))
+    assert ops._verdict("data.log") == rules.REDACT

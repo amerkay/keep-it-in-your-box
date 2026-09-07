@@ -220,3 +220,34 @@ def test_matches_is_the_boolean_face_of_verdict() -> None:
     parsed = rules.parse(["secrets", "!secrets/ok"])
     assert rules.matches(parsed, "secrets") is True
     assert rules.matches(parsed, "other") is False
+
+
+# ── tightens(): the live-reload gate (host/redaction.sh) ─────────
+# A false positive here swaps looser rules into a RUNNING view with nobody asked, so each case
+# is one way a rule file can withhold less than the one before it.
+
+
+def test_tightens_accepts_an_added_rule() -> None:
+    assert rules.tightens(rules.parse(["*.pem"]), rules.parse(["*.pem", "secrets"])) is True
+
+
+def test_tightens_refuses_a_new_optout() -> None:
+    assert rules.tightens(rules.parse(["*.pem"]), rules.parse(["*.pem", "!.env"])) is False
+
+
+def test_tightens_refuses_a_dropped_rule() -> None:
+    assert rules.tightens(rules.parse(["*.pem", "secrets"]), rules.parse(["secrets"])) is False
+
+
+def test_tightens_refuses_a_reorder_that_flips_a_negation() -> None:
+    """The set of rules is identical and the verdict is opposite: last match wins."""
+    old, new = rules.parse(["!foo", "foo"]), rules.parse(["foo", "!foo"])
+    assert set(old) == set(new)
+    assert rules.verdict(old, "foo") == rules.REDACT
+    assert rules.verdict(new, "foo") is None
+    assert rules.tightens(old, new) is False
+
+
+def test_tightens_accepts_a_first_rule_file() -> None:
+    assert rules.tightens([], rules.parse(["secrets"])) is True
+    assert rules.tightens([], rules.parse(["!.env"])) is False

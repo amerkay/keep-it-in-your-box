@@ -364,6 +364,33 @@ else
         "every re-read of an unchanged file goes back to crossing userspace in full"
 fi
 
+# The live rule reload, and the only spelling of it that works. A signal.signal handler for
+# SIGHUP would never run — the main thread is inside libfuse's C loop for the mount's whole
+# life, and CPython runs handlers only when the MAIN thread reaches the eval loop — and libfuse
+# would keep the signal for its own handler, which tears the mount down. Both failures are
+# silent: the host restages, reports a reload, and the box keeps the old rules.
+if grep -q 'signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGHUP})' "$KIB_ROOT/kib/guest/fuse.py" \
+    && grep -q 'signal.sigwait(\[signal.SIGHUP\])' "$KIB_ROOT/kib/guest/fuse.py"; then
+    pass "the sidecar takes SIGHUP off libfuse and reloads from a sigwait thread"
+else
+    fail "kib/guest/fuse.py no longer blocks SIGHUP and sigwaits it" \
+        "a signal.signal handler never runs under fuse_main_real, and libfuse unmounts on SIGHUP"
+fi
+
+# The watcher runs detached, with no terminal to ask at, so its ONE reload call must sit behind
+# the tightens gate. Unconditional, a session that wrote `!.env` into .kibignore would have it
+# applied to the live view within seconds — by the host, on the box's say-so, with nobody told.
+# Code only: the header names _reload_rules in prose, which must not count as a call.
+_rw="$(sed 's/#.*$//' "$KIB_ROOT/host/rules-watch.sh")"
+if [ "$(printf '%s\n' "$_rw" | grep -c '_reload_rules')" = 1 ] \
+    && printf '%s\n' "$_rw" | grep -A1 'shared.rules tightens' | grep -q '_reload_rules'; then
+    pass "host/rules-watch.sh reloads only behind the tightens gate"
+else
+    fail "host/rules-watch.sh can reload without checking rules.tightens first" \
+        "a detached watcher has nobody to ask, so a loosening edit must wait for an attach"
+fi
+unset _rw
+
 # libfuse calls flush on EVERY close(2), so an fsync there is a forced writeback per file —
 # on read-only opens too. It bought nothing: writes are os.pwrite straight to the backing fd
 # with no userspace buffer, and release()'s mirror size check reads the same kernel's view

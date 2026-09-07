@@ -78,16 +78,66 @@ _stale_mount_report() { # <die|warn>
         "restart the engine to clear it."
 }
 
-# The rule file changed since the container started → the running layer enforces the OLD
-# rules. $1 is the staged copy to compare against, and the message names it: the box can write
-# .kibignore, so the usual cause is an edit an in-box session made, and "I never touched that
-# file" has no answer without the one copy of what the live layer is enforcing.
-_refuse_if_rules_stale() {
+# Restage, then signal the sidecar to re-read. The staged copy must ALWAYS be what the live
+# layer enforces — it is the only record of that — so the old bytes go back if the signal does
+# not land. `cp` both ways, never `mv`: the sidecar's bind is of this INODE, so a rename leaves
+# the host on the old rules while the container reads the new ones. Inverted, and silent.
+#
+# Locked at all because an attaching launch and host/rules-watch.sh both write this file. fd
+# 204, NOT 202: teardown holds the project lock there while it calls in here (host/lifecycle.sh)
+# and 203 is canonical .claude.json's. Never unlinked.
+_reload_rules() { # <staged> <why>
+    local staged="$1" rc=1
+    exec 204>"$staged.lock"
+    lock_fd -x 204 || {
+        exec 204>&-
+        return 1
+    }
+    if cp "$staged" "$staged.prev"; then
+        _stage_patterns "$staged"
+        if docker kill -s HUP "$FUSE_CNAME" >/dev/null 2>&1; then
+            rc=0
+        else
+            cp "$staged.prev" "$staged"
+        fi
+        rm -f "$staged.prev"
+    fi
+    exec 204>&-
+    [ "$rc" = 0 ] && echo "🛡️  $KIB_RULE_FILE reloaded into the live redaction view — $2." >&2
+    return "$rc"
+}
+
+# The one way the LOOSENING direction reaches a running view. `[ -t 0 ]`: a headless launch has
+# nobody to ask, and defaulting to yes there would let the box's own edit approve itself.
+_confirm_looser_rules() {
+    local staged="$1" ans optouts
+    [ -t 0 ] || return 1
+    warn "$KIB_RULE_FILE changed, and the new rules withhold LESS than the running view."
+    diff -u "$staged" "$PWD/$KIB_RULE_FILE" | head -40 | sed 's/^/   /' >&2
+    optouts="$(kib_py shared.rules optouts "$KIB_GUARD_FILE_HOST" "$PWD/$KIB_RULE_FILE")" || true
+    [ -n "$optouts" ] && printf '%s\n' "$optouts" | sed 's/^/   hands the session: !/' >&2
+    echo "   A session in the box can write $KIB_RULE_FILE, so an edit nobody made by hand is" >&2
+    echo "   expected here. Applying it is what makes those files readable." >&2
+    printf '   Apply to the running redaction view? [y/N] ' >&2
+    read -r ans || return 1
+    case "$ans" in [yY] | [yY][eE][sS]) return 0 ;; *) return 1 ;; esac
+}
+
+# The rule file changed since the container started, so the running layer is on the OLD rules. A
+# change that can only redact MORE is swapped in without asking; anything that could hand the
+# session a path it could not read before is the user's call, because the box can write this
+# file. Without python the gate fails and every edit falls to the prompt — the safe direction.
+_reload_or_refuse_stale_rules() {
     local staged="$1"
     cmp -s "$PWD/$KIB_RULE_FILE" "$staged" 2>/dev/null && return 0
     [ ! -f "$PWD/$KIB_RULE_FILE" ] && [ ! -s "$staged" ] && return 0
-    die "$KIB_RULE_FILE changed since this project's container started." \
-        "The running redaction layer still enforces the OLD rules. Refusing to" \
+    if kib_py shared.rules tightens "$staged" "$PWD/$KIB_RULE_FILE"; then
+        _reload_rules "$staged" "it redacts strictly more" && return 0
+    elif _confirm_looser_rules "$staged"; then
+        _reload_rules "$staged" "you confirmed it" && return 0
+    fi
+    die "$KIB_RULE_FILE changed since this project's container started, and the change was" \
+        "not applied. The running redaction layer still enforces the OLD rules. Refusing to" \
         "attach — close all kib sessions for this project and relaunch." \
         "A session in the box can edit $KIB_RULE_FILE, so an edit nobody made by hand" \
         "is expected here. The staged copy is what the live layer enforces:" \
@@ -164,6 +214,14 @@ prepare_redaction() {
     # not propagate back out to the host.
     REDACTION_ARGS=(-v "$FUSE_ROOT/mnt:$PWD:rslave")
     echo "🛡️  $KIB_RULE_FILE: FUSE redacting mount active (sidecar: $FUSE_CNAME)" >&2
+
+    # Carries a later $KIB_RULE_FILE edit into this view without waiting for a launch. The
+    # pidfile is in $STATE_DIR, NOT bind-mounted into the box: teardown kills whatever group it
+    # names. The path stays a LITERAL — tests/check/wiring.sh finds exec'd scripts by grepping
+    # this call shape, and a variable hides them from it.
+    detach_pgrp "$KIB_ROOT/host/rules-watch.sh" "$PATTERNS_STATE" "$FUSE_CNAME" 200>&- 201>&-
+    echo $! >"$PATTERNS_STATE.watch.pid"
+    disown 2>/dev/null || true
 }
 
 sidecar_running() { [ -n "$(docker ps -q -f "name=^${FUSE_CNAME}$" 2>/dev/null)" ]; }
@@ -191,7 +249,7 @@ _sidecar_mounted_or_gone() { _sidecar_mounted || ! sidecar_running; }
 
 # Three things must hold to attach: the sidecar is up (it is unconditional, so its absence is
 # always an error — including for a container an older kib left running), the view actually
-# reached the AGENT's container, and the rules have not changed since it started.
+# reached the AGENT's container, and the rules match — or can be reloaded into — what is running.
 # global.kibignore cannot go stale: it mounts :ro from the checkout, so the sidecar and this
 # process read the very same file.
 verify_redaction_attach() {
@@ -205,7 +263,7 @@ verify_redaction_attach() {
             "Refusing to attach — close all kib sessions for this project and relaunch." \
             "(A container created by an older kib will always land here.)"
     fi
-    _refuse_if_rules_stale "$PATTERNS_STATE"
+    _reload_or_refuse_stale_rules "$PATTERNS_STATE"
 }
 
 # Did this project ever get a sidecar? teardown_redaction also runs defensively on the cold-start
@@ -232,6 +290,8 @@ _unmount_view() {
 # then dies on the rm below. Confirmed live on Docker Desktop: the mount outlives the container.
 teardown_redaction() {
     _redaction_present || return 0
+    # First: the watcher must not signal a sidecar being torn down out from under it.
+    kill_pgrp "$PATTERNS_STATE.watch.pid" # whole group: it is its own (detach_pgrp)
     if ! _unmount_view; then
         # WARN, never die: this runs from the EXIT trap, ahead of merge_out_session — aborting
         # here would lose the session's .claude.json/history fold-back and overwrite its exit
@@ -244,5 +304,6 @@ teardown_redaction() {
     # `|| true` throughout: never let a failed cleanup kill kib under `set -e` — least of all
     # from the EXIT trap, where it would also overwrite the session's exit code.
     fuse_root_destroy "$FUSE_ROOT"
-    rm -f "$PATTERNS_STATE" "$PASSWD_STATE" "$GROUP_STATE" 2>/dev/null || true
+    rm -f "$PATTERNS_STATE" "$PATTERNS_STATE.prev" "$PASSWD_STATE" "$GROUP_STATE" \
+        2>/dev/null || true
 }

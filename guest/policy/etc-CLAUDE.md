@@ -74,13 +74,17 @@
     into**; that is the "ask the user" case, and every opt-out is printed at each launch with
     the user reading it. `!` still cannot touch the Protected tier below: `!.vscode` does
     nothing.
-  - **It is read once, when the container is created**, so say this whenever you write one: the
-    live layer keeps enforcing the OLD rules for the rest of the session, and the next `kib`
-    **refuses to attach** until every session for this project is closed and the container
-    recreated. That next launch also names any **already-tracked** file the rules match, since
-    hiding a file from the sandbox does nothing about a copy already in git — the user has to
-    `git rm --cached` them. Nothing is written to `.gitignore` on their behalf; if untracked
-    matches should stay out of git too, say so and let them add the lines.
+  - **A rule you ADD takes effect in seconds; one you remove does not** — say which whenever you
+    write one. A host watcher applies an edit that redacts *strictly more* (every old rule still
+    there, in order, and no new `!`) to the running view within a couple of seconds, no
+    relaunch — so a file you just covered reads redacted almost at once, and you can check by
+    reading it. Anything that would hand the session a file it could not read before is not
+    yours to apply: deleting or commenting out a rule, or adding a `!`, leaves the old rules in
+    force until the user starts another session, where kib shows them the diff and asks, and
+    **refuses to attach** on no answer or no. The next launch also names any **already-tracked**
+    file the rules match — hiding a file from the sandbox does nothing about a copy already in
+    git, and the user has to `git rm --cached` them. Nothing is written to `.gitignore` on their
+    behalf; if untracked matches should stay out of git too, say so and let them add the lines.
 - **Protected** — `.git/config`, `.git/hooks` (+ submodule/worktree equivalents), `.githooks/`,
   `.gitmodules`, `.vscode/`, `.devcontainer/`, `.envrc`,
   `.cursor/mcp.json`, `.zed/tasks.json`, `.zed/debug.json`, `.run/`, `.mvn/jvm.config`, `.exrc`,

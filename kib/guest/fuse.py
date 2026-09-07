@@ -22,8 +22,10 @@ import json
 import os
 import re
 import resource
+import signal
 import sys
-from collections.abc import Sequence
+import threading
+from collections.abc import Callable, Sequence
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -294,23 +296,33 @@ class Redact(Operations):  # type: ignore[misc]
     def _rel(self, path: str) -> str:
         return path.lstrip("/")
 
+    def reload(self, rule_list: Sequence[rules.Rule]) -> None:
+        """Swap the rule set on a LIVE mount — the host's SIGHUP (host/redaction.sh).
+
+        A FRESH dict, never `.clear()`: a worker preempted inside `_verdict` would otherwise
+        store its pre-reload answer after the swap, leaving a path readable under rules that now
+        redact it. Rules first, so a thread seeing the new cache also sees the new rules.
+        """
+        self.rules = rule_list
+        self._verdicts = {}
+
     def _verdict(self, rel: str) -> str | None:
-        """Memoised, because it is a pure function of the path: the rule list is frozen for the
-        container's lifetime, and a `.kibignore` edited mid-session refuses the next attach
-        rather than reloading (host/redaction.sh). So a hit cannot be stale by construction.
+        """Memoised, because within one rule set it is a pure function of the path. The set is
+        replaced only by `reload`, which discards this cache with it, so a hit cannot be stale.
 
         This is THE hot path. `_classify` re-asks it for every ancestor of every getattr, open
         and read, which at node_modules depth was ~0.3 ms of fnmatch per op recomputing an
         answer that never changes. Only the rule verdict is cached — `_classify`'s own
         lexists/isdir stay live, so a file appearing or vanishing is still seen at once.
         """
+        cache = self._verdicts  # bound ONCE: `reload` may swap it mid-call — see there
         try:
-            return self._verdicts[rel]
+            return cache[rel]
         except KeyError:
-            if len(self._verdicts) >= VERDICT_CACHE_MAX:
-                self._verdicts.clear()
+            if len(cache) >= VERDICT_CACHE_MAX:
+                cache.clear()
             v = rules.verdict(self.rules, rel)
-            self._verdicts[rel] = v
+            cache[rel] = v
             return v
 
     def _protected(self, path: str) -> bool:
@@ -750,6 +762,27 @@ def raise_fd_limit() -> tuple[int, int]:
     return before, resource.getrlimit(resource.RLIMIT_NOFILE)[0]
 
 
+def _reload_on_sighup(ops: Redact, build: Callable[[], list[rules.Rule]]) -> None:
+    """Re-read the rule files on SIGHUP — the host's live-reload path (host/redaction.sh).
+
+    Blocked signal + `sigwait` thread, NOT `signal.signal`, and both halves are load-bearing. A
+    Python handler would never run: the main thread is inside libfuse's C loop for the mount's
+    whole life, and CPython runs handlers only when the MAIN thread reaches the eval loop.
+    Blocking it process-wide (before libfuse spawns its workers, which inherit the mask) also
+    takes SIGHUP away from libfuse, whose own handler TEARS THE MOUNT DOWN.
+    """
+    signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGHUP})
+
+    def loop() -> None:
+        while True:
+            signal.sigwait([signal.SIGHUP])
+            rule_list = build()
+            ops.reload(rule_list)
+            print(f"kib-fuse: reloaded rules={[str(r) for r in rule_list]}", file=sys.stderr)
+
+    threading.Thread(target=loop, daemon=True).start()
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="kib-fuse", description="redacting FUSE passthrough")
     ap.add_argument("--src", required=True)
@@ -769,10 +802,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     # Guard rules first for readability only: verdict() tallies immune rules separately, so
     # they outrank project rules regardless of position here. Their order relative to *each
     # other* is what matters (last match wins).
-    rule_list = rules.load(args.guard_file, guard=True)
-    guard_count = len(rule_list)
-    rule_list += rules.load(args.patterns_file)
+    def build_rules() -> list[rules.Rule]:
+        # ONE build path, shared with the SIGHUP reload. The guard file is re-read there too:
+        # it is :ro from the checkout and cannot change, but a second code path could.
+        return rules.load(args.guard_file, guard=True) + rules.load(args.patterns_file)
+
+    rule_list = build_rules()
+    guard_count = sum(1 for r in rule_list if r.immune)
     ops = Redact(args.src, rule_list, uid=args.uid, gid=args.gid)
+    _reload_on_sighup(ops, build_rules)
     fd_before, fd_after = raise_fd_limit()
     print(
         f"kib-fuse: src={args.src} mnt={args.mnt} guard={guard_count} "
