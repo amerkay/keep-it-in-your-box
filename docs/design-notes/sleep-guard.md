@@ -29,7 +29,10 @@ already carries the sandbox `CLAUDE.md`. The hook writes marker files into `$SLE
       <root>/<tag>/wait          blocked on the USER (question tool, permission prompt)
       <root>/<tag>/agents/<id>   one file per live subagent
 
-      BUSY := (turn AND NOT wait) OR any agents/*
+      <root>/<tag>/tools/<id>.<min>  one tool call in flight (PreToolUse → PostToolUse*)
+
+      BUSY := (turn AND NOT wait) OR any agents/* OR any tools/* — each counted only while
+              younger than ITS OWN window: turn 2 min, agents 15, a tool call its own timeout
 
 - **`wait` suppresses only the turn, never the agents.** Background subagents keep running while a
   question sits unanswered, and since 2.1.198 background is the *default* for subagents.
@@ -77,6 +80,44 @@ those alternatives is a dead end below.
   dead weight. A lock still held with no live guard is an *orphaned inhibitor*, which is a different
   bug and is what `sleep-monitor`'s ORPHANED check is for.
 - **Turn died on an API error** → `StopFailure` clears `turn`; without it nothing would.
+- **The user pressed Esc** → **no event fires at all**, and that was the laptop-on-all-night bug.
+  Verified in 2.1.270: the hook runner's first act is `if (signal?.aborted) return`, and an
+  interrupted turn's `Stop`, `PostToolUse` and `PostToolUseFailure` (which even carries an
+  `is_interrupt` flag) are all invoked with `abortController.signal` — the one that just fired.
+  Subagents survive only because their cleanup deliberately passes `signal: undefined`. `wait` is
+  no backstop either: the `idle_prompt` notification is armed only while
+  `getLastInteractionTime() <= lastQueryCompletionTime`, so **one keystroke in the composer after
+  Esc cancels it permanently**. `turn` outlived the work and existence alone read as busy for the
+  rest of the session.
+
+  **Nor is anything written.** Measured on a session stuck in this exact state: the transcript's
+  last write was the user's own prompt — no assistant reply, no `[Request interrupted by user]`
+  entry. That entry appears only when the session next continues, far too late to be a signal. So
+  the only question left is how long a marker may be trusted without fresh evidence, and every
+  event doubles as a heartbeat for the work it belongs to. Windows, by what each can plausibly
+  keep quiet:
+
+  - **`turn`: 2 min** — between events a live turn is quiet only while the model thinks and
+    streams. This number *is* the delay before an interrupted session lets the machine sleep, so
+    it is as short as live work can bear; whole-minute `find -mmin` plus `GRACE` makes the real
+    release ~2.5–3 min.
+  - **`tools/<id>.<min>`: the call's own timeout** (Claude's default when undeclared, capped at
+    15), named into the marker by the hook. A call cannot outlive its timeout, so that is both
+    how long a live one may be silent and how long an abandoned one can lie. This marker is the
+    whole reason `turn` can expire in 2 min rather than 15 — a silent ten-minute build is now
+    something the host can see rather than a possibility every quiet turn gets credit for. The
+    two human-blocking tools get no marker: they are not work.
+  - **`agents/<id>`: 15 min** — this file is all the host sees of a subagent, and one of ITS tool
+    calls can be silent for a whole timeout.
+
+  **DEAD END — reading the interrupt out of the transcript.** Built and removed: a detached
+  per-turn poller tailing the session's own transcript for the interrupt entry, clearing `turn`
+  in ~5s. Nothing is written at interrupt time, so it never fired. Two lessons kept: the check
+  must be an equality on the entry's content, never a substring (a tool result is a `type:"user"`
+  entry, so any turn that greps for the marker — this repo's own tests included — would clear its
+  own live turn); and a host-side grep of that file is worse than any in-box reader, since it
+  puts conversation content on a second channel through the box↔host boundary and drags
+  `$SESSION_BASE` plus a session-id→path translation into the guard.
 - **A subagent's own tool calls** carry `agent_id` and share the parent's `session_id`, so the hook
   ignores every event that carries one except `SubagentStart`/`SubagentStop`. Otherwise a subagent's
   `PostToolUse` would clear a `wait` the user is still sitting on.

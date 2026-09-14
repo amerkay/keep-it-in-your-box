@@ -212,6 +212,22 @@ t_sleep_state() {
     : >"$d/tag/turn"
     is "sleep_state: turn in flight → busy" busy "$(kib_sleep_state "$d" tag)"
 
+    # An INTERRUPTED turn fires no Stop and writes nothing at all, so `turn` stays for the life
+    # of the session — the laptop-on-all-night bug. Every event refreshes its mtime, so one
+    # nothing has touched is over. `touch -t` is POSIX, spelled the same on GNU and BSD.
+    touch -t 200001010000 "$d/tag/turn"
+    is "sleep_state: interrupted turn went stale → idle" idle "$(kib_sleep_state "$d" tag)"
+
+    # …unless a tool call is still running. Its own timeout is in the name, so a silent build
+    # holds the lock while a quiet turn does not — the reason `turn` can expire in 2 min.
+    mkdir -p "$d/tag/tools"
+    : >"$d/tag/tools/t1.10"
+    is "sleep_state: stale turn but a tool is in flight → busy" busy "$(kib_sleep_state "$d" tag)"
+    touch -t 200001010000 "$d/tag/tools/t1.10" # interrupting one fires no PostToolUse either
+    is "sleep_state: tool call outlived its budget → idle" idle "$(kib_sleep_state "$d" tag)"
+    rm -f "$d/tag/tools/t1.10"
+    : >"$d/tag/turn"
+
     # The AskUserQuestion / permission case: a turn is open but Claude is blocked on a human, so
     # the machine must be allowed to sleep. Byte sampling could never separate this from a think.
     : >"$d/tag/wait"
@@ -225,6 +241,12 @@ t_sleep_state() {
 
     rm -f "$d/tag/turn"
     is "sleep_state: turn over, subagent still running → busy" busy "$(kib_sleep_state "$d" tag)"
+
+    # Same rule for an ABORTED subagent: no SubagentStop, so the marker outlives the work, and
+    # only its own tool events keep it warm.
+    touch -t 200001010000 "$d/tag/agents/agent-1"
+    is "sleep_state: aborted subagent's marker went stale → idle" idle "$(kib_sleep_state "$d" tag)"
+
     rm -f "$d/tag/agents/agent-1"
     is "sleep_state: last subagent finished → idle" idle "$(kib_sleep_state "$d" tag)"
 
