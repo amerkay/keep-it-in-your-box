@@ -73,4 +73,37 @@ t_vet_open_trees() {
 }
 
 t_vet_open_trees
+
+# `#` memory written in a box used to be clobbered by the next cold start's re-copy. Newest wins:
+# a host edit made during the session must never be reverted by a staged copy the box never wrote.
+t_user_memory_roundtrip() {
+    _a_fixture
+    printf 'canonical\n' >"$CLAUDE_HOME/CLAUDE.md"
+    place_user_claude_md
+    is "user memory: staged in from canonical" "canonical" "$(cat "$SESSION_BASE/CLAUDE.md")"
+
+    printf 'canonical\nremembered in the box\n' >"$SESSION_BASE/CLAUDE.md"
+    merge_out_user_claude_md >/dev/null 2>&1
+    case "$(cat "$CLAUDE_HOME/CLAUDE.md")" in
+        *"remembered in the box"*) pass "user memory: an in-box edit folds back to canonical" ;;
+        *) fail "in-box CLAUDE.md edit was lost" "$(cat "$CLAUDE_HOME/CLAUDE.md")" ;;
+    esac
+
+    # Host edit mid-session: canonical is newer, so it stands.
+    printf 'edited on the host\n' >"$SESSION_BASE/CLAUDE.md"
+    sleep 1 # 1s filesystem timestamp granularity — `find -newer` is not sub-second everywhere
+    printf 'host wins\n' >"$CLAUDE_HOME/CLAUDE.md"
+    merge_out_user_claude_md >/dev/null 2>&1
+    is "user memory: a host edit during the session is not reverted" \
+        "host wins" "$(cat "$CLAUDE_HOME/CLAUDE.md")"
+
+    # Write-if-present: an in-box delete must never delete the user's memory.
+    rm -f "$SESSION_BASE/CLAUDE.md"
+    merge_out_user_claude_md >/dev/null 2>&1
+    is "user memory: an in-box delete does not delete canonical" \
+        "host wins" "$(cat "$CLAUDE_HOME/CLAUDE.md")"
+    rm -rf "$_a_dir"
+}
+
+t_user_memory_roundtrip
 unset _a_dir

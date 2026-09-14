@@ -103,15 +103,43 @@ verify_policy_attach() {
 }
 
 # ── User memory ──────────────────────────────────────────────────
-# The user's canonical CLAUDE.md, copied in verbatim each launch (the policy is no longer
-# prepended — see above). Copied rather than bound: an in-box edit must not reach canonical,
-# which a host `claude` also loads, so `#` memory written in here is transient by design.
+# The user's canonical CLAUDE.md, copied in verbatim at each cold start (the policy is no longer
+# prepended — see above). Copied rather than bound so a live session cannot write canonical,
+# which a host `claude` also loads; the copy is folded back at teardown instead.
 place_user_claude_md() {
     local md="$SESSION_BASE/CLAUDE.md"
     if [ -f "$CLAUDE_HOME/CLAUDE.md" ]; then
         cp "$CLAUDE_HOME/CLAUDE.md" "$md.kib.tmp" && mv "$md.kib.tmp" "$md"
     else
         rm -f "$md" # absent on a fresh install, or deleted since the last launch
+    fi
+}
+
+# The way back out, and the reason `#` memory written in a box is not lost: without it the session
+# copy is silently clobbered by the next cold start's re-copy. Folded back only when the session
+# copy is genuinely NEWER — otherwise a host-side edit made *during* the session would be reverted
+# by a staged copy the box never touched (the entrypoint guards settings.json the same way).
+# Prose, so there is nothing to vet; but it loads in every project and in a host `claude`, so say
+# so. Write-if-present, like merge-out-json: an in-box delete never deletes canonical.
+merge_out_user_claude_md() {
+    local src="$SESSION_BASE/CLAUDE.md" dst="$CLAUDE_HOME/CLAUDE.md"
+    [ -f "$src" ] || return 0
+    cmp -s "$src" "$dst" 2>/dev/null && return 0
+    if [ -f "$dst" ] && [ -z "$(find "$src" -newer "$dst" 2>/dev/null)" ]; then
+        # shellcheck disable=SC2088  # the tilde is prose for the user, not a path we open
+        warn "~/.claude/CLAUDE.md changed on the host while this session ran, so this session's" \
+            "own edit to it was NOT folded back. The session copy is kept at $src."
+        return 0
+    fi
+    if (
+        umask 077
+        cp "$src" "$dst.kib.tmp"
+    ) && mv -f "$dst.kib.tmp" "$dst"; then
+        echo "ℹ️  kib: this session edited ~/.claude/CLAUDE.md — folded back into your user" \
+            "memory, where every project and a host claude will load it." >&2
+    else
+        rm -f "$dst.kib.tmp" 2>/dev/null || true
+        warn "could not fold this session's CLAUDE.md back to ~/.claude/CLAUDE.md."
     fi
 }
 
@@ -412,6 +440,8 @@ check_claude_home_drift() {
 # claude cannot interleave a write. Subtree-only (.claude.json) + append-only (history) +
 # changed-only (credential), so a race loses at most this session's edit and corrupts nothing.
 merge_out_session() {
+    # Outside the flock: nothing else writes canonical CLAUDE.md, and the write is tmp+rename.
+    merge_out_user_claude_md
     have_python || {
         merge_out_credential
         merge_out_shared_settings

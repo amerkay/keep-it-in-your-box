@@ -161,9 +161,11 @@ not raisable without root), and both are container-global. Say so before you ref
 
 `$CLAUDE_CONFIG_DIR` is this project's private state and carries across launches. These rules are
 not part of it and are not the user's memory — they mount read-only from outside the box. The
-user's own `~/.claude/CLAUDE.md` is copied in fresh each launch, so `#` memory written to it in
-here is transient; durable user memory has to be written from a host terminal. Project memory and
-a repo's own `CLAUDE.md` persist normally.
+user's own `~/.claude/CLAUDE.md` is copied in at each cold start and folded back to the host when
+the last session for this project exits — so `#` memory written in here does persist, but only
+from the next launch on, and it then loads in **every** project and in a host `claude`. If the
+user edits that file on the host mid-session, their copy wins and yours is kept in the session
+dir, named at teardown. Project memory and a repo's own `CLAUDE.md` persist normally.
 
 ## For kib documentation, see README.md
 at https://raw.githubusercontent.com/amerkay/keep-it-in-your-box/refs/heads/main/README.md
