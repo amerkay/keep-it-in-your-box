@@ -294,6 +294,9 @@ def serve(listen_path: str, upstream_path: str) -> None:
         except OSError as e:
             log("ERROR", f"upstream connect failed: {e}")
             client.close()
+            # A dead compositor socket never comes back through this bind: exit, Docker re-binds.
+            if isinstance(e, (ConnectionRefusedError, FileNotFoundError)):
+                raise SystemExit(1) from e
             continue
         threading.Thread(target=Connection(client, upstream, f"conn{n}").run, daemon=True).start()
 

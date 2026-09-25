@@ -20,14 +20,14 @@ WL_HOST_SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/${WAYLAND_DISPLAY:-wayland-
 
 host_has_wayland() { [ -S "$WL_HOST_SOCK" ]; }
 
-# Mount args for the main container — only the *proxied* socket, never the real one. Always
-# exposed as wayland-0 inside, whatever the host display is called.
+# Mount args for the main container — only the *proxied* socket, never the real one. Its dir,
+# not the file: the proxy re-binds it on every restart (start_wayland_guard).
 add_wayland_args() {
-    [ -S "$WL_ROOT/wayland-0" ] || return 0
+    [ -S "$WL_ROOT/sock/wayland-0" ] || return 0
     ARGS+=(
         -e XDG_RUNTIME_DIR="/run/user/$(id -u)"
-        -e WAYLAND_DISPLAY=wayland-0
-        -v "$WL_ROOT/wayland-0:/run/user/$(id -u)/wayland-0"
+        -e WAYLAND_DISPLAY=kib-wl/wayland-0
+        -v "$WL_ROOT/sock:/run/user/$(id -u)/kib-wl:ro"
     )
 }
 
@@ -46,15 +46,14 @@ start_wayland_notifier() {
     # shellcheck disable=SC2016  # the body is the inner sh's script — its $vars are its own
     setsid sh -c '
         last=0
-        docker logs -f "$1" 2>&1 | while IFS= read -r line; do
+        # Loops because a follow ends when the proxy restarts.
+        while docker logs -f --since "$(date +%s)" "$1" 2>&1; do sleep 1; done | while IFS= read -r line; do
             case "$line" in
                 WLGUARD-STRIP*) t="clipboard write cleaned"
                     b="Control characters were stripped from a write by the sandbox — your next paste is safe." ;;
                 WLGUARD-DENY*)  t="clipboard write blocked"
                     b="A clipboard write from the sandbox was refused — not plain text, too large, or an unrecognised clipboard protocol. Your clipboard is unchanged." ;;
-                WLGUARD-ERROR*) t="clipboard proxy failed"
-                    b="The proxy could not reach the compositor: paste into the sandbox will not work this session." ;;
-                *) continue ;;  # READY is a breadcrumb, not a problem
+                *) continue ;;  # READY/ERROR: breadcrumbs, the proxy restarts itself
             esac
             now=$(date +%s)
             [ $((now - last)) -lt 30 ] && continue
@@ -65,22 +64,25 @@ start_wayland_notifier() {
     echo $! >"$WL_ROOT/notify.pid"
 }
 
-_wl_socket_up() { [ -S "$WL_ROOT/wayland-0" ]; }
+_wl_socket_up() { [ -S "$WL_ROOT/sock/wayland-0" ]; }
 
 start_wayland_guard() {
     if ! host_has_wayland; then
         echo "ℹ️  clipboard: no Wayland socket on this host — image paste unavailable." >&2
         return 0
     fi
-    mkdir -p "$WL_ROOT"
+    mkdir -p "$WL_ROOT/sock"
     chmod 755 "$WL_ROOT" # the main container traverses this as root before gosu
 
     # The real socket is mounted read-only: that does not stop a connect(), which is exactly
     # what the proxy needs and all it gets. --network none because it speaks only AF_UNIX.
-    if ! docker run -d --name "$WL_CNAME" \
+    # A compositor restart leaves that bind on a dead inode; the proxy then exits and
+    # --restart re-binds the path, reaching the live socket. --mount, never -v: on a restart
+    # before the compositor is back, -v would create a root-owned dir where its socket goes.
+    if ! docker run -d --name "$WL_CNAME" --restart on-failure \
         --cap-drop=ALL --security-opt no-new-privileges --network none \
         --user "$(id -u):$(id -g)" --userns=host \
-        -v "$WL_HOST_SOCK:/run/host-wayland.sock:ro" \
+        --mount "type=bind,src=$WL_HOST_SOCK,dst=/run/host-wayland.sock,readonly" \
         -v "$WL_ROOT:$WL_ROOT" \
         -v /etc/passwd:/etc/passwd:ro \
         -v /etc/group:/etc/group:ro \
@@ -88,7 +90,7 @@ start_wayland_guard() {
         --entrypoint /usr/local/bin/wayland-guard \
         "$IMAGE_NAME" \
         --upstream /run/host-wayland.sock \
-        --listen "$WL_ROOT/wayland-0" >/dev/null 2>&1; then
+        --listen "$WL_ROOT/sock/wayland-0" >/dev/null 2>&1; then
         warn "could not start the clipboard proxy — image paste is unavailable this session."
         rm -rf "$WL_ROOT" 2>/dev/null || true
         return 0
