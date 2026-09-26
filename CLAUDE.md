@@ -122,10 +122,14 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   from inside the box and is not fixable by unioning the names in. Regression-guarded.
   (`clipboard-and-dns.md`)
 - **Don't collapse `start_broker`'s token-mount walk into `broker_enabled_providers`** — only the
-  walk carries the host `basename`, so collapsing widens `_active_providers` to `id|basename`, and
-  that same output feeds `broker_config_hash`: the attach-refusal hash shifts for a six-line
-  saving on the credential path. Drift is closed by a test instead — `tests/check/mcp.sh`, "both
-  walks agree". (`credential-broker.md`)
+  walk carries the host `basename`, and its output feeds `broker_config_hash`, so collapsing
+  shifts the attach-refusal hash to save six lines. Drift is closed by `tests/check/mcp.sh`
+  ("both walks agree") instead. (`credential-broker.md`)
+- **Under rootless Docker the FUSE root must be marked shared inside RootlessKit's namespace, not
+  the host's** — `_mount_is_shared` reads ours and wrongly passes, then the daemon refuses the
+  sidecar's `:rshared` bind. The host never sees that view either, so readiness/unmount go through
+  `engine_ns_exec`; and the box runs as container-root there, so every id comes from `box_uid`.
+  (`platform-matrix.md`)
 - **Don't "simplify" `resolv-sync.sh` to overwrite resolv.conf wholesale** — `127.0.0.11` must
   stay first or the `kib-broker` alias breaks mid-session. (`clipboard-and-dns.md`)
 - **Never nest a bind inside another bind's destination** — Docker Desktop aborts the whole
@@ -149,15 +153,12 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
 - **Don't wrap `google-chrome` image-wide with `--no-sandbox`** — the entrypoint's `npx` shim
   already makes the stock `chrome-devtools-mcp` plugin launch a browser; a Dockerfile wrapper is
   redundant, needs a rebuild, and disarms every other Chrome caller. (`terminal-and-security.md`)
-- **Sleep guard: Claude's own hook state, never a measurement of output** — byte sampling
-  (`wchar`), transcript mtime and `claude agents --json` were each tried and each removed. A
-  background subagent writes almost nothing to the terminal, so any output-volume metric sleeps
-  the machine mid-work, and a question waiting on the user is indistinguishable from a long
-  think. The verdict is `kib_sleep_state`, SOURCED by both the guard and the diagnostic — never
-  copy it. Keep the poll free of subprocesses: no `docker exec`, no CLI, markers or nothing.
-  Don't switch the inhibitor to `--what=idle` (kills lid-shut tasks); keep the post-resume
-  SETTLE window (re-suspend wedged s2idle); keep `--who` a space-free `claude-code` token (the
-  diagnostic reads the PID by field offset). (`sleep-guard.md`)
+- **Sleep guard: Claude's own hook state, never a measurement of output** — byte sampling,
+  transcript mtime and `claude agents --json` were each tried and removed; a background subagent
+  writes almost nothing, so any output metric sleeps the machine mid-work. The verdict is
+  `kib_sleep_state`, SOURCED by guard and diagnostic alike — never copied. Keep the poll
+  subprocess-free (markers or nothing), keep `--what=sleep` (`idle` kills lid-shut tasks), keep the
+  post-resume SETTLE window, and keep `--who` a space-free `claude-code` token. (`sleep-guard.md`)
 - **Don't re-enable `leftArrowOpensAgents`, and don't re-investigate the ←-key data loss** — the
   sandbox is exonerated; it's the binary's abort-then-fork. Keep the pin. (`terminal-and-security.md`)
 - **Don't re-pin the box's config dir to a fixed `/home/hostuser` spelling** — it mounts at the
@@ -170,12 +171,11 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
 - **FUSE passthrough I/O is `os.pread`/`os.pwrite`, never `lseek`+`read`** — the shared fd offset
   truncates reads at a chunk boundary, and it surfaces as unexplained lint/test flakiness rather
   than an I/O error. Regression-guarded. (`redaction-config-guard.md`)
-- **The FUSE view's speed rests on three things — don't undo one.** `auto_cache` (never
-  `kernel_cache`: the host edits this tree), the memoised `_verdict` (cache the RULE verdict only,
-  never `_classify` — its `lexists` must stay live), and a `flush()` that does not `fsync`. Together
-  they took a small file from 2.31 ms to 0.067 ms. **`FUSE_PASSTHROUGH` is not the next step**: it
-  needs kernel 6.9+ (Ubuntu 24.04 GA is 6.8, WSL2 is 5.15/6.6) and libfuse 3.17 low-level, and
-  fusepy is ctypes over libfuse **2**. Regression-guarded. (`redaction-config-guard.md`)
+- **The FUSE view's speed rests on three things — don't undo one:** `auto_cache` (never
+  `kernel_cache`: the host edits this tree), the memoised `_verdict` (the RULE verdict only —
+  `_classify`'s `lexists` must stay live), and a `flush()` that does not `fsync`. Regression-guarded.
+  `FUSE_PASSTHROUGH` is not the next step: needs kernel 6.9+ and libfuse 3.17 low-level, and fusepy
+  is ctypes over libfuse **2**. (`redaction-config-guard.md`)
 - **The sidecar raises its own `RLIMIT_NOFILE` at startup — don't delete it, and don't add
   `--ulimit` alongside it.** Its fd table is the container-global ceiling on concurrently-open
   project files, and containerd's 1024 soft default killed parallel JS builds with `EMFILE` naming
@@ -192,46 +192,35 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   204 the rule restage. Reusing one that is held higher up the call stack releases it.
   (`container-lifecycle.md`)
 - **The host-executed-config guard is two tiers, split by WHEN a file fires — ambient trigger vs
-  deliberate `claude` launch** — `[protect]` refuses the write and the policy text tells the session
-  to stop, so a rule is only worth it where no report could arrive in time (`.git/hooks`, `.envrc`,
-  `.vscode`: a commit, a `cd`, an editor-open). Everything that waits for someone to launch
-  `claude` — `.claude/settings*.json`, `.claude/hooks/`, `.claude-plugin/`, `.mcp.json`,
-  `mise.toml` — is *detected* by `audit_project_configs`. Don't promote one: rename-validation only
-  works for temp+rename writers, so a `[protect]` on `.claude/settings.json` breaks Claude's own
-  "always allow" with nothing to replace it, and the `[protect]` on `.claude/hooks` refused the
-  script while the pointer arming it stayed writable. A tree-shaped detector must union git with an
-  **mtime stamp** — the box can commit past a dirty-file filter. (`redaction-config-guard.md`)
+  deliberate `claude` launch.** `[protect]` refuses the write, so it is only worth it where no
+  report could arrive in time (`.git/hooks`, `.envrc`, `.vscode`). Everything that waits for a
+  `claude` launch (`.claude/settings*.json`, `.claude/hooks/`, `.mcp.json`, `mise.toml`) is
+  *detected* by `audit_project_configs`. **Don't promote one between tiers** — it breaks Claude's
+  own "always allow" with nothing to replace it — and a tree-shaped detector must union git with
+  an **mtime stamp**, because the box can commit past a dirty-file filter.
+  (`redaction-config-guard.md`)
 - **A nested `[protect]` write is allowed only as a byte-identical copy of the same guarded tail
-  at the project ROOT — never carve out a worktree dir or an "editor config" tier.** That was
-  tried (`feat/worktree-editor-carveout`, reverted) and is bypassable with zero detection: the box
-  can `git commit`, so it decides what "tracked" means, and a committed `.vscode/tasks.json`
-  checks out pristine past a dirty-file detector. The anchor stays immutable; that is what makes a
-  copy of it safe. (`redaction-config-guard.md`)
+  at the project ROOT — never carve out a worktree dir or an "editor config" tier.** Tried and
+  reverted: it is bypassable with zero detection, because the box can `git commit` and so decides
+  what "tracked" means. The anchor stays immutable; that is what makes a copy of it safe.
+  (`redaction-config-guard.md`)
 - **Don't add a `[mask]` section — `[redact]` is format-aware** — dotenv, JSON and YAML read as
   keys with values replaced, everything else keeps the stub. Making it a policy choice needs a
   third verdict, a precedence table and an enable path, and lets a hostile repo pick the leakier
   renderer for its own paths. Format is a property of the file. (`redaction-config-guard.md`)
 - **Shape is sniffed by `RENDERERS`, never read off the filename — and don't reorder it.**
-  Name-based dispatch stubbed every project spelling its secrets file its own way
-  (`env_vars/env_prod`, `env-dev.yml`), which is the ask-the-user leak redaction exists to stop.
-  Dotenv leads (`A=1` is also a YAML scalar), JSON precedes its superset YAML, each vouches for
-  the WHOLE file, and the YAML one bails on an alias **found on the event stream, never by
-  regex** — the loader expands aliases, a billion-laughs file fits in `RENDER_MAX` many times
-  over and would exhaust the sidecar, and the regex tried first missed flow style. Sniffing is
-  off the hot path
-  entirely (only a *redacted* file reaches `render()`, and it is memoised), but keep the two
-  cheap bails that make it so: `":" not in text` before the `YAML_MAPPING` scan, and
-  `CSafeLoader` over `safe_load`, which hardcodes the pure-python one.
-  (`redaction-config-guard.md`)
-- **Shared assets are ONE open tier — don't re-lock `plugins`/`hooks`, and don't "harden" the tier
-  by refusing scripts** — all five are rw and symlinked at canonical so authoring or installing one
-  shares it. The `:ro` lock cost ~460 lines (mount-mode flag, lock witness, attach refusal, the
-  per-project plugin farm) and never covered `~/.claude/skills/x/.claude-plugin/plugin.json`, which
-  auto-loads as a plugin with no install step. It is `asset_scan` detection now, at teardown and
-  only when a native `claude` exists; the accepted residual is cross-project auto-execution (audit
-  H6, Accepted). The vetting line is auto-execution (a `hooks`/`mcpServers`/`lspServers`/`monitors`
-  `command`), never the exec bit or a `#!`: most real skills ship a helper script, so that rule
-  flags `skills/` on first contact and buys nothing a prose "run this" wouldn't.
+  Name-based dispatch stubbed every project that spells its secrets file its own way
+  (`env_vars/env_prod`, `env-dev.yml`) — the exact leak redaction exists to stop. Order is
+  load-bearing (dotenv before YAML, JSON before its superset), each renderer vouches for the WHOLE
+  file, and the YAML one bails on an alias **found on the event stream, never by regex**. Keep the
+  two cheap bails that keep sniffing off the hot path: `":" not in text` before the `YAML_MAPPING`
+  scan, and `CSafeLoader` over `safe_load`. (`redaction-config-guard.md`)
+- **Shared assets are ONE open tier — don't re-lock `plugins`/`hooks`, don't "harden" it by
+  refusing scripts.** The `:ro` lock cost ~460 lines and still never covered a skill shipping its
+  own `.claude-plugin/plugin.json`, which auto-loads with no install step. It is `asset_scan`
+  detection now (teardown, and only when a native `claude` exists); cross-project auto-execution is
+  an accepted residual. The vetting line is auto-execution (a `hooks`/`mcpServers`/`lspServers`/
+  `monitors` `command`), never the exec bit or a `#!` — most real skills ship a helper script.
   (`redaction-config-guard.md`)
 - **Don't move the sandbox policy back into the assembled `CLAUDE.md`** — bound `:ro` at
   `/etc/claude-code/CLAUDE.md` it outranks user memory, survives a repo's `claudeMdExcludes` and

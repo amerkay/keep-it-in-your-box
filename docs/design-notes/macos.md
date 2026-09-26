@@ -23,7 +23,7 @@ Three things the probe found that shaped the implementation:
 
 ## What the Mac cannot see, only Docker can reach
 
-The FUSE root lives inside the engine VM, so the Mac cannot create, inspect or unmount it. `_vm_exec` (host/portable.sh) runs a throwaway `--privileged --pid=host` container that `nsenter`s into the VM's mount namespace. That is a macOS-only mechanism **by design**: on Linux the same command would target your real machine, and buying code symmetry with a privileged container there would be a security regression. The Linux branches need no privilege at all.
+The FUSE root lives inside the engine VM, so the Mac cannot create, inspect or unmount it. `engine_ns_exec` (host/portable.sh) runs a throwaway `--privileged --pid=host` container that `nsenter`s into the VM's mount namespace. That *privileged* mechanism is macOS-only **by design**: on Linux the same command would target your real machine, and buying code symmetry with a privileged container there would be a security regression. The shim itself is shared with rootless Docker, whose branch is a plain unprivileged `nsenter` into RootlessKit's namespace (`platform-matrix.md`); the rootful-Linux branches need no namespace at all.
 
 Five shims carry the entire divergence — `fuse_root_path`, `fuse_root_create`, `fuse_root_destroy`, `fuse_mounted`, `unmount_fuse` — and `tests/check/portability.sh` fails if a sixth appears anywhere else.
 

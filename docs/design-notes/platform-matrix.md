@@ -74,6 +74,61 @@ creation. What differs is only *where the propagation root lives*, and how it is
 | Nested bind mounts | Tolerated (the resolv-sync `/dev/null` masks) | Fatal — the whole `docker run` aborts; everything goes flat under `/run/kib/` via `bind_via_link` | `macos.md` | ✅ |
 | `~/.claude` bootstrap | Assembled per launch from canonical | Same; on a fresh Mac `ensure_claude_home` creates a minimal skeleton first | `container-lifecycle.md` | — |
 
+## Rootless Docker (Linux)
+
+Supported, and it is an **engine** difference rather than an OS one — `is_rootless` sits beside
+`is_macos` in `host/portable.sh`, memoised off one `docker info` per launch. Measured by a
+throwaway probe before any code was written — on docker 29.2.1 / rootlesskit 2.3.6 / kernel 7.0
+(2026-09-26) — and every row below is that probe's result, which is why the script itself is gone:
+
+| Measured | Consequence | Owner |
+|---|---|---|
+| `:rshared` bind **refused** — "path … is mounted on / but it is not a shared mount" | dockerd lives in RootlessKit's mount namespace, where `/` is `rslave`. `_mount_is_shared` reads *our* namespace and wrongly passes, so the root must be bind-mounted to itself and marked `--make-rshared` **inside the daemon's namespace** | `fuse_root_create` |
+| After that: a mount made in one container reaches the next (`shared:847 master:1`) | the sidecar topology is unchanged — the agent's container stays capless, `/dev/fuse` passes through to the sidecar only | `fuse_root_create` |
+| The host never sees the view (`master:1`, one-way) | readiness, staleness and unmount must be asked **in that namespace**, so `fuse_mounted` / `unmount_fuse` / `fuse_root_destroy` route through `engine_ns_exec` — the same shim macOS uses, with an unprivileged `nsenter` instead of a privileged container | `engine_ns_exec` |
+| A bind of the project reports **uid 0** inside | the host user maps to container 0 and the subuid range (100000+) reaches nothing kib mounts, so every `--user`, `HOST_UID`, `gosu` and FUSE id remap goes through `box_uid`/`box_gid`, which answer 0 there. Guarded by `tests/check/regressions.sh` | `box_uid` |
+| Both the container-setup and session passes are uid 0 | the entrypoint can no longer tell them apart by uid; `KIB_SESSION_TAG` (already set per-exec) is the discriminator, and the root refusal is lifted only for `KIB_ROOTLESS=1` | `docker-entrypoint.sh` |
+| Claude itself refuses `--dangerously-skip-permissions` at uid 0 — **after** a fully successful launch | its check is `getuid() === 0 && IS_SANDBOX !== "1"`, `isRootOutsideDeliberateSandbox()` in the binary, so the box gets `-e IS_SANDBOX=1` under rootless only. Found the hard way: every sidecar came up, the banner printed, then the CLI exited 1 | `lifecycle.sh` |
+| `SecurityOptions` carries no AppArmor; the label reads `runc (unconfined)` | the agent's container loses `docker-default`'s `deny mount,`. `security-test.sh` skips that assertion on `KIB_ROOTLESS=1` — the daemon lacks the privilege to load a profile, so asserting one is a guaranteed failure that says nothing — and the container is capless *and* inside a user namespace | `security-test.sh` |
+| Everything under `$HOME` is resolved from `/etc/passwd`, and root's is `/root` | `usermod -d` cannot fix it (it refuses while any process runs as that user — "used by process 1", exit 8), so the entrypoint rewrites the line in place. Skipping this is not cosmetic: the shared-assembly dir, `settings.json` and the synthetic credential all live under `/home/hostuser`, and `security-test.sh` read three of them as missing — one of which reports as `REAL TOKEN ***` | `docker-entrypoint.sh` |
+
+**What container-root does not weaken:** every guard that matters is mount-level or FUSE-level,
+not DAC. `:ro` binds (the policy file, the synthetic credential, `/etc/passwd`) beat uid 0, and
+redaction is the FUSE server's own `EPERM`. With no `CAP_SYS_ADMIN` the box still cannot remount
+anything. What it does gain is package installs inside its own container — ephemeral, and the
+policy text says so.
+
+Two bugs the first real launch found, both in the rootless branches themselves:
+
+- **`gosu` needs `CAP_SETUID`/`CAP_SETGID` even to switch to the uid it already is** — it calls
+  setgroups/setgid/setuid unconditionally. With the caps correctly dropped, the container died at
+  `error: failed switching to "0:0": operation not permitted`, taking the whole launch with it.
+  Both call sites (the entrypoint's tail and `kib_run_session`) now skip gosu when there is
+  nobody to switch to.
+- **A bind-to-self can outlive its own mountpoint, and `grep` cannot tell the corpse apart.**
+  `fuse_root_destroy` rm -rf's a directory whose bind lives in a namespace it cannot see, so the
+  next launch's "is it already mounted?" check matched a mount with a deleted root, skipped the
+  bind, marked the corpse shared and failed the sidecar with the same "not a shared mount" error
+  the fix exists to prevent — on *every* later launch. `fuse_root_create` now binds
+  **unconditionally**, after unmounting whatever is there (a loop, since launches can stack them,
+  driven off umount's exit status — a path test cannot see a corpse, which /proc renders as
+  `<path>\040(deleted)`). Self-healing, rather than trusting the teardown pair.
+
+One accepted residual:
+
+- **A host dev server on `127.0.0.1` is unreachable from the box.** `dockerd-rootless.sh` runs
+  slirp4netns with `--disable-host-loopback`, so `host.docker.internal` reaches the host's LAN
+  address only. Bind dev servers to `0.0.0.0`. (`DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false`
+  in the user unit lifts it, at the cost of exposing the host's loopback to every container.)
+
+And one thing NOT to "fix": the five caps (`SETUID/SETGID/CHOWN/DAC_OVERRIDE/FOWNER`) are added
+back only when **not** rootless, and must stay that way. They exist for `useradd` + `gosu` into
+hostuser, neither of which happens when the target user is already root — and because the session
+runs AS root there, granting them puts them in `CapEff` instead of leaving them inert at a non-root
+uid, which fails `security-test.sh`'s `CapEff=0` assertion. The rest of the entrypoint's root pass
+(shims, symlinks, chowns) still runs on every container creation; only the user creation is skipped,
+and its chowns target ids it already owns, so they need no capability.
+
 ## Identical on both platforms
 
 `.kibignore` rules and the FUSE server/matcher behind them · the host-executed-config guard

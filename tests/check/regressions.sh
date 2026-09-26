@@ -673,3 +673,23 @@ else
         "$(sed -n 's|.*\[ "\$d/npx" != \([^ ]*\) \].*|\1|p' "$_ep")"
 fi
 unset _ep _shim_dir _path_exports _shim_first
+
+# ── The box's ids go through box_uid/box_gid ─────────────────────
+# Under rootless Docker the host user maps to container uid 0, so a bare `id -u` in a --user,
+# HOST_UID, gosu or FUSE-remap position names an unmapped subuid (100000+) that can read none of
+# kib's own mounts. It fails as EACCES on a path that plainly exists — no message names the uid —
+# so the drift is caught here instead. host/portable.sh is where the two shims live.
+# (docs/design-notes/platform-matrix.md § Rootless)
+_bare_ids=""
+for _f in host/redaction.sh host/lifecycle.sh host/desktop.sh host/broker.sh host/node.sh; do
+    _hits="$(sed 's/#.*$//' "$KIB_ROOT/$_f" \
+        | grep -nE -- '(--user|--uid|--gid|HOST_UID|HOST_GID|gosu)[^#]*\$\(id -[ug]\)' || true)"
+    [ -n "$_hits" ] && _bare_ids="$_bare_ids $_f"
+done
+if [ -n "$_bare_ids" ]; then
+    fail "a container id still comes from a bare \$(id -u):$_bare_ids" \
+        "use box_uid/box_gid — they answer 0 under rootless, where 0 IS the host user"
+else
+    pass "every container id goes through box_uid/box_gid (rootless-safe)"
+fi
+unset _bare_ids _f _hits

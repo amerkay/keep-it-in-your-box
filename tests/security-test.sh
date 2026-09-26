@@ -117,6 +117,12 @@ if [ -z "$_lsm_label" ]; then
     # asserting one is a guaranteed failure that says nothing. Skipped rather than relaxed:
     # the caps, seccomp and no-new-privs assertions above carry the same weight and still run.
     skip "AppArmor label" "no AppArmor in this kernel (LinuxKit / Docker Desktop)"
+elif [ "${KIB_ROOTLESS:-0}" = 1 ]; then
+    # Rootless Docker loads no profile at all — the label reads `runc (unconfined)` — and cannot:
+    # applying one needs privilege the daemon does not have. Skipped on the same grounds as the
+    # LinuxKit case, never relaxed: the caps, seccomp and no-new-privs assertions above carry the
+    # same weight and still run, and the userns is an extra boundary rootful does not have.
+    skip "AppArmor label" "rootless Docker applies no profile ($_lsm_label)"
 else
     # docker-default, NOT unconfined. Its `deny mount,` is incompatible with mounting inside
     # this container — which is exactly why the FUSE server lives in the sidecar instead.

@@ -56,11 +56,14 @@ _stage_patterns() {
 _stage_passwd() {
     {
         printf 'root:x:0:0:root:/root:/bin/bash\n'
-        printf '%s:x:%s:%s::/tmp:/bin/sh\n' "$(id -un)" "$(id -u)" "$(id -g)"
+        # Skipped under rootless, where the sidecar runs as uid 0: a second entry for the same
+        # id would shadow root's, and the root line above already resolves it.
+        [ "$(box_uid)" = 0 ] \
+            || printf '%s:x:%s:%s::/tmp:/bin/sh\n' "$(id -un)" "$(box_uid)" "$(box_gid)"
     } >"$PASSWD_STATE"
     {
         printf 'root:x:0:\n'
-        printf '%s:x:%s:\n' "$(id -gn)" "$(id -g)"
+        [ "$(box_gid)" = 0 ] || printf '%s:x:%s:\n' "$(id -gn)" "$(box_gid)"
     } >"$GROUP_STATE"
     chmod 644 "$PASSWD_STATE" "$GROUP_STATE"
 }
@@ -159,19 +162,20 @@ prepare_redaction() {
     ! fuse_mounted "$FUSE_ROOT/mnt" || _stale_mount_report die
 
     # Dies with instructions if the root cannot propagate; never escalates, never degrades.
-    fuse_root_create "$FUSE_ROOT" "$(id -u)" "$(id -g)"
+    fuse_root_create "$FUSE_ROOT" "$(box_uid)" "$(box_gid)"
 
     # --uid/--gid: the ids reported in place of whoever owns the project ROOT, and only them. On
     # macOS the project reaches the sidecar over the engine VM's virtiofs, which reports every
     # file as root:root — without the remap git refuses the whole tree ("dubious ownership") and
-    # nothing that shells out to it works. On Linux the base ids are already the agent's, so the
-    # map is identity. A file owned by someone else keeps its real ids, so the mount's
-    # default_permissions still refuses it.
+    # nothing that shells out to it works. Rootless does the same thing for its own reason: our
+    # uid maps to 0 inside, so the sidecar sees root:root too. Otherwise the base ids are already
+    # the agent's and the map is identity. A file owned by someone else keeps its real ids, so
+    # the mount's default_permissions still refuses it.
     local run_err
     if ! run_err="$(docker run -d --name "$FUSE_CNAME" \
         --cap-drop=ALL --cap-add=SYS_ADMIN \
         --device /dev/fuse --security-opt apparmor=unconfined \
-        --user "$(id -u):$(id -g)" --userns=host \
+        --user "$(box_uid):$(box_gid)" --userns=host \
         --network none \
         -v "$PWD:/src" \
         -v "$PATTERNS_STATE:/kib-patterns:ro" \
@@ -183,7 +187,7 @@ prepare_redaction() {
         --entrypoint /usr/local/bin/fuse \
         "$IMAGE_NAME" \
         --src /src --mnt "$FUSE_ROOT/mnt" \
-        --uid "$(id -u)" --gid "$(id -g)" \
+        --uid "$(box_uid)" --gid "$(box_gid)" \
         --patterns-file /kib-patterns \
         --guard-file /usr/local/share/global.kibignore 2>&1 >/dev/null)"; then
         fuse_root_destroy "$FUSE_ROOT"

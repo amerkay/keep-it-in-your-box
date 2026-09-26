@@ -197,6 +197,9 @@ teardown_container() {
 }
 
 start_container() {
+    # One engine probe, in THIS shell, before anything expands $(box_uid) in a subshell where the
+    # memo would die. (host/portable.sh)
+    resolve_box_ids
     # Stages the rule file and pushes the mount flags onto REDACTION_ARGS below.
     prepare_redaction
     # Must precede the mounts below, which bind the proxy socket / spool dir.
@@ -239,18 +242,14 @@ start_container() {
 
         # Host UID/GID/HOME for runtime user creation. `docker exec` inherits these from the
         # container config, so attached sessions get them too.
-        -e HOST_UID="$(id -u)"
-        -e HOST_GID="$(id -g)"
+        -e HOST_UID="$(box_uid)"
+        -e HOST_GID="$(box_gid)"
         -e HOST_HOME="$HOME"
         -e HOST_PWD="$PWD"
 
-        # Drop everything; add back only what the entrypoint needs for user setup + gosu.
+        # Drop everything; the five the entrypoint needs for user setup + gosu are added back
+        # below, and only where they are needed.
         --cap-drop=ALL
-        --cap-add=SETUID
-        --cap-add=SETGID
-        --cap-add=CHOWN
-        --cap-add=DAC_OVERRIDE
-        --cap-add=FOWNER
 
         # The image still ships setuid binaries (su, mount, passwd, fusermount3). Defence in
         # depth — the session's caps are already empty, so this closes a route, not a hole.
@@ -268,6 +267,34 @@ start_container() {
         -e DISABLE_TELEMETRY=1
         -e DISABLE_ERROR_REPORTING=1
     )
+
+    # The entrypoint refuses to run a session as root, and under rootless HOST_UID is 0 — so it
+    # has to be able to tell that 0 from real root. (guest/entrypoint/docker-entrypoint.sh)
+    #
+    # IS_SANDBOX: Claude's own root check is `getuid() === 0 && IS_SANDBOX !== "1"`, named
+    # isRootOutsideDeliberateSandbox() in the binary — and without it `kib` dies after the whole
+    # launch succeeds, on "--dangerously-skip-permissions cannot be used with root/sudo". This is
+    # the sanctioned switch for exactly this case: uid 0 here is confined to RootlessKit's user
+    # namespace and maps to the host's unprivileged account, so it carries LESS privilege than
+    # the rootful box's uid. Set only under rootless — rootful never trips the check, and the
+    # flag also softens a repeated-529 retry we want left alone.
+    if is_rootless; then
+        ARGS+=(-e KIB_ROOTLESS=1 -e IS_SANDBOX=1)
+    else
+        # useradd + gosu into hostuser. Rootless needs neither — the target user is root, already
+        # exists, and owns every bind (our uid maps to 0), so the USER-CREATION step is skipped
+        # (the rest of the entrypoint's root pass still runs, and its chowns target ids it already
+        # owns, which needs no capability). Granting them anyway would be worse than pointless:
+        # the session runs AS root there, so they land in CapEff instead of staying inert at a
+        # non-root uid, and security-test.sh asserts CapEff=0.
+        ARGS+=(
+            --cap-add=SETUID
+            --cap-add=SETGID
+            --cap-add=CHOWN
+            --cap-add=DAC_OVERRIDE
+            --cap-add=FOWNER
+        )
+    fi
 
     # The project comes in here and ONLY here: prepare_redaction binds the sidecar's redacted
     # view over $PWD (:rslave). There is no second, unredacted path to it.
@@ -537,6 +564,8 @@ kib_cleanup() {
 # Re-entering through the entrypoint (rather than calling claude directly) reuses its
 # "already the target user" branch, which sets HOME and PATH correctly.
 kib_run_session() {
+    # Also reached on an ATTACH, which never runs start_container — so the ids resolve here too.
+    resolve_box_ids
     # Stamps this terminal's processes so the sleep guard reads only the state that is ours —
     # without it, one working session makes every terminal's guard inhibit. The in-box hook
     # inherits this from the session's environ and names its marker dir after it.
@@ -571,10 +600,13 @@ kib_run_session() {
     # harmless: that set is the entrypoint's own add-backs (0xcb:
     # CHOWN/DAC_OVERRIDE/FOWNER/SETGID/SETUID), inert under no-new-privileges at a non-root uid.
     # security-test.sh asserts CapEff=0 and that SYS_ADMIN is absent from the bounding set.
-    local -a incmd=(
-        gosu "$(id -u):$(id -g)"
-        /usr/local/bin/docker-entrypoint.sh "$@"
-    )
+    # No gosu under rootless: the exec already lands as the target user (uid 0 there), and gosu
+    # would still try to setuid to it — which needs CAP_SETUID that this container deliberately
+    # does not have. Same reasoning as the entrypoint's own tail.
+    local -a incmd=(/usr/local/bin/docker-entrypoint.sh "$@")
+    if ! is_rootless; then
+        incmd=(gosu "$(box_uid):$(box_gid)" "${incmd[@]}")
+    fi
 
     # Same reasoning as the tag below: --node-version rides the exec, so two terminals can run
     # two Node versions against ONE container and no attach has to be refused over it. Empty

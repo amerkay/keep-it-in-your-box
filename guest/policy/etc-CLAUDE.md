@@ -2,7 +2,9 @@
 
 ## The box
 
-- Docker container, non-root, **no `sudo`**, no `docker` binary or socket, no host processes.
+- Docker container, no `docker` binary or socket, no host processes. Normally non-root with **no
+  `sudo`**; under rootless Docker you are the container's root, which maps to the user's
+  unprivileged host account — no host privilege, and every guard below still holds.
   Nothing installed outside the project tree or `$CLAUDE_CONFIG_DIR` survives — the container is
   recreated once the last session for this project exits.
 - `HOME` is `/home/hostuser`, but the project is bind-mounted at its **host** path, outside

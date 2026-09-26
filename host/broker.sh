@@ -217,7 +217,7 @@ EOF
     local -a broker_run=(
         docker run -d --name "$BROKER_CNAME"
         --cap-drop=ALL --security-opt no-new-privileges
-        --user "$(id -u):$(id -g)" --userns=host
+        --user "$(box_uid):$(box_gid)" --userns=host
         --network "$BROKER_NET" --network-alias "$BROKER_ALIAS"
         ${tok_mounts[@]+"${tok_mounts[@]}"}
         ${prov_mount[@]+"${prov_mount[@]}"}

@@ -81,7 +81,7 @@ start_wayland_guard() {
     # before the compositor is back, -v would create a root-owned dir where its socket goes.
     if ! docker run -d --name "$WL_CNAME" --restart on-failure \
         --cap-drop=ALL --security-opt no-new-privileges --network none \
-        --user "$(id -u):$(id -g)" --userns=host \
+        --user "$(box_uid):$(box_gid)" --userns=host \
         --mount "type=bind,src=$WL_HOST_SOCK,dst=/run/host-wayland.sock,readonly" \
         -v "$WL_ROOT:$WL_ROOT" \
         -v /etc/passwd:/etc/passwd:ro \
