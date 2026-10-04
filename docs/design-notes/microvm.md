@@ -46,6 +46,7 @@ Four gates. A substrate that violates one is **DISQUALIFIED**, not low-rated:
 | **Lima / Colima** under Docker | 1, macOS only | ✅ | ❌ | Rejected outright. The VM sits under *Docker*, not under the agent — host-kernel isolation, not per-session — and it is a second engine to support for no risk kib ranks |
 | **Kata Containers** | KVM + containerd cfg | unverified | ❌ Linux | Per-container VM boundary, but heavy and not minimal |
 | **Apple `container`** / libkrun | macOS 15+ | unverified | ❌ macOS | First-party and young; partial Docker API, and kib drives `docker` in ~40 places |
+| **gVisor** (`runsc`, agent container only) | runsc + root `daemon.json` | unverified | ❌ Linux | Closest fit, still not worth it — see [gVisor](#gvisor) |
 | **Stay put + tighter seccomp** (K1) | none | ✅ | ✅ | **The only row that passes all four gates** |
 
 ## What any of them would cost
@@ -57,6 +58,35 @@ live DNS sync, the `kib-broker` network alias and dual-homing (both Docker embed
 writes it, the host reads it), bind mounts becoming virtiofs, and
 `docker exec` as the whole many-terminals-one-container attach model. Adopting any option is a
 re-platforming, not a flag.
+
+## gVisor
+
+Reviewed 2026-10-04, unprobed. Not a hypervisor: a user-space kernel, so no KVM, and the FUSE
+sidecar stays on runc. It still costs these seams:
+
+- **Broker net:** runsc wires NICs only at start, so `connect_broker_network`'s post-run
+  `docker network connect` never lands — fail-hard, no launch. Fix: `create` → `connect` → `start`.
+- **Embedded DNS (`127.0.0.11`):** Docker's DNAT lives in the netns iptables, which gVisor's
+  netstack may bypass — `kib-broker` and `resolv-sync` depend on it.
+- **inotify:** host-side edits raise no events inside the sandbox, so dev-server HMR goes stale.
+  No fix.
+- **FUSE view:** no mount propagation; works only because the mount exists before start.
+- **Wayland socket:** needs `--host-uds=open`.
+- **Rootless Docker:** runsc support is experimental.
+- **Speed:** every syscall is trapped and every file op adds a gofer hop on top of FUSE.
+- **macOS / Docker Desktop WSL2:** runsc would live in the vendor VM, wiped on update.
+
+First probe, host-side with runsc registered — if it fails, stop:
+
+```
+docker network create kib-probe
+docker create --runtime=runsc --name gv alpine sleep 60
+docker network connect kib-probe gv
+docker start gv
+docker exec gv nslookup gv 127.0.0.11
+docker rm -f gv
+docker network rm kib-probe
+```
 
 ## If this is ever revisited
 
