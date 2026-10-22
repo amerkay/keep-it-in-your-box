@@ -96,6 +96,16 @@ else
     pass "every image build goes through tools/build-image.sh (locked, version-resolved)"
 fi
 
+# Every rebuild leaves the old :latest dangling; with no prune, 15 of them (~16 GB) piled up.
+if grep -q '^LABEL keep-it-in-your-box=1$' "$KIB_ROOT/Dockerfile" \
+    && grep -q 'docker image prune -f --filter label=keep-it-in-your-box ' \
+        "$KIB_ROOT/tools/build-image.sh"; then
+    pass "a successful build prunes kib's own dangling images (label-scoped)"
+else
+    fail "build-image.sh no longer prunes the image it replaces" \
+        "every rebuild then leaks the old :latest — Dockerfile LABEL and prune must match"
+fi
+
 # FUSE reads must be pread, not lseek+read. With nothreads=False several worker threads serve
 # one open file and share the fd's offset, so racing lseeks made a reader see the file
 # truncated at a 16 KiB boundary — silent corruption that showed up as "flaky" lint runs.

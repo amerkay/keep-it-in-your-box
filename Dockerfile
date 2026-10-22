@@ -218,6 +218,7 @@ ARG CLAUDE_VERSION=latest
 RUN echo "Installing Claude Code version: ${CLAUDE_VERSION}" && \
     curl -fsSL https://claude.ai/install.sh | bash && \
     install -m 0755 "$(readlink -f /root/.local/bin/claude)" /usr/local/bin/claude && \
+    rm -rf /root/.local/share/claude /root/.local/bin/claude && \
     /usr/local/bin/claude --version && \
     /usr/local/bin/claude --version 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1 > /etc/claude-code-version
 
@@ -242,6 +243,9 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
 ENV SHELL=/bin/bash
 ENV TERM=xterm-256color
 ENV DISABLE_AUTOUPDATER=1
+
+# What tools/build-image.sh prunes by: each rebuild leaves the old :latest dangling.
+LABEL keep-it-in-your-box=1
 
 # Set entrypoint for user management
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

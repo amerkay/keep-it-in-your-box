@@ -73,6 +73,8 @@ if build_image "$@" \
     && docker tag "${IMAGE_NAME}:building" "${IMAGE_NAME}:latest" \
     && docker rmi "${IMAGE_NAME}:building" >>"$BUILD_LOG" 2>&1; then
     echo "✅ Build complete — new image ready for next launch" >>"$BUILD_LOG"
+    # The old :latest is now dangling. Label-scoped; Docker skips any a container still uses.
+    docker image prune -f --filter label=keep-it-in-your-box >>"$BUILD_LOG" 2>&1 || true
     notify_desktop normal "Claude Code" "Image rebuild complete — new version ready for next launch"
     if [ "$INTERACTIVE" = 1 ]; then
         echo "✅ Build complete — it is picked up when this project's LAST kib session exits." >&2
