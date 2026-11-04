@@ -148,3 +148,20 @@ those alternatives is a dead end below.
   release). Note Claude Code also runs its own `caffeinate -i -t 300` respawner on macOS with no
   opt-out (anthropics/claude-code#21432); there is no Linux equivalent, which is why the guard
   carries the whole job here.
+
+## Diagnosing an incident
+
+Run on the **host** — the box sees no journal. Each tool writes one report to the repo root
+(gitignored) for the box to read.
+
+| Symptom | Tool |
+|---|---|
+| "It slept mid-work" / "Claude stopped overnight" | `scripts/sleep-incident.sh [hours=12] [project_dir]` |
+| "It never slept" (forensic, after the fact) | `scripts/sleep-postmortem.sh [hours]` |
+| "It won't idle-suspend" (live) | `kib sleep-monitor` |
+
+Read `sleep-incident`'s **VERDICT INPUTS** and **silences** first. 0 suspends plus no
+silence longer than a few minutes means the machine never slept. A locked, dark screen is
+not sleep. 2026-11-04: a "slept at 3am" report was ~300 API calls an hour all night, still
+holding its inhibitor. The guard only logs to its terminal with `SLEEP_GUARD_DEBUG=1`, so
+the journal and the transcripts are the record.

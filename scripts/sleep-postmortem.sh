@@ -5,13 +5,13 @@
 # already happened from the journal, /sys, /proc and the desktop's config — across EVERY boot in
 # the window, so a battery-death reboot is visible rather than hiding the evidence.
 #
-# It writes exactly ONE file: the report, into this script's own directory (the kib project, which
+# It writes exactly ONE file: the report, into the repo root (the kib project, which
 # is shared with the sandbox) so Claude can read it without you pasting anything. It runs no
 # command that changes state: no systemctl start/stop, no suspend, no config write, no sudo.
 #
-# Usage:  ./sleep-postmortem.sh [hours_back]        # default 14
-#         sudo ./sleep-postmortem.sh 14             # only if the journal check below says so
-#         ./sleep-postmortem.sh --live [seconds]    # no journal, no suspend: rank the devices
+# Usage:  scripts/sleep-postmortem.sh [hours_back]        # default 14
+#         sudo scripts/sleep-postmortem.sh 14             # only if the journal check below says so
+#         scripts/sleep-postmortem.sh --live [seconds]    # no journal, no suspend: rank the devices
 #                                                   # that refuse to idle RIGHT NOW (default 60s)
 #
 # Linux/systemd only.
@@ -26,8 +26,8 @@ LIVE=0
 HOURS="${1:-14}"
 USER="${USER:-$(id -un)}" # set -u + a login shell that never exported it (cron, sudo -E) would abort
 MAXLINES=120              # per-command output cap, so one chatty source can't bury the rest
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPORT="$SELF_DIR/sleep-$([ "$LIVE" = 1 ] && echo live || echo postmortem)-$(date +%Y%m%d-%H%M%S).txt"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPORT="$ROOT/sleep-$([ "$LIVE" = 1 ] && echo live || echo postmortem)-$(date +%Y%m%d-%H%M%S).txt"
 SINCE="$(date -d "-${HOURS} hours" '+%Y-%m-%d %H:%M:%S')"
 SINCE_EPOCH="$(date -d "-${HOURS} hours" +%s)"
 

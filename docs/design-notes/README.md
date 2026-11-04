@@ -12,7 +12,7 @@ debugging time.
 | [redaction-config-guard.md](redaction-config-guard.md) | `.kibignore` FUSE + the audit gate, host-executed config guard, shared config surface |
 | [credential-broker.md](credential-broker.md) | `kib/broker/`, providers, delivery modes, MCP interception |
 | [clipboard-and-dns.md](clipboard-and-dns.md) | Wayland clipboard proxy, live-DNS sync |
-| [sleep-guard.md](sleep-guard.md) | Per-session sleep inhibition, proactive suspend |
+| [sleep-guard.md](sleep-guard.md) | Per-session sleep inhibition, proactive suspend, incident diagnosis |
 | [macos.md](macos.md) | macOS engine support: portability contract, virtiofs, pbpaste bridge |
 | [microvm.md](microvm.md) | Why a hypervisor closes none of kib's risks; the Ubuntu+macOS option matrix |
 | [platform-matrix.md](platform-matrix.md) | Ubuntu vs macOS, row by row: what differs, how each row is proven, what still needs a Mac |
