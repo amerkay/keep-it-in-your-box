@@ -476,10 +476,19 @@ _preflight_die_no_engine() {
         "Start the engine, then relaunch kib."
 }
 
+_docker_up() { docker info >/dev/null 2>&1; }
+
+# Docker Desktop installed but closed: start it in the background rather than refuse.
+_start_docker_desktop() {
+    open -ga Docker 2>/dev/null || return 1
+    printf '🐳 kib: starting Docker Desktop…\n' >&2
+    wait_until 120 1 _docker_up # ≤2min; a cold start is ~20-60s
+}
+
 preflight_platform() {
     [ "$KIB_OS" = darwin ] || return 0
     command -v docker >/dev/null 2>&1 || _preflight_die_no_engine
-    docker info >/dev/null 2>&1 || _preflight_die_no_engine
+    _docker_up || _start_docker_desktop || _preflight_die_no_engine
     command -v perl >/dev/null 2>&1 || die \
         "perl was not found, but kib's macOS lock/setsid/notify shims need it." \
         "perl ships with macOS; restore it (or install via Homebrew: brew install perl)."
