@@ -106,4 +106,23 @@ t_user_memory_roundtrip() {
 }
 
 t_user_memory_roundtrip
+
+# A box-planted symlink must never make the host copy its target into canonical.
+t_merge_out_drops_planted_links() {
+    _a_fixture
+    local SHARED_BASE="$_a_dir/shared"
+    mkdir -p "$SHARED_BASE"
+    printf 'host secret\n' >"$_a_dir/id_key"
+    printf 'canonical\n' >"$CLAUDE_HOME/CLAUDE.md"
+    ln -s "$_a_dir/id_key" "$SESSION_BASE/CLAUDE.md"
+    ln -s "$_a_dir/id_key" "$SHARED_BASE/settings.json"
+    drop_planted_links 2>/dev/null
+    merge_out_user_claude_md >/dev/null 2>&1
+    is "merge-out: a symlinked CLAUDE.md is not followed" "canonical" "$(cat "$CLAUDE_HOME/CLAUDE.md")"
+    is "merge-out: every planted link is dropped" "" \
+        "$(find "$SESSION_BASE" "$SHARED_BASE" -type l)"
+    rm -rf "$_a_dir"
+}
+
+t_merge_out_drops_planted_links
 unset _a_dir

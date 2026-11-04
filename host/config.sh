@@ -435,11 +435,24 @@ check_claude_home_drift() {
 }
 
 # ── Merge-out ────────────────────────────────────────────────────
+# Every file merge-out reads is box-written: a symlink there makes the HOST copy whatever it
+# names (an ssh key) into canonical, and from there into every later box. Container is stopped.
+drop_planted_links() {
+    local f
+    for f in "$SESSION_BASE"/{CLAUDE.md,.claude.json,history.jsonl} \
+        "$SHARED_BASE"/{.credentials.json,settings.json,keybindings.json}; do
+        [ -L "$f" ] || continue
+        warn "this session left $f as a symlink to $(readlink "$f") — dropped, NOT merged back."
+        rm -f "$f"
+    done
+}
+
 # Fold THIS project's changes back into canonical on the last terminal out — the only moment
 # the session files are quiescent. Under a flock on ~/.claude.json.lock so a concurrent host
 # claude cannot interleave a write. Subtree-only (.claude.json) + append-only (history) +
 # changed-only (credential), so a race loses at most this session's edit and corrupts nothing.
 merge_out_session() {
+    drop_planted_links
     # Outside the flock: nothing else writes canonical CLAUDE.md, and the write is tmp+rename.
     merge_out_user_claude_md
     have_python || {
