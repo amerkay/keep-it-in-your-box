@@ -17,6 +17,7 @@ case "\$1" in
     list) case "\$3" in *Dir*) echo "$_vm_dir/lima" ;; *) echo Running ;; esac ;;
     stop) echo stop >>"$_vm_dir/stops" ;;
     edit) echo "\$*" >>"$_vm_dir/edits" ;;
+    start) echo start >>"$_vm_dir/starts" ;;
 esac
 EOF
 # Fake docker and mutagen log every call; MG_FLUSH sets whether a flush succeeds.
@@ -86,6 +87,8 @@ is "the docker engine moves into the VM; kib stays here" \
     "unix://$_vm_dir/lima/sock/docker.sock vm 192.168.5.2" "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_up | tail -1)"
 is "a VM with an old mount set is re-mounted once, then left alone" "1" \
     "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_up >/dev/null && _vm_edits)"
+is "the re-mount starts the VM again, even when the edit changes nothing" "1" \
+    "$(wc -l <"$_vm_dir/starts" | tr -d ' ')"
 case "$(cat "$_vm_dir/edits")" in
     *--mount-type=9p*'--set=.mounts[]."9p".cache = "none"'*)
         pass "the re-mount pins 9p uncached, never reverse-sshfs"

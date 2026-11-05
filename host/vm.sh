@@ -77,16 +77,18 @@ vm_up() {
             --mount-inotify --vm-type="$LIMA_VM_TYPE" --mount-type="$LIMA_MOUNT_TYPE" \
             "${VM_MOUNTS[@]}" template:docker-rootful
         printf '%s\n' "$want" >"$VM_SPEC"
+        status=Running
     elif [ "$want" != "$(cat "$VM_SPEC" 2>/dev/null)" ] && lock_fd -n -x 205; then
         # A kib upgrade changed the mount set. Only with nobody else in it: never cut a session.
         limactl stop "$KIB_VM_NAME" >/dev/null 2>&1 || true
-        _limactl "updating its VM's mounts (one restart)" edit --start \
+        # Not `edit --start`: an edit that changes nothing never starts the VM.
+        _limactl "updating its VM's mounts" edit \
             --mount-type="$LIMA_MOUNT_TYPE" "${VM_MOUNTS[@]}" "$KIB_VM_NAME"
         printf '%s\n' "$want" >"$VM_SPEC"
         lock_fd -s 205
-    elif [ "$status" != Running ]; then
-        _limactl "starting its VM" start "$KIB_VM_NAME"
+        status=Stopped
     fi
+    [ "$status" = Running ] || _limactl "starting its VM" start "$KIB_VM_NAME"
     lock_fd -u 206
     exec 206>&-
     unset DOCKER_CONTEXT
