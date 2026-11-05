@@ -113,16 +113,16 @@ stop_wayland_guard() {
     rm -rf "$WL_ROOT" 2>/dev/null || true
 }
 
-# ── Clipboard on macOS: a one-way pbpaste bridge, no socket ──────
-# macOS has no socket to proxy, so instead of a protocol proxy a host-side watcher
+# ── Clipboard for an engine VM (macOS, Lima): a spool bridge, no socket ──
+# No host socket reaches the VM, so instead of a protocol proxy a host-side watcher
 # (host/clipboard-bridge.sh) serves a spool dir bind-mounted at /kib-clip: the entrypoint's
 # shims drop a request file and read the response, the host answers reads with pbpaste or an
 # osascript PNG extraction, and a WRITE reaches pbcopy only through kib.shared.clipboard — the
 # same filter the Wayland guard applies in flight, so both platforms strip the same bytes.
 start_clipboard_bridge() {
-    is_macos || return 0
-    command -v pbpaste >/dev/null 2>&1 || {
-        echo "ℹ️  clipboard: pbpaste not found — paste from the host is unavailable." >&2
+    engine_in_vm || return 0
+    command -v pbpaste >/dev/null 2>&1 || command -v wl-paste >/dev/null 2>&1 || {
+        echo "ℹ️  clipboard: no pbpaste or wl-paste (wl-clipboard) — host paste is unavailable." >&2
         return 0
     }
     mkdir -p "$CLIP_STATE"
@@ -141,7 +141,7 @@ start_clipboard_bridge() {
     _CLIP_PROBE="probe.$$"
     printf 'ping\n' >"$CLIP_STATE/req.$_CLIP_PROBE" 2>/dev/null || true
     if wait_until 60 0.05 _clip_bridge_answered; then # ≤3s
-        echo "📋 clipboard: pbpaste bridge active (read-only from the sandbox)" >&2
+        echo "📋 clipboard: bridge active (writes reach the host as plain text only)" >&2
     else
         warn "the clipboard bridge did not answer — image paste is unavailable this session." \
             "$KIB_ROOT/host/clipboard-bridge.sh must be executable."
@@ -168,7 +168,7 @@ add_clipboard_bridge_args() {
 }
 
 stop_clipboard_bridge() {
-    is_macos || return 0
+    engine_in_vm || return 0
     kill_pgrp "${CLIP_STATE}.pid" # whole group: the bridge is its own (detach_pgrp)
     # .priv is the bridge's host-private staging dir (clipboard-bridge.sh). Its own EXIT trap
     # normally clears it; this covers the SIGKILL that skips the trap.

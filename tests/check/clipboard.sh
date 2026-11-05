@@ -10,7 +10,7 @@
 # shellcheck source=SCRIPTDIR/_guard.sh
 . "${BASH_SOURCE%/*}/_guard.sh" # sourced by tests/check.sh, never run directly
 
-section "Clipboard bridge shims (macOS reader protocol)"
+section "Clipboard bridge shims (engine-VM reader protocol)"
 
 _clip_tmp="$(mktemp -d)"
 mkdir -p "$_clip_tmp/bin" "$_clip_tmp/spool"
@@ -167,6 +167,32 @@ else
     fail "the clipboard read budget is back under 10s" \
         "got ${_clip_budget:-none} × 0.05s — a large png returns empty and the paste is silent"
 fi
+
+kill "$_clip_host_pid" 2>/dev/null
+wait "$_clip_host_pid" 2>/dev/null || true
+
+# Linux under Lima: the same bridge, on the host's wl-clipboard (no pbpaste on that PATH).
+mkdir -p "$_clip_tmp/host"
+# shellcheck disable=SC2016  # the stub's own source text
+printf '#!/bin/sh
+case "$*" in *image/png*) printf WLPNG ;; *) printf WLTEXT ;; esac
+' \
+    >"$_clip_tmp/host/wl-paste"
+printf '#!/bin/sh
+cat > "%s/wlboard"\n' "$_clip_tmp" >"$_clip_tmp/host/wl-copy"
+chmod +x "$_clip_tmp/host/"*
+PATH="$_clip_tmp/host:/usr/bin:/bin" "$KIB_ROOT/host/clipboard-bridge.sh" "$_clip_tmp/spool" kibtest &
+_clip_host_pid=$!
+is "Linux host: text comes from the host's wl-paste" "WLTEXT" "$("$_clip_tmp/bin/wl-paste")"
+is "Linux host: so does an image" "WLPNG" "$("$_clip_tmp/bin/wl-paste" -t image/png)"
+printf 'kib\033[201~wl' | "$_clip_tmp/bin/wl-copy" >/dev/null 2>&1
+_clip_i=0
+while [ ! -f "$_clip_tmp/wlboard" ] && [ "$_clip_i" -lt 100 ]; do
+    sleep 0.05
+    _clip_i=$((_clip_i + 1))
+done
+is "Linux host: a write reaches wl-copy with the paste escape stripped" "kib[201~wl" \
+    "$(cat "$_clip_tmp/wlboard" 2>/dev/null)"
 
 kill "$_clip_host_pid" 2>/dev/null
 rm -rf "$_clip_tmp"

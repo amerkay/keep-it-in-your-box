@@ -203,10 +203,10 @@ start_container() {
     # Stages the rule file and pushes the mount flags onto REDACTION_ARGS below.
     prepare_redaction
     # Must precede the mounts below, which bind the proxy socket / spool dir.
-    if is_macos; then
-        start_clipboard_bridge
-    elif ! engine_in_vm; then
-        start_wayland_guard # an engine VM cannot reach this host's Wayland socket
+    if engine_in_vm; then
+        start_clipboard_bridge # an engine VM cannot reach this host's Wayland socket
+    else
+        start_wayland_guard
     fi
 
     # Must precede the ARGS below, which add its base-URL env and placeholder shadow.
@@ -304,10 +304,10 @@ start_container() {
     add_policy_args
 
     # Clipboard mounts: the mediated Wayland socket on Linux (reads pass, writes refused), or
-    # the pbpaste bridge spool on macOS. Both no-op if their sidecar/bridge didn't come up.
-    if is_macos; then
+    # the bridge spool when the engine is in a VM. Both no-op if theirs did not come up.
+    if engine_in_vm; then
         add_clipboard_bridge_args
-    elif ! engine_in_vm; then
+    else
         add_wayland_args
     fi
 

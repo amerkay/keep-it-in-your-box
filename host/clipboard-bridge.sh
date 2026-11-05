@@ -1,6 +1,6 @@
 #!/bin/sh
-# Host-side half of the macOS clipboard bridge (start_clipboard_bridge in host/desktop.sh has
-# the why). Watches the spool dir the container writes into, answers READ requests from the
+# Host-side half of the clipboard bridge, for an engine in a VM: macOS, or Linux under Lima, whose
+# Wayland socket cannot cross into the VM (start_clipboard_bridge in host/desktop.sh has the why). Watches the spool dir the container writes into, answers READ requests from the
 # host clipboard, and serves WRITE requests through the sanitiser before pbcopy — never
 # verbatim, because a verbatim write is host code execution at the user's next terminal paste.
 #
@@ -10,7 +10,7 @@
 # planted there would otherwise put an unreadable host file onto the clipboard, which pbpaste
 # hands straight back into the box.
 #
-# POSIX sh, stock macOS tools. Started via detach_pgrp with fds 200/201 CLOSED (load-bearing —
+# POSIX sh; stock macOS tools, or wl-clipboard on Linux. Started via detach_pgrp with fds 200/201 CLOSED (load-bearing —
 # it outlives the kib that starts it); killed by process group at teardown.
 #
 # Protocol (files in the spool dir):
@@ -29,6 +29,8 @@
 # (audit MAC-C1)
 
 DIR="${1:?usage: clipboard-bridge.sh <spool-dir> <project-name>}"
+# A daemon on the user's terminal: silent. sh reports its `sleep` killed at teardown otherwise.
+exec 2>/dev/null
 NAME="${2:-project}"
 LAST_ALERT=0
 # Exec'd, never sourced, so `kib_py` from host/core.sh is out of reach — this mirrors it
@@ -51,34 +53,49 @@ publish() { # $1 = file in $PRIV, $2 = name in the spool
     mv -f "$PRIV/$1" "$DIR/$2" 2>/dev/null
 }
 
-# Write one pasteboard flavour to a file; non-zero (and no file) if it cannot be coerced.
-# The only place that speaks AppleScript, so `list` and `png` cannot disagree about what
-# counts as an image — they did, and only `list` was ever right.
-grab_flavour() { # $1 = AppleScript class, $2 = destination
-    rm -f "$2" 2>/dev/null
-    osascript >/dev/null 2>&1 <<OSA || return 1
+# The host's clipboard tools, picked by what exists: stock macOS, else wl-clipboard (Linux).
+if command -v pbpaste >/dev/null 2>&1; then
+    paste_text() { pbpaste 2>/dev/null; }
+    copy_text() { pbcopy 2>/dev/null; }
+    clip_info() { osascript -e 'clipboard info' 2>&1; }
+
+    # Write one pasteboard flavour to a file; non-zero (and no file) if it cannot be coerced.
+    # The only place that speaks AppleScript, so `list` and `png` cannot disagree about what
+    # counts as an image — they did, and only `list` was ever right.
+    grab_flavour() { # $1 = AppleScript class, $2 = destination
+        rm -f "$2" 2>/dev/null
+        osascript >/dev/null 2>&1 <<OSA || return 1
 set theData to (the clipboard as «class $1»)
 set fp to open for access POSIX file "$2" with write permission
 set eof of fp to 0
 write theData to fp
 close access fp
 OSA
-    [ -s "$2" ]
-}
+        [ -s "$2" ]
+    }
 
-# PNG bytes from the clipboard into $1, or a non-zero return and no file.
-#
-# ⌘⌃⇧4 puts a screenshot on the pasteboard as TIFF — `«class PNGf»` alone fails outright on
-# it, which is why the bridge answered "text/plain only" with a screenshot sitting right
-# there. Try PNGf first (already the target format, no conversion), then TIFF through `sips`
-# (stock macOS). Order matters only for cost, not correctness.
-grab_png() { # $1 = destination
-    grab_flavour PNGf "$1" && return 0
-    grab_flavour TIFF "$1.tiff" || return 1
-    sips -s format png "$1.tiff" --out "$1" >/dev/null 2>&1
-    rm -f "$1.tiff" 2>/dev/null
-    [ -s "$1" ]
-}
+    # PNG bytes from the clipboard into $1, or a non-zero return and no file.
+    #
+    # ⌘⌃⇧4 puts a screenshot on the pasteboard as TIFF — `«class PNGf»` alone fails outright on
+    # it, which is why the bridge answered "text/plain only" with a screenshot sitting right
+    # there. Try PNGf first (already the target format, no conversion), then TIFF through `sips`
+    # (stock macOS). Order matters only for cost, not correctness.
+    grab_png() { # $1 = destination
+        grab_flavour PNGf "$1" && return 0
+        grab_flavour TIFF "$1.tiff" || return 1
+        sips -s format png "$1.tiff" --out "$1" >/dev/null 2>&1
+        rm -f "$1.tiff" 2>/dev/null
+        [ -s "$1" ]
+    }
+else
+    paste_text() { wl-paste --no-newline 2>/dev/null; }
+    copy_text() { wl-copy 2>/dev/null; }
+    clip_info() { wl-paste --list-types 2>&1; }
+    grab_png() { # $1 = destination
+        rm -f "$1" 2>/dev/null
+        wl-paste --type image/png >"$1" 2>/dev/null && [ -s "$1" ]
+    }
+fi
 
 serve_read() { # $1 = request id, $2 = type
     id="$1"
@@ -92,7 +109,7 @@ serve_read() { # $1 = request id, $2 = type
         ping) printf 'pong\n' >"$tmp" ;;
         # Every flavour the pasteboard actually holds — the diagnostic to reach for when an
         # image paste comes back empty, because it names what IS there, not what we can read.
-        info) osascript -e 'clipboard info' >"$tmp" 2>&1 || : >"$tmp" ;;
+        info) clip_info >"$tmp" || : >"$tmp" ;;
         list)
             # Answered by the same extraction `png` uses, so "offered" always means "readable".
             : >"$tmp"
@@ -101,7 +118,7 @@ serve_read() { # $1 = request id, $2 = type
             printf 'text/plain\n' >>"$tmp"
             ;;
         png) grab_png "$tmp" || : >"$tmp" ;;
-        *) pbpaste >"$tmp" 2>/dev/null || : >"$tmp" ;;
+        *) paste_text >"$tmp" || : >"$tmp" ;;
     esac
     publish resp "resp.$id"
 }
@@ -113,7 +130,9 @@ notify_clip() { # $1 = title suffix, $2 = body
     now="$(date +%s)"
     [ $((now - LAST_ALERT)) -lt 30 ] && return
     LAST_ALERT="$now"
-    if command -v terminal-notifier >/dev/null 2>&1; then
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send -a kib "kib · $1" "$2 Project: $NAME" >/dev/null 2>&1 || true
+    elif command -v terminal-notifier >/dev/null 2>&1; then
         terminal-notifier -title "kib · $1" -message "$2 Project: $NAME" >/dev/null 2>&1 || true
     else
         osascript -e "display notification \"$2 Project: $NAME\" with title \"kib · $1\"" \
@@ -144,7 +163,7 @@ serve_write() { # $1 = request id
         return
     fi
     stripped="$(cat "$PRIV/err" 2>/dev/null)"
-    if pbcopy <"$PRIV/clean" 2>/dev/null; then
+    if copy_text <"$PRIV/clean"; then
         printf 'ok\n' >"$PRIV/resp"
         publish resp "resp.$id"
     fi
