@@ -4,7 +4,7 @@
 # itself never moves. The VM mounts a fixed set and never a project, so it never restarts for one.
 #
 # Reads:  KIB_CFG_VM KIB_VM KIB_CONFIG KIB_STATE_ROOT KIB_ROOT HOME LIMA_VM_TYPE LIMA_MOUNT_TYPE
-#         CNAME SYNC_CNAME PATTERNS_STATE KIB_GUARD_FILE_HOST IMAGE_NAME
+#         LIMA_MOUNT_SET CNAME SYNC_CNAME PATTERNS_STATE KIB_GUARD_FILE_HOST IMAGE_NAME
 # Writes: DOCKER_HOST (exported) _KIB_ENGINE_VM KIB_NODE_CACHE KIB_HOST_GATEWAY VM_MOUNTS
 #         MUTAGEN_BIN
 # shellcheck disable=SC2034
@@ -36,6 +36,7 @@ _vm_mounts() {
     # ponytail: until phase 3 of PLAN_VM_SECURITY.md syncs only the open project's slices.
     VM_MOUNTS+=(--mount-only "$HOME/.claude/projects:w" --mount-only "$KIB_STATE_ROOT:w"
         --mount-only "${KIB_CONFIG%/*}")
+    if [ -n "$LIMA_MOUNT_SET" ]; then VM_MOUNTS+=(--set="$LIMA_MOUNT_SET"); fi
 }
 
 # One line and a dot a second, the log only if it fails. Its host agent outlives kib, so it must

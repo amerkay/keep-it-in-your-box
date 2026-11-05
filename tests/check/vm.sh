@@ -87,8 +87,10 @@ is "the docker engine moves into the VM; kib stays here" \
 is "a VM with an old mount set is re-mounted once, then left alone" "1" \
     "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_up >/dev/null && _vm_edits)"
 case "$(cat "$_vm_dir/edits")" in
-    *--mount-type=9p*) pass "the re-mount pins 9p, never reverse-sshfs" ;;
-    *) fail "the re-mount did not pin the mount type" "$(cat "$_vm_dir/edits")" ;;
+    *--mount-type=9p*'--set=.mounts[]."9p".cache = "none"'*)
+        pass "the re-mount pins 9p uncached, never reverse-sshfs"
+        ;;
+    *) fail "the re-mount did not pin 9p uncached" "$(cat "$_vm_dir/edits")" ;;
 esac
 mv "$_vm_dir/state/vm-spec" "$_vm_dir/spec" && echo stale >"$_vm_dir/state/vm-spec"
 _vm_run "$_vm_dir/bin:$PATH" _vm_t_shared >/dev/null

@@ -32,7 +32,12 @@ engine_lima() { [ "$_KIB_ENGINE_VM" = 1 ]; }
 engine_in_vm() { is_macos || engine_lima; }
 
 # Lima's file share per OS. Never reverse-sshfs: it can reach host paths no mount names.
-if is_macos; then LIMA_VM_TYPE=vz LIMA_MOUNT_TYPE=virtiofs; else LIMA_VM_TYPE=qemu LIMA_MOUNT_TYPE=9p; fi
+# 9p uncached: its default write-back cache lets each side read the other's half-written file.
+if is_macos; then
+    LIMA_VM_TYPE=vz LIMA_MOUNT_TYPE=virtiofs LIMA_MOUNT_SET=''
+else
+    LIMA_VM_TYPE=qemu LIMA_MOUNT_TYPE=9p LIMA_MOUNT_SET='.mounts[]."9p".cache = "none"'
+fi
 
 _is_uint() { case "$1" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac }
 

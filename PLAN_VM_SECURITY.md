@@ -138,8 +138,10 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
       deleted passwd/group sources into directories, on the host, through 9p
 - ✅ `drop_planted_links` kept dropping kib's own placeholder-credential link (fixed on `main`)
 - ✅ The clipboard bridge is silent on the terminal (it printed `Terminated` at teardown)
-- ⬜ `session .claude.json unreadable — not merging back` after a VM session (^C exit). Fail-closed
-      held; cause unknown. Diagnose from the host
+- ✅ `session .claude.json unreadable — not merging back`: the file stopped at exactly 4096 bytes,
+      and Claude in the box once read one too (`Unexpected EOF`). Lima's 9p `mmap` cache writes
+      back late and takes the size from the host. Fix: every 9p mount `cache=none`. Verified
+      2026-11-05; it took effect one boot after the edit (fstab is rewritten after mounting)
 - ⬜ Boot is ~27 s: 13 s guest boot, then a ~10 s Lima guest-agent retry. Proposed: keep the VM up
       10 min after the last session (changes the "stops when the last closes" rule: user's call)
 
