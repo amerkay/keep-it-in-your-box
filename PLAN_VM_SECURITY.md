@@ -79,14 +79,21 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
       blocks it
 - ✅ **S4** FUSE root at `/mnt/kib` in the Lima VM passes Ubuntu's `fusermount3` AppArmor profile.
       Done 2026-11-05: `/mnt/kib` mounts; `/run/kib` is `DENIED … profile="fusermount3"`
-- ⬜ **S5** Protected paths (`.git/config`, `.git/hooks`, `.vscode`, …) synced **host→VM only**,
+- ✅ **S5** Protected paths (`.git/config`, `.git/hooks`, `.vscode`, …) synced **host→VM only**,
       so a VM escape can't plant them on the host. Fallback: the teardown audit, as today.
       **Finding 2026-11-05 (Mutagen v0.18.1 source):** the host trusts the VM agent's snapshot and
       never re-applies ignores. It only rejects `..` and `/` in names. So VM root can tamper with
       the agent and write **any** path in an open project, ignores or not. A one-way side session
       doesn't help: the hole is the main two-way session. Ignores still stop the honest sync.
-      Proposed: a host-side guard per open project. Copy the protected set at launch, poll it
-      like `rules-watch.sh`, and on any change restore it, pause the sync and alert
+      Reads too: the host's `Supply()` serves any path the agent asks for, ignores unchecked.
+      **Fix (2026-11-05, verified on Linux): two hops.** project ⇄ shadow
+      (`~/.local/state/kib-shadow/<cname>`, both ends on the host, guard ignores) ⇄ VM volume
+      (build dirs ignored only). Nothing
+      guarded is ever in the shadow, and the VM's agent never reaches the project. Mutagen's
+      opener refuses symlinks, so a planted link can't reach past the shadow. Rejected: a host
+      poller (~100 lines, a 1 s window, no fix for reads); one 9p-shared copy (scanning 9,845
+      files took 1.79 s on 9p vs 0.02 s on a volume). Test: a hook planted in the VM volume reached
+      the shadow in 1–3 s and never the project; a box edit 3 folders deep reached the host in ≤1 s
 - ⬜ **S6** Sync lag on live channels: the clipboard spool and sleep markers.
       2026-11-05, Linux over 9p: clipboard text, screenshot and box→host write all work. Lag and
       sleep markers not measured; redo once phase 3 moves the spool onto Mutagen
@@ -142,8 +149,8 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
       and Claude in the box once read one too (`Unexpected EOF`). Lima's 9p `mmap` cache writes
       back late and takes the size from the host. Fix: every 9p mount `cache=none`. Verified
       2026-11-05; it took effect one boot after the edit (fstab is rewritten after mounting)
-- ⬜ Boot is ~27 s: 13 s guest boot, then a ~10 s Lima guest-agent retry. Proposed: keep the VM up
-      10 min after the last session (changes the "stops when the last closes" rule: user's call)
+- ✅ Boot is ~14–27 s. Decided 2026-11-05: no linger, the VM still stops when the last session
+      closes
 
 ### Phase 3: hybrid host data
 - ⬜ Move per-project state into one folder: `$KIB_STATE_ROOT/<slug>/` (session, shared,
