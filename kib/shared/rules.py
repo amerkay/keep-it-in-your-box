@@ -30,6 +30,8 @@ those rules, and the launch prints them). The asymmetry is the two tiers' threat
 from __future__ import annotations
 
 import fnmatch
+import json
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
@@ -196,6 +198,44 @@ def tightens(old: Sequence[Rule], new: Sequence[Rule]) -> bool:
     return kept_in_order and not any(rule.negated for rule in set(new) - set(old))
 
 
+#: git's own host-executed paths (kib/guest/fuse.py `_git_sensitive`), as Mutagen globs.
+GIT_SENSITIVE = ("**/.git/**/config", "**/.git/**/config.worktree", "**/.git/**/hooks")
+
+
+def git_sensitive(rel: str) -> bool:
+    """`GIT_SENSITIVE` as a predicate."""
+    p = rel.split("/")
+    if p[-1] in ("config", "config.worktree") and ".git" in p[:-1]:
+        return True
+    return any(x == "hooks" and ".git" in p[:i] for i, x in enumerate(p))
+
+
+def _glob(rule: Rule) -> str:
+    """One rule in Mutagen's doublestar syntax: escape what fnmatch reads literally, and make
+    `**` one segment again (doublestar's spans directories)."""
+    p = "".join({"\\": "\\\\", "{": "[{]", "}": "[}]"}.get(c, c) for c in rule.pattern)
+    p = re.sub(r"\*\*+", "*", p)
+    if rule.anchor == EXACT:
+        p = "/" + p
+    elif rule.anchor == TAIL and "/" in p:
+        p = "**/" + p
+    return ("!" if rule.negated else "") + p
+
+
+def sync_ignores(guard: Sequence[Rule], project: Sequence[Rule]) -> list[str]:
+    """Mutagen `--ignore`s dropping every path `verdict` guards. Mutagen is one last-match-wins
+    list, so the order rebuilds `verdict`'s tiers: a project `!` follows `[redact]` and can
+    cancel it, and `[protect]` comes last, out of its reach."""
+    out = [_glob(r) for r in guard if r.action == REDACT]
+    for r in project:
+        out.append(_glob(r))
+        if r.anchor == BARE and not r.negated:  # kib's bare rules never match in the root .git
+            out.append("!/.git/**/" + _glob(r))
+            if fnmatch.fnmatch(".git", r.pattern):
+                out.append("!/.git")
+    return out + [_glob(r) for r in guard if r.action == PROTECT] + list(GIT_SENSITIVE)
+
+
 def _optouts_cmd(guard_file: str, rule_file: str) -> int:
     """`optouts <guard-file> <rule-file>` — one un-redacting project rule per line."""
     for pattern in redact_optouts(load(guard_file, guard=True), load(rule_file)):
@@ -208,10 +248,26 @@ def _tightens_cmd(old_file: str, new_file: str) -> int:
     return cli.OK if tightens(load(old_file), load(new_file)) else cli.REFUSED
 
 
+#: Never synced: the box builds its own in the VM, for Linux, whatever the host's OS.
+VM_LOCAL = ("node_modules", ".venv", "__pycache__", "target", ".next", ".nuxt", ".turbo")
+
+
+def _sync_config_cmd(guard_file: str, rule_file: str) -> int:
+    """`sync-config <guard-file> <rule-file>` — a Mutagen `-c` file. Not `--ignore`: the CLI
+    splits that on commas."""
+    paths = [*VM_LOCAL, *sync_ignores(load(guard_file, guard=True), load(rule_file))]
+    print(json.dumps({"sync": {"defaults": {"ignore": {"paths": paths}}}}))
+    return cli.OK
+
+
 def main(argv: list[str]) -> int:
     return cli.dispatch(
         "kib.shared.rules",
-        {"optouts": (_optouts_cmd, 2), "tightens": (_tightens_cmd, 2)},
+        {
+            "optouts": (_optouts_cmd, 2),
+            "tightens": (_tightens_cmd, 2),
+            "sync-config": (_sync_config_cmd, 2),
+        },
         argv,
     )
 

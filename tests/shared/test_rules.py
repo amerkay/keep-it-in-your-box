@@ -251,3 +251,69 @@ def test_tightens_refuses_a_reorder_that_flips_a_negation() -> None:
 def test_tightens_accepts_a_first_rule_file() -> None:
     assert rules.tightens([], rules.parse(["secrets"])) is True
     assert rules.tightens([], rules.parse(["!.env"])) is False
+
+
+# ── Mutagen sync ignores ─────────────────────────────────────────
+SYNC_PATHS = """.env .env.local .env.example .env.example.tmp.1 .env.example.local a/b/.env.prod
+.git/config .git/HEAD .git/hooks/pre-commit .git/refs/heads/x.pem .git/.hidden
+.git/modules/s/config .git/modules/s/hooks/x .git/worktrees/w/config.worktree sub/.git/config
+sub/.git/hooks/x sub/.git/objects/ab src/hooks/useX.ts secrets/README.md secrets/key
+secrets/sub/x x/secrets/key x.pem a/b/x.pem a/x/k.pem a/x/y/k.pem .vscode/tasks.json
+a/.vscode/s.json a/.cursor/mcp.json .cursor/rules/r.md .run/x .mvn/jvm.config .envrc
+.claude/settings.json .hidden/x b{1,2}.txt back\\slash.txt weird.txt wexd.txt docs/a.md docs/b.md
+README.md""".split()
+
+
+@pytest.mark.parametrize(
+    "project",
+    [
+        "",
+        "secrets\n!secrets/README.md",
+        "secrets/*\n!secrets/README.md",
+        "*.pem\na/**/k.pem",
+        "!.env\n!.vscode\n!.git/config",
+        ".*\n!.claude",
+        "!*",
+        "b{1,2}.txt\nback\\slash.txt\nwe[!i]d.txt\ndocs/*\n!docs/a.md",
+        "docs\n!docs\nREADME.md\n!README.md\nREADME.md",
+    ],
+)
+def test_real_mutagen_syncs_exactly_what_verdict_passes(project: str, tmp_path: Path) -> None:
+    """The VM gets a synced copy, so its ignores ARE the redaction boundary there."""
+    import json
+    import os
+    import shutil
+    import subprocess
+
+    mutagen = shutil.which("mutagen")
+    if not mutagen:
+        pytest.skip("mutagen not on PATH")
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    for rel in SYNC_PATHS:
+        (src / rel).parent.mkdir(parents=True, exist_ok=True)
+        (src / rel).write_text(rel)
+    dst.mkdir()
+    proj = rules.parse(project.splitlines())
+    guard = rules.load(str(GUARD), guard=True)
+    paths = rules.sync_ignores(guard, proj)
+    (tmp_path / "c.yml").write_text(
+        json.dumps({"sync": {"defaults": {"ignore": {"paths": paths}}}})
+    )
+    env = dict(os.environ, MUTAGEN_DATA_DIRECTORY=str(tmp_path / "m"))
+
+    def run(*a: str) -> None:
+        subprocess.run([mutagen, *a], env=env, check=True, capture_output=True)
+
+    try:
+        run("sync", "create", "-n", "t", "-m", "two-way-resolved", "-c", str(tmp_path / "c.yml"),
+            str(src), str(dst))  # fmt: skip
+        run("sync", "flush", "t")
+    finally:
+        subprocess.run([mutagen, "daemon", "stop"], env=env, capture_output=True)
+    got = {str(p.relative_to(dst)) for p in dst.rglob("*") if p.is_file()}
+    want = {
+        p
+        for p in SYNC_PATHS
+        if rules.verdict(guard + proj, p) is None and not rules.git_sensitive(p)
+    }
+    assert got == want
