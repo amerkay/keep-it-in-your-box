@@ -45,7 +45,7 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
 | Layout | kib on the host; Docker in one kib-managed Lima VM (`kib-vm`, rootful). The same on Linux and macOS |
 | Project files | Mutagen sync into a per-project Docker volume in the VM. No project mounts |
 | Mutagen build | Official release (MIT core plus SSPL speed-ups; local use is fine) |
-| Conflicts | **Host wins** (`two-way-resolved`, host = alpha). Claude is told in `etc-CLAUDE.md`; kib lists the overwritten files after exit |
+| Conflicts | **Host wins** (`two-way-resolved`, host = alpha). Claude is told in `etc-CLAUDE.md` that fixing lost edits is its job. No overwritten-files list: Mutagen doesn't report host-wins conflicts (S1) |
 | Closed project | Flush the sync, terminate it, delete the volume |
 | Build output | `node_modules`, `target`, `.venv`, `dist`, … stay in the VM, not synced |
 | Other host data | **Hybrid**: mount what is global anyway (kib checkout read-only; `~/.claude/{skills,plugins,agents,commands,hooks}` read-write). Sync the open project's slices (transcripts, state). Copy in only the broker tokens of routes in use |
@@ -64,85 +64,90 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
 ## Checklist
 
 ### Phase 0: spikes (host-side, before code)
-- [ ] **S1** Mutagen Docker transport → a volume-backed sync container in `kib-vm`: initial sync
+- ✅ **S1** Mutagen Docker transport → a volume-backed sync container in `kib-vm`: initial sync
       time on a big repo, lag, host-wins conflicts, symlinks, exec bits, UID 1000, `.git`, deletes,
-      file-change events in the box
-- [ ] **S2** `.kibignore` and the global guard → Mutagen ignores: check the `!`, root-anchored and
+      file-change events in the box.
+      Done 2026-11-05 (v0.18.1): all pass. Lag ≤55 ms host→VM, ≤111 ms VM→host; close 0.27 s.
+      `two-way-resolved` does **not** report host-wins conflicts. Still open: first-sync time on a big repo
+- ⬜ **S2** `.kibignore` and the global guard → Mutagen ignores: check the `!`, root-anchored and
       folder-seal rules map 1:1
-- [ ] **S3** macOS Docker Desktop: where the file-sharing list lives (`settings-store.json`,
+- ⬜ **S3** macOS Docker Desktop: where the file-sharing list lives (`settings-store.json`,
       `FilesharingDirectories`); whether an edit plus restart applies it; whether an org admin lock
       blocks it
-- [ ] **S4** FUSE root at `/mnt/kib` in the Lima VM passes Ubuntu's `fusermount3` AppArmor profile
-- [ ] **S5** Protected paths (`.git/config`, `.git/hooks`, `.vscode`, …) synced **host→VM only**,
+- ✅ **S4** FUSE root at `/mnt/kib` in the Lima VM passes Ubuntu's `fusermount3` AppArmor profile.
+      Done 2026-11-05: `/mnt/kib` mounts; `/run/kib` is `DENIED … profile="fusermount3"`
+- ⬜ **S5** Protected paths (`.git/config`, `.git/hooks`, `.vscode`, …) synced **host→VM only**,
       so a VM escape can't plant them on the host. Fallback: the teardown audit, as today
-- [ ] **S6** Sync lag on live channels: the macOS clipboard spool and sleep markers
-- [ ] **S7** macOS Lima (vz + virtiofs): the kib image builds and runs; `host.lima.internal`
+- ⬜ **S6** Sync lag on live channels: the macOS clipboard spool and sleep markers
+- ⬜ **S7** macOS Lima (vz + virtiofs): the kib image builds and runs; `host.lima.internal`
       reaches the Mac
 
 ### Phase 1: VM base (rework the uncommitted VM code)
-- [ ] Delete project mounts: `_vm_pick_root`, `vm-roots`, the restart and re-mount path
-- [ ] Fixed mounts only: kib checkout read-only, 5 `~/.claude` trees read-write. Node cache stays
+- ⬜ Delete project mounts: `_vm_pick_root`, `vm-roots`, the restart and re-mount path
+- ⬜ Fixed mounts only: kib checkout read-only, 5 `~/.claude` trees read-write. Node cache stays
       in the VM
-- [ ] Pin the mount type per OS: Linux `9p`, macOS `virtiofs`. Never `reverse-sshfs`
-- [ ] Allow VM mode on macOS (`vm_wanted`); skip the Docker Desktop-only checks in VM mode
-- [ ] `fuse_root_path` → `/mnt/kib` on Lima (macOS Docker Desktop keeps `/run/kib`)
-- [ ] `host.docker.internal` → Lima's host address on Lima (also fixes it on Linux)
-- [ ] Keep: VM lifetime lock (fd 205/206), `engine_in_vm`, the rootless guard, closing fd 205 in
+- ⬜ Pin the mount type per OS: Linux `9p`, macOS `virtiofs`. Never `reverse-sshfs`
+- ⬜ Allow VM mode on macOS (`vm_wanted`); skip the Docker Desktop-only checks in VM mode
+- ⬜ `fuse_root_path` → `/mnt/kib` on Lima (macOS Docker Desktop keeps `/run/kib`)
+- ⬜ `host.docker.internal` → Lima's host address on Lima (also fixes it on Linux)
+- ⬜ Keep: VM lifetime lock (fd 205/206), `engine_in_vm`, the rootless guard, closing fd 205 in
       background jobs
 
 ### Phase 2: Mutagen per project
-- [ ] Installer: `Y/n` → official release into `~/.local/bin`, **checksum-verified**; refuse on `n`
-- [ ] First session of a project: volume `kib-src-<hash>` + capless sync container + Mutagen
+- ⬜ Installer: `Y/n` → official release into `~/.local/bin`, **checksum-verified** against the
+      release's `SHA256SUMS` (worked in S1, v0.18.1); refuse on `n`
+- ⬜ The sync container needs a passwd/group entry for the box's UID (Mutagen looks up the
+      username) and `--cap-add=CHOWN` (Mutagen `chown`s its injected agent as root). Found in S1
+- ⬜ First session of a project: volume `kib-src-<hash>` + capless sync container + Mutagen
       session (host wins; ignores = redacted files + build dirs + protected paths, which go
       one-way per S5)
-- [ ] The FUSE sidecar serves `/src` from that volume, not `$PWD`. The box path stays `$PWD`
-- [ ] The box waits for the first sync to finish before Claude starts, with a progress line
-- [ ] Last session: `mutagen sync flush` → terminate → remove the volume and sync container
-- [ ] Record overwritten (host-wins) files and print them after exit
+- ⬜ The FUSE sidecar serves `/src` from that volume, not `$PWD`. The box path stays `$PWD`
+- ⬜ The box waits for the first sync to finish before Claude starts, with a progress line
+- ⬜ Last session: `mutagen sync flush` → terminate → remove the volume and sync container
 
 ### Phase 3: hybrid host data
-- [ ] Move per-project state into one folder: `$KIB_STATE_ROOT/<slug>/` (session, shared,
+- ⬜ Move per-project state into one folder: `$KIB_STATE_ROOT/<slug>/` (session, shared,
       patterns, passwd, group, clipboard, sleep, broker)
-- [ ] Sync that folder and `~/.claude/projects/<slug>` while the project is open
-- [ ] Broker: copy only the tokens and `providers.d` entries of routes in use into the state
+- ⬜ Sync that folder and `~/.claude/projects/<slug>` while the project is open
+- ⬜ Broker: copy only the tokens and `providers.d` entries of routes in use into the state
       slice; remove them at close
 
 ### Phase 4: prompts that survive Claude's full-screen UI
-- [ ] Every decision is a blocking prompt before Claude starts: install Lima `[Y/n/never]`,
+- ⬜ Every decision is a blocking prompt before Claude starts: install Lima `[Y/n/never]`,
       install Mutagen `[Y/n]`, narrow Docker Desktop sharing `[Y/n]`
-- [ ] Repeat key notices after exit: VM off and why, overwritten files, teardown findings
+- ⬜ Repeat key notices after exit: VM off and why, teardown findings
 
 ### Phase 5: macOS Docker Desktop fallback
-- [ ] Detect `/Users` (or any parent of a kib path) in the sharing list → refuse
-- [ ] `Y/n`: rewrite the list to kib's mounts only, restart Docker Desktop (the prompt warns this
+- ⬜ Detect `/Users` (or any parent of a kib path) in the sharing list → refuse
+- ⬜ `Y/n`: rewrite the list to kib's mounts only, restart Docker Desktop (the prompt warns this
       stops **all** its containers), wait for the engine
-- [ ] Same Mutagen volumes as Lima, so no project ever needs sharing
+- ⬜ Same Mutagen volumes as Lima, so no project ever needs sharing
 
 ### Phase 6: policy and docs
-- [ ] `guest/policy/etc-CLAUDE.md`: the project is a synced copy; **the host wins conflicts**, so
+- ⬜ `guest/policy/etc-CLAUDE.md`: the project is a synced copy; **the host wins conflicts**, so
       re-read before editing and re-apply lost edits yourself; build dirs are VM-local
-- [ ] `docs/vm.md`: rewrite for Mutagen, hybrid mounts, macOS Lima/Colima, the Docker Desktop
+- ⬜ `docs/vm.md`: rewrite for Mutagen, hybrid mounts, macOS Lima/Colima, the Docker Desktop
       narrowing, licenses (Lima Apache-2.0, Mutagen MIT + SSPL, Docker Desktop terms)
-- [ ] Design notes: `microvm.md` (decision, and lift the "Lima on macOS rejected" verdict),
+- ⬜ Design notes: `microvm.md` (decision, and lift the "Lima on macOS rejected" verdict),
       `macos.md`, `container-lifecycle.md`, `redaction-config-guard.md` (sync ignores)
-- [ ] `CLAUDE.md` dead ends: kib inside the VM (no `~/.claude.json`), `/run/kib` vs AppArmor,
+- ⬜ `CLAUDE.md` dead ends: kib inside the VM (no `~/.claude.json`), `/run/kib` vs AppArmor,
       `reverse-sshfs`, parent-folder and per-project mounts (restarts), per-project rootless users
-- [ ] `README.md` limits section
+- ⬜ `README.md` limits section
 
 ### Phase 7: tests
-- [ ] `tests/check/vm.sh` (fake `limactl`, `mutagen`, `docker`): mount allowlist, sync
+- ⬜ `tests/check/vm.sh` (fake `limactl`, `mutagen`, `docker`): mount allowlist, sync
       start/stop, volume removal, token copy in/out, refusals, sharing-list rewrite
-- [ ] `tests/check/` ignore translation: every `.kibignore` rule shape → Mutagen ignore
-- [ ] `security-test.sh` new section **Engine VM** (inside the box): engine is a VM; box kernel ≠
+- ⬜ `tests/check/` ignore translation: every `.kibignore` rule shape → Mutagen ignore
+- ⬜ `security-test.sh` new section **Engine VM** (inside the box): engine is a VM; box kernel ≠
       host kernel (kib passes `KIB_HOST_KERNEL`); `host.docker.internal` reaches the host; the
       policy file states host-wins
-- [ ] New `tests/vm-check.sh` (host): the paste blocks below, automated, plus lifecycle checks:
+- ⬜ New `tests/vm-check.sh` (host): the paste blocks below, automated, plus lifecycle checks:
       closed project's volume gone, VM stopped after the last session, only in-use tokens in the VM
-- [ ] `./dev.sh check` green, including bash-3.2 portability
+- ⬜ `./dev.sh check` green, including bash-3.2 portability
 
 ### Phase 8: verify, then commit (ask first)
-- [ ] All platform tests below pass
-- [ ] Commit in small conventional commits, only when asked
+- ⬜ All platform tests below pass
+- ⬜ Commit in small conventional commits, only when asked
 
 ## Platform tests
 
