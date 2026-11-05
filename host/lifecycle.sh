@@ -205,8 +205,8 @@ start_container() {
     # Must precede the mounts below, which bind the proxy socket / spool dir.
     if is_macos; then
         start_clipboard_bridge
-    else
-        start_wayland_guard
+    elif ! engine_in_vm; then
+        start_wayland_guard # an engine VM cannot reach this host's Wayland socket
     fi
 
     # Must precede the ARGS below, which add its base-URL env and placeholder shadow.
@@ -307,13 +307,13 @@ start_container() {
     # the pbpaste bridge spool on macOS. Both no-op if their sidecar/bridge didn't come up.
     if is_macos; then
         add_clipboard_bridge_args
-    else
+    elif ! engine_in_vm; then
         add_wayland_args
     fi
 
     # Follow the host's live DNS. Linux only — on macOS the engine VM already tracks the host
     # resolver, so there is nothing to sync.
-    is_macos || add_resolv_sync_args
+    engine_in_vm || add_resolv_sync_args
 
     # An empty template dir, so `git init`/`clone` create no .git/hooks at all. Git copies the
     # sample hooks from /usr/share/git-core/templates otherwise, and the guard rightly refuses
@@ -507,7 +507,7 @@ kib_bring_up() {
         wait_for_container_ready
         # Linux only: macOS's engine VM already tracks the host resolver. One info line, and
         # deliberately no desktop notification.
-        if is_macos; then
+        if engine_in_vm; then
             echo "ℹ️  DNS: handled by the Docker engine VM — follows the host resolver." >&2
         else
             start_resolv_sync

@@ -25,6 +25,11 @@ esac
 
 is_macos() { [ "$KIB_OS" = darwin ]; }
 
+# The engine runs in a VM: Docker Desktop on macOS, or kib's Lima VM (host/vm.sh). Set here, never
+# from the environment — an inherited 1 would aim engine_ns_exec's privileged nsenter at THIS host.
+_KIB_ENGINE_VM=0
+engine_in_vm() { is_macos || [ "$_KIB_ENGINE_VM" = 1 ]; }
+
 _is_uint() { case "$1" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac }
 
 # ── flock(1) shim ─────────────────────────────────────────────────
@@ -273,7 +278,7 @@ box_gid() {
 # on the Mac. Only the mountPOINT is constrained — the project still arrives over virtiofs as the
 # sidecar's source. (docs/design-notes/macos.md)
 fuse_root_path() { # <per-project key>
-    if [ "$KIB_OS" = darwin ]; then
+    if engine_in_vm; then
         printf '/run/kib/fuse.%s\n' "$1"
     else
         printf '%s/fuse.%s\n' "$KIB_STATE_ROOT" "$1"
@@ -284,7 +289,7 @@ fuse_root_path() { # <per-project key>
 # Two engines keep the FUSE root somewhere kib cannot act on directly, for different reasons: on
 # macOS it exists only inside the engine VM; under rootless it is our own path, but only the
 # daemon's namespace decides whether a :rshared bind there is accepted. Same shape, one shim.
-engine_ns() { is_macos || is_rootless; }
+engine_ns() { engine_in_vm || is_rootless; }
 
 # dockerd's pid, host-visible because rootlesskit adds no pid namespace. The pidfile is checked
 # against /proc/<pid>/comm, never trusted: a SIGKILLed dockerd leaves the file behind, and a
@@ -304,8 +309,8 @@ _rootless_daemon_pid() {
     return 1
 }
 
-# macOS: a throwaway `--privileged --pid=host` container nsenters the VM, the only handle the Mac
-# has on it. Deliberately NOT reused on Linux, where that command targets your REAL machine and
+# Engine VM: a throwaway `--privileged --pid=host` container nsenters the VM, the only handle kib
+# has on it. Deliberately NOT reused for a native engine, where it targets your REAL machine and
 # buying code symmetry with it would be a security regression — the rootless branch needs no
 # privilege at all, because owning that user namespace is the only permission setns asks for.
 #
@@ -313,7 +318,7 @@ _rootless_daemon_pid() {
 # a `cmd_a || cmd_b` fallback cannot tell "this nsenter rejected the flag" from "the command inside
 # failed" — so it re-ran the caller's whole script, including fuse_root_create's unmount-and-bind.
 engine_ns_exec() {
-    if is_macos; then
+    if engine_in_vm; then
         docker run --rm --privileged --pid=host --entrypoint nsenter "$IMAGE_NAME" \
             -t 1 -m -- "$@" >/dev/null 2>&1
         return
@@ -375,7 +380,7 @@ _mount_is_shared() {
 # Create <root>/mnt owned by <uid>:<gid>, and guarantee the root propagates shared. Called once
 # per cold start, before the sidecar.
 fuse_root_create() { # <root> <uid> <gid>
-    if is_macos; then
+    if engine_in_vm; then
         # A plain directory cannot be a propagation peer until it is a mount in its own right,
         # and the engine VM's root propagation is not ours to change. Bind it to itself, then
         # mark it rshared — idempotent, since the second call finds it already mounted.
@@ -436,7 +441,7 @@ fuse_root_create() { # <root> <uid> <gid>
 }
 
 fuse_root_destroy() { # <root>
-    if is_macos; then
+    if engine_in_vm; then
         # The bind-to-self must go before the rm, or the next launch inherits a stacked mount.
         # shellcheck disable=SC2016  # $1 is the inner sh's argument, not ours
         engine_ns_exec sh -c 'umount -l "$1" 2>/dev/null; rm -rf "$1"' _ "$1" || true
