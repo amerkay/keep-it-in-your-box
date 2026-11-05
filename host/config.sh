@@ -8,8 +8,8 @@
 # and locking. (docs/design-notes/container-lifecycle.md)
 #
 # Reads:  KIB_ROOT KIB_STATE_ROOT PWD
-# Writes: CLAUDE_HOME CLAUDE_JSON SLUG SESSION_BASE SHARED_BASE LOCK_DIR
-#         LOCK_FILE BOOT_LOCK STATE_DIR EPHEMERAL SCRATCH_SUFFIX
+# Writes: CLAUDE_HOME CLAUDE_JSON SLUG SESSION_BASE SHARED_BASE PROJ_STATE TRANSCRIPTS_SRC
+#         LOCK_DIR LOCK_FILE BOOT_LOCK STATE_DIR EPHEMERAL SCRATCH_SUFFIX
 #         KIB_ASSETS_OPEN KIB_ASSETS_PROMPT
 # shellcheck disable=SC2034  # the globals above are read in bin/kib and the other units
 
@@ -25,8 +25,14 @@ kib_resolve_paths() {
     CLAUDE_HOME="$HOME/.claude"
     CLAUDE_JSON="$HOME/.claude.json"
     SLUG="$(printf '%s' "$PWD" | sed 's/[^a-zA-Z0-9]/-/g')"
-    SESSION_BASE="$KIB_STATE_ROOT/$SLUG/session"
-    SHARED_BASE="$KIB_STATE_ROOT/$SLUG/shared"
+    PROJ_STATE="$KIB_STATE_ROOT"
+    TRANSCRIPTS_SRC="$CLAUDE_HOME/projects/$SLUG"
+    if engine_lima; then # the VM resolves binds itself, so name what it can see (vm_state)
+        PROJ_STATE="$VM_RW"
+        TRANSCRIPTS_SRC="$VM_RW/$SLUG/transcripts"
+    fi
+    SESSION_BASE="$PROJ_STATE/$SLUG/session"
+    SHARED_BASE="$PROJ_STATE/$SLUG/shared"
     EPHEMERAL=0
     SCRATCH_SUFFIX=""
 

@@ -49,6 +49,21 @@ _vm_t_sync() { # [stop] — the sync of a project named "proj", with the state a
     exec 200>"$_vm_dir/l200" 205>"$_vm_dir/l205" # held by a real launch
     if [ -n "${1:-}" ]; then vm_sync_stop; else vm_sync_start; fi
 }
+_vm_t_state() { # in, then out: where a project's state sits each time
+    SLUG=-p CLAUDE_HOME="$HOME/.claude" VM_RW="$_vm_dir/vm-rw"
+    mkdir -p "$KIB_STATE_ROOT/-p/session" "$CLAUDE_HOME/projects/-p" "$VM_RW"
+    echo t >"$CLAUDE_HOME/projects/-p/t.jsonl"
+    vm_state in && ls "$VM_RW/-p" && cat "$CLAUDE_HOME/projects/-p/t.jsonl"
+    vm_state out && ls -A "$VM_RW" && echo : && ls "$KIB_STATE_ROOT/-p" "$CLAUDE_HOME/projects/-p"
+    [ -L "$CLAUDE_HOME/projects/-p" ] || echo real
+}
+_vm_t_paths() { # every per-project path a VM launch names, one per line
+    . "$KIB_ROOT/host/config.sh" && . "$KIB_ROOT/host/lifecycle.sh" && _KIB_ENGINE_VM=1
+    kib_resolve_paths && kib_identity
+    printf 'rw %s\n' "$SESSION_BASE" "$SHARED_BASE" "$TRANSCRIPTS_SRC" "$SLEEP_STATE" \
+        "$CLIP_STATE" "$BROKER_OUT"
+    printf 'ro %s\n' "$PATTERNS_STATE" "$PASSWD_STATE" "$CRED_WITNESS" "$BROKER_DIR" "$CLIP_HOST"
+}
 _vm_t_shared() { exec 207>"$VM_LOCK" && flock -s 207 && vm_up && vm_down; }
 
 _vm_run() { ( # <PATH> <cmd…> — a fresh subshell with the units loaded, HOME and state faked
@@ -85,6 +100,23 @@ case "$_vm_m" in
     *) pass "the .claude dir itself (credential, settings, CLAUDE.md) stays off the VM" ;;
 esac
 
+case "$_vm_m" in
+    *"$_vm_dir/state/vm-rw:w"$'\n'--mount-only$'\n'"$_vm_dir/state/vm-ro"$'\n'*) pass "kib's state reaches the VM as vm-rw, and vm-ro read-only" ;;
+    *) fail "kib's state is not mounted as vm-rw + read-only vm-ro" "$_vm_m" ;;
+esac
+case "$_vm_m" in
+    *"$_vm_dir/state:w"* | *"/.claude/projects"* | *.keep-it-in-your-box*)
+        fail "kib's whole state, every transcript or the token store is in the VM" "$_vm_m"
+        ;;
+    *) pass "no other project's state or transcripts, and no token store, in the VM" ;;
+esac
+_vm_out="$(_vm_run "$PATH" _vm_t_paths)"
+is "the box's files are on vm-rw; pidfiles, witness, rules and tokens on vm-ro" "6 5" \
+    "$(grep -c "^rw $_vm_dir/state/vm-rw/" <<<"$_vm_out") $(grep -c "^ro $_vm_dir/state/vm-ro/" <<<"$_vm_out")"
+_vm_out="$(_vm_run "$PATH" _vm_t_state | tr '\n' ' ')"
+is "open: session + transcripts onto vm-rw; close: back, and canonical a real dir again" \
+    "session transcripts t : $_vm_dir/home/.claude/projects/-p: t.jsonl  $_vm_dir/state/-p: session real " \
+    "$_vm_out"
 is "the docker engine moves into the VM; kib stays here" \
     "unix://$_vm_dir/lima/sock/docker.sock vm 192.168.5.2" "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_up | tail -1)"
 is "a VM with an old mount set is re-mounted once, then left alone" "1" \
@@ -98,8 +130,10 @@ case "$(cat "$_vm_dir/edits")" in
     *) fail "the re-mount did not pin 9p uncached" "$(cat "$_vm_dir/edits")" ;;
 esac
 mv "$_vm_dir/state/vm-spec" "$_vm_dir/spec" && echo stale >"$_vm_dir/state/vm-spec"
-_vm_run "$_vm_dir/bin:$PATH" _vm_t_shared >/dev/null
-is "a stale mount set never restarts a VM another kib is using" "1" "$(_vm_edits)"
+case "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_shared)" in
+    *"other kib sessions use it"*) is "a stale mount set in use: refused, the VM untouched" "1" "$(_vm_edits)" ;;
+    *) fail "a stale mount set in use was not refused" ;;
+esac
 mv "$_vm_dir/spec" "$_vm_dir/state/vm-spec"
 
 rm -f "$_vm_dir/stops"

@@ -295,7 +295,7 @@ rm -rf "$tm_tmp"
 unset tm_tmp
 
 # The migration must sit BEFORE the relink, or bind_via_link destroys the dir first.
-if awk '/_bt_ok=1/{m=NR} /bind_via_link "\$CLAUDE_HOME\/projects\/\$SLUG"/{b=NR} END{exit !(m && b && m < b)}' \
+if awk '/_bt_ok=1/{m=NR} /bind_via_link "\$TRANSCRIPTS_SRC"/{b=NR} END{exit !(m && b && m < b)}' \
     "$KIB_ROOT/host/lifecycle.sh"; then
     pass "start_container migrates old in-box transcripts before relinking over them"
 else

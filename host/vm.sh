@@ -4,9 +4,10 @@
 # itself never moves. The VM mounts a fixed set and never a project, so it never restarts for one.
 #
 # Reads:  KIB_CFG_VM KIB_VM KIB_CONFIG KIB_STATE_ROOT KIB_ROOT HOME LIMA_VM_TYPE LIMA_MOUNT_TYPE
-#         LIMA_MOUNT_SET CNAME SYNC_CNAME PATTERNS_STATE KIB_GUARD_FILE_HOST IMAGE_NAME
+#         LIMA_MOUNT_SET CNAME SYNC_CNAME PATTERNS_STATE KIB_GUARD_FILE_HOST IMAGE_NAME SLUG
+#         CLAUDE_HOME
 # Writes: DOCKER_HOST (exported) _KIB_ENGINE_VM KIB_NODE_CACHE KIB_HOST_GATEWAY VM_MOUNTS
-#         MUTAGEN_BIN
+#         MUTAGEN_BIN VM_RW VM_RO
 # shellcheck disable=SC2034
 
 KIB_VM_NAME="kib-vm"
@@ -17,7 +18,11 @@ LIMA_HOST_IP=192.168.5.2
 
 # Pinned, not read off the release: a SHA256SUMS beside the tarball vouches for nothing.
 MUTAGEN_VERSION=v0.18.1
-# Not under $KIB_STATE_ROOT: the VM mounts that, and these files steer the host's daemon.
+# Open projects' state, and the VM's only view of kib's: what the box writes in VM_RW, what the
+# host writes for the VM (and its own per-container files) in VM_RO, read-only there.
+VM_RW="$KIB_STATE_ROOT/vm-rw"
+VM_RO="$KIB_STATE_ROOT/vm-ro"
+# Never VM-mounted: these files steer the host's Mutagen daemon.
 MUTAGEN_DATA="${XDG_STATE_HOME:-$HOME/.local/state}/kib-mutagen"
 # Each open project's filtered copy, the VM's side of its sync. Never VM-mounted.
 VM_SHADOW="${XDG_STATE_HOME:-$HOME/.local/state}/kib-shadow"
@@ -35,9 +40,7 @@ _vm_mounts() {
     for d in plugins skills agents commands hooks; do
         VM_MOUNTS+=(--mount-only "$HOME/.claude/$d:w")
     done
-    # ponytail: until phase 3 of PLAN_VM_SECURITY.md syncs only the open project's slices.
-    VM_MOUNTS+=(--mount-only "$HOME/.claude/projects:w" --mount-only "$KIB_STATE_ROOT:w"
-        --mount-only "${KIB_CONFIG%/*}")
+    VM_MOUNTS+=(--mount-only "$VM_RW:w" --mount-only "$VM_RO")
     if [ -n "$LIMA_MOUNT_SET" ]; then VM_MOUNTS+=(--set="$LIMA_MOUNT_SET"); fi
 }
 
@@ -80,8 +83,10 @@ vm_up() {
             "${VM_MOUNTS[@]}" template:docker-rootful
         printf '%s\n' "$want" >"$VM_SPEC"
         status=Running
-    elif [ "$want" != "$(cat "$VM_SPEC" 2>/dev/null)" ] && lock_fd -n -x 205; then
-        # A kib upgrade changed the mount set. Only with nobody else in it: never cut a session.
+    elif [ "$want" != "$(cat "$VM_SPEC" 2>/dev/null)" ]; then
+        # A kib upgrade changed the mount set. Never cut a session, never bind what isn't mounted.
+        lock_fd -n -x 205 || die "this kib changed the VM's mounts, and other kib sessions use it." \
+            "Close them once; the next launch updates the VM (one restart)."
         limactl stop "$KIB_VM_NAME" >/dev/null 2>&1 || true
         # Not `edit --start`: an edit that changes nothing never starts the VM.
         _limactl "updating its VM's mounts" edit \
@@ -199,6 +204,22 @@ vm_sync_stop() {
     docker rm -f "$SYNC_CNAME" >/dev/null 2>&1 || true
     docker volume rm "$CNAME-src" >/dev/null 2>&1 || true
     rm -rf "${VM_SHADOW:?}/${CNAME:?}"
+}
+
+# A project's session dir and transcripts sit on VM_RW only while it is open: `in` at launch, `out`
+# at the last exit. Canonical keeps a link, so a host claude still finds its transcripts.
+vm_state() { # in | out
+    local home="$KIB_STATE_ROOT/$SLUG" vm="$VM_RW/$SLUG" tr="$CLAUDE_HOME/projects/$SLUG"
+    if [ "$1" = in ]; then
+        [ -e "$vm" ] || mv "$home" "$vm" 2>/dev/null || mkdir -p "$vm"
+        mkdir -p "$tr" 2>/dev/null || true
+        if [ ! -L "$tr" ] && [ ! -e "$vm/transcripts" ]; then
+            mv "$tr" "$vm/transcripts" && ln -s "$vm/transcripts" "$tr"
+        fi
+    elif [ -e "$vm" ] && [ ! -e "$home" ]; then # native mode tidies what a crashed VM run left
+        if [ -L "$tr" ]; then rm -f "$tr" && mv "$vm/transcripts" "$tr"; fi
+        mv "$vm" "$home"
+    fi
 }
 
 # Last kib out stops the VM. A kib starting meanwhile waits on its shared acquire, then restarts it.

@@ -128,11 +128,12 @@ start_clipboard_bridge() {
     mkdir -p "$CLIP_STATE"
     chmod 755 "$CLIP_STATE" # the container traverses this as root before gosu
     # 200>&- 201>&- is LOAD-BEARING — see start_wayland_notifier.
-    detach_pgrp "$KIB_ROOT/host/clipboard-bridge.sh" "$CLIP_STATE" "$(basename "$PWD")" 200>&- 201>&- 205>&-
-    # The pid file is a SIBLING of the spool, not inside it: $CLIP_STATE is bind-mounted rw, so
+    local s="$CLIP_STATE" p="$CLIP_HOST.priv"
+    detach_pgrp "$KIB_ROOT/host/clipboard-bridge.sh" "$s" "${PWD##*/}" "$p" 200>&- 201>&- 205>&-
+    # The pid file is never in the spool, nor on VM_RW: $CLIP_STATE is bind-mounted rw, so
     # a file there is sandbox-writable, and teardown `kill -TERM -<pid>`s whatever it reads —
     # a sandbox that could write 1 there would turn teardown into a host process-group kill.
-    echo $! >"${CLIP_STATE}.pid"
+    echo $! >"$CLIP_HOST.pid"
     disown 2>/dev/null || true
 
     # PROVE it serves before claiming it does: the bridge is exec'd, so a lost exec bit dies
@@ -169,8 +170,8 @@ add_clipboard_bridge_args() {
 
 stop_clipboard_bridge() {
     engine_in_vm || return 0
-    kill_pgrp "${CLIP_STATE}.pid" # whole group: the bridge is its own (detach_pgrp)
+    kill_pgrp "$CLIP_HOST.pid" # whole group: the bridge is its own (detach_pgrp)
     # .priv is the bridge's host-private staging dir (clipboard-bridge.sh). Its own EXIT trap
     # normally clears it; this covers the SIGKILL that skips the trap.
-    rm -rf "$CLIP_STATE" "${CLIP_STATE}.priv" 2>/dev/null || true
+    rm -rf "$CLIP_STATE" "$CLIP_HOST.priv" 2>/dev/null || true
 }

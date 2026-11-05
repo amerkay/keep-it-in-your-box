@@ -121,7 +121,7 @@ _broker_host_config() {
 # config.json the broker reads: enabled providers + each token's in-broker path. Host-only,
 # never mounted into the AGENT.
 _write_broker_config() {
-    mkdir -p "$BROKER_OUT" && chmod 700 "$BROKER_DIR" "$BROKER_OUT"
+    mkdir -p "$BROKER_DIR" "$BROKER_OUT" && chmod 700 "$BROKER_DIR" "$BROKER_OUT"
     # Same source as broker_config_hash, so the config and the attach-hash cannot disagree.
     local id enabled_json="" token_json="" sep=""
     for id in $(broker_enabled_providers); do
@@ -202,7 +202,9 @@ start_broker() {
     while IFS='|' read -r id delivery kind basename; do
         [ -n "$id" ] || continue
         [ -s "$KIB_DIR/$basename" ] || continue
-        tok_mounts+=(-v "$KIB_DIR/$basename:/run/broker/token/$id:ro")
+        # A copy: under Lima the VM then sees this container's tokens, never $KIB_DIR.
+        cp "$KIB_DIR/$basename" "$BROKER_DIR/$id.token"
+        tok_mounts+=(-v "$BROKER_DIR/$id.token:/run/broker/token/$id:ro")
     done <<EOF
 $(_broker_list_providers)
 EOF
@@ -210,8 +212,8 @@ EOF
     # cap-drop=ALL, no devices. Tokens are mounted here only and READ-ONLY, so the broker has
     # no write path to any credential by construction rather than by discipline.
     local -a prov_mount=()
-    [ -d "$PROVIDERS_DIR" ] && prov_mount=(
-        -v "$PROVIDERS_DIR:/run/broker/providers.d:ro"
+    [ -d "$PROVIDERS_DIR" ] && cp -R "$PROVIDERS_DIR" "$BROKER_DIR/providers.d" && prov_mount=(
+        -v "$BROKER_DIR/providers.d:/run/broker/providers.d:ro"
         -e KIB_PROVIDERS_DIR=/run/broker/providers.d)
 
     local -a broker_run=(
@@ -417,7 +419,7 @@ stop_broker() {
     # The main container must be gone first (teardown_container stops it before calling this),
     # or the network still has an endpoint and rm fails — harmless, it is retried next time.
     docker network rm "$BROKER_NET" >/dev/null 2>&1 || true
-    rm -rf "$BROKER_DIR" 2>/dev/null || true
+    rm -rf "$BROKER_DIR" "$BROKER_OUT" 2>/dev/null || true
 }
 
 # ── Credential lifecycle: kib broker login|logout|status|probe ───

@@ -28,7 +28,7 @@
 # pasteboard). rename(2) replaces the destination and never follows it, which closes both.
 # (audit MAC-C1)
 
-DIR="${1:?usage: clipboard-bridge.sh <spool-dir> <project-name>}"
+DIR="${1:?usage: clipboard-bridge.sh <spool-dir> <project-name> [staging-dir]}"
 # A daemon on the user's terminal: silent. sh reports its `sleep` killed at teardown otherwise.
 exec 2>/dev/null
 NAME="${2:-project}"
@@ -37,11 +37,11 @@ LAST_ALERT=0
 # exactly (PYTHONPATH per-invocation, never exported; parameters in argv).
 KIB_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-# Staging, host-private. A SIBLING of the spool, not a mktemp: same filesystem, so `mv` into
+# Staging, host-private. Beside the spool, or $3 on the same filesystem, never a mktemp: `mv` into
 # the spool is an atomic rename rather than a copy the container could read half of. 0700 and
 # never bind-mounted, so the box cannot reach it at all. Also removed by stop_clipboard_bridge,
 # for the SIGKILL that skips this trap.
-PRIV="$DIR.priv"
+PRIV="${3:-$DIR.priv}"
 rm -rf "$PRIV" 2>/dev/null
 (umask 077 && mkdir -p "$PRIV") || exit 1
 trap 'rm -rf "$PRIV" 2>/dev/null' EXIT

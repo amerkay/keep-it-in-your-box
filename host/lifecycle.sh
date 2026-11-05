@@ -10,7 +10,7 @@
 #
 # Reads:  KIB_ROOT IMAGE_NAME and the globals host/config.sh sets
 # Writes: PROJ_HASH CNAME FUSE_CNAME FUSE_ROOT WL_CNAME WL_ROOT PATTERNS_STATE PASSWD_STATE
-#         GROUP_STATE CLIP_STATE SLEEP_STATE SLEEP_STATE_CPATH
+#         GROUP_STATE CLIP_STATE CLIP_HOST SLEEP_STATE SLEEP_STATE_CPATH
 #         CRED_WITNESS SESSION_CDIR SHARED_CDIR SHARED_ASSET_CDIR
 #         TRANSCRIPTS_CPATH BROKER_CNAME BROKER_NET BROKER_DIR BROKER_OUT
 #         BROKER_HASH BROKER_ENABLED REDACTION_ARGS ARGS
@@ -27,7 +27,7 @@ kib_identity() {
     if [ "${KIB_FORCE_NEW_SESSION:-0}" = "1" ]; then
         # Clean slate: its own container and config dirs, so its daemon cannot collide with
         # the project's. Discarded on exit, merge-out disabled.
-        EPH_ROOT="$KIB_STATE_ROOT/$SLUG.ephemeral.$$"
+        EPH_ROOT="$PROJ_STATE/$SLUG.ephemeral.$$"
         SESSION_BASE="$EPH_ROOT/session"
         SHARED_BASE="$EPH_ROOT/shared"
         CNAME="$CNAME-eph-$$"
@@ -44,30 +44,36 @@ kib_identity() {
     FUSE_ROOT="$(fuse_root_path "${PROJ_HASH}${SCRATCH_SUFFIX}")"
     WL_CNAME="${CNAME}-wl"
     WL_ROOT="/tmp/kib-wl.${PROJ_HASH}${SCRATCH_SUFFIX}"
-    PATTERNS_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.patterns"
+    # Per-container files. Under Lima the VM sees them: only what the box writes is on VM_RW, and
+    # never a pidfile or staging dir beside it, which teardown would trust.
+    local st="$STATE_DIR" rw="$STATE_DIR"
+    if engine_lima; then st="$VM_RO" rw="$VM_RW/.state"; fi
+    st="$st/${SLUG}${SCRATCH_SUFFIX}" rw="$rw/${SLUG}${SCRATCH_SUFFIX}"
+    PATTERNS_STATE="$st.patterns"
     # The sidecar's /etc/passwd + /etc/group, synthesised so fusermount3 can resolve its own uid
     # without the host's user table crossing the boundary (see _stage_passwd). Host-side state,
     # never inside FUSE_ROOT: on macOS that root is VM-internal and the Mac cannot write to it.
-    PASSWD_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.passwd"
-    GROUP_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.group"
-    CLIP_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.clip"
+    PASSWD_STATE="$st.passwd"
+    GROUP_STATE="$st.group"
+    CLIP_STATE="$rw.clip"
+    CLIP_HOST="$st.clip" # the bridge's pidfile and staging dir
     # The sleep guard's marker tree: written by the in-box hook, read by host/sleep-guard.sh.
     # Host-side state like the rest here, NOT under a bind the session already owns — but this
     # one is bind-mounted rw (the hook has to write it), so the guard only ever tests EXISTENCE
     # of a marker, never reads content. (sleep-guard.md)
-    SLEEP_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.sleep"
+    SLEEP_STATE="$rw.sleep"
     # Written at creation when the box got the REAL credential. A host-side FILE, not a shell
     # variable: the last terminal out often merely ATTACHED and never ran stage_credential, so
     # a per-process flag would skip merge_out_credential and leave canonical holding a token
     # the box has already rotated away — which logs the account out.
-    CRED_WITNESS="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.credfallback"
+    CRED_WITNESS="$st.credfallback"
 
     # Always defined so teardown/attach can reference them unconditionally. The network name
     # maps the ephemeral suffix's dots to dashes to stay inside docker's charset.
     BROKER_CNAME="${CNAME}-broker"
     BROKER_NET="kib-broker-net-${PROJ_HASH}$(printf '%s' "$SCRATCH_SUFFIX" | tr '.' '-')"
-    BROKER_DIR="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.broker"
-    BROKER_OUT="$BROKER_DIR/out"
+    BROKER_DIR="$st.broker"
+    BROKER_OUT="$rw.broker-out"
     BROKER_HASH="$BROKER_DIR/hash"
     BROKER_ENABLED=0
 
@@ -387,8 +393,8 @@ start_container() {
     # Skipped for an ephemeral session — it must persist nothing to canonical. A link left
     # DANGLING would be worse than none: Claude cannot create its transcript dir over one,
     # which is why the sweep above drops ours whenever canonical has lost the directory.
-    if [ "$_bt_ok" = 1 ] && [ "$EPHEMERAL" != 1 ] && [ -d "$CLAUDE_HOME/projects/$SLUG" ]; then
-        bind_via_link "$CLAUDE_HOME/projects/$SLUG" "$TRANSCRIPTS_CPATH" \
+    if [ "$_bt_ok" = 1 ] && [ "$EPHEMERAL" != 1 ] && [ -d "$TRANSCRIPTS_SRC" ]; then
+        bind_via_link "$TRANSCRIPTS_SRC" "$TRANSCRIPTS_CPATH" \
             "$SESSION_BASE/projects/$SLUG"
     fi
     unset _bt _bt_ok _bt_this _f
@@ -456,8 +462,6 @@ kib_prepare_session() {
     report_shared_asset_writes
     warn_host_claude
 
-    mkdir -p "$SESSION_BASE" && chmod 700 "$SESSION_BASE"
-    mkdir -p "$SHARED_BASE" && chmod 700 "$SHARED_BASE" # holds the real credential when the broker is off
     if [ "$EPHEMERAL" = 1 ]; then
         # Reap it even if we bail out below (e.g. the broker fails): the real cleanup() trap
         # is not installed until just before the container starts.
@@ -469,7 +473,11 @@ kib_prepare_session() {
         # the container down, so we can never attach to a dying one. Never unlinked.
         exec 200>"$LOCK_FILE"
         lock_fd -w 60 -s 200 || die "timed out waiting for the project lock ($LOCK_FILE)."
+        # Under the lock: the last kib out moves it back while holding it exclusively.
+        if engine_lima; then vm_state in; else vm_state out; fi
     fi
+    mkdir -p "$SESSION_BASE" && chmod 700 "$SESSION_BASE"
+    mkdir -p "$SHARED_BASE" && chmod 700 "$SHARED_BASE" # holds the real credential when the broker is off
 }
 
 # ── Create or attach ─────────────────────────────────────────────
@@ -551,6 +559,7 @@ kib_cleanup() {
             # plugin this session wrote reaches them — and the host claude, unsandboxed — before
             # the next kib launch. Scoped to what changed since this launch's stamp.
             validate_shared_assets
+            ! engine_lima || vm_state out || true # last: everything above reads the session dir
             lock_fd -u 202
         fi
         exec 202>&-

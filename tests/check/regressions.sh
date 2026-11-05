@@ -51,17 +51,15 @@ else
     pass "the broker never mounts the live .credentials.json (static token only)"
 fi
 
-# Every credential mounted from $KIB_DIR — broker token(s) at /run/broker/token/<id> and each
-# hosted-MCP sidecar's cred at /run/cred/<file> — must be READ-ONLY, so there is no write path
-# to a credential by construction.
-# shellcheck disable=SC2016  # a literal grep pattern: it must match the "$KIB_DIR" source text
-kib_all="$(grep -oE '\-v "\$KIB_DIR/[^"]*"' "$KIB_ROOT/host/broker.sh" || true)"
+# Every broker token mount — /run/broker/token/<id> — must be READ-ONLY, so there is no write
+# path to a credential by construction.
+kib_all="$(grep -oE '\-v "[^"]*:/run/broker/token/[^"]*"' "$KIB_ROOT/host/broker.sh" || true)"
 kib_n=$(printf '%s\n' "$kib_all" | grep -c . || true)
 if [ "$kib_n" -gt 0 ] && ! printf '%s\n' "$kib_all" | grep -qv ':ro"$'; then
-    pass "broker/hosted-MCP credential mounts are all read-only ($kib_n mount(s))"
+    pass "broker credential mounts are all read-only ($kib_n mount(s))"
 else
-    fail "a \$KIB_DIR credential mount is not read-only" \
-        "every -v \"\$KIB_DIR/…\" must end :ro (found $kib_n, at least one without)"
+    fail "a broker credential mount is not read-only" \
+        "every -v …:/run/broker/token/… must end :ro (found $kib_n, at least one without)"
 fi
 
 # Screen clearing (removed): kib must not `tput reset` — it wiped a short command's output
