@@ -25,7 +25,8 @@ for _c in docker mutagen; do
     printf '#!/usr/bin/env bash\necho "%s $*" >>"%s/calls"\n' "$_c" "$_vm_dir" >"$_vm_dir/bin/$_c"
 done
 echo 'ls /proc/$$/fd >>"'"$_vm_dir"'/mg-fds"' >>"$_vm_dir/bin/mutagen"
-echo 'case "$*" in *"sync flush"*) exit "${MG_FLUSH:-0}" ;; esac' >>"$_vm_dir/bin/mutagen"
+echo 'case "$*" in *"sync flush"*-host) exit "${MG_FLUSH_HOST:-0}" ;; *"sync flush"*) exit "${MG_FLUSH:-0}" ;; *"sync list"*) exit "${MG_LIST:-0}" ;; esac' >>"$_vm_dir/bin/mutagen"
+echo 'case "$1" in start) exit "${DK_START:-0}" ;; esac' >>"$_vm_dir/bin/docker"
 chmod +x "$_vm_dir/bin/"*
 
 # Subshells inherit these; a `sh -c` would not see the sourced functions.
@@ -52,6 +53,7 @@ _vm_t_shared() { exec 207>"$VM_LOCK" && flock -s 207 && vm_up && vm_down; }
 
 _vm_run() { ( # <PATH> <cmd…> — a fresh subshell with the units loaded, HOME and state faked
     export HOME="$_vm_dir/home" KIB_STATE_ROOT="$_vm_dir/state" KIB_VM="${KIB_VM-on}"
+    export XDG_STATE_HOME="$_vm_dir/state-xdg"
     export KIB_CONFIG="$_vm_dir/home/.keep-it-in-your-box/config" KIB_NODE_CACHE="$_vm_dir/node"
     PATH="$1"
     unset KIB_PORTABLE_SOURCED # a fresh load, as bin/kib does
@@ -107,6 +109,7 @@ _vm_run "$_vm_dir/bin:$PATH" _vm_t_last >/dev/null
 is "the last kib out stops the VM" "1" "$(_vm_stops)"
 
 rm -f "$_vm_dir/calls"
+printf 'K=v\n' >"$_vm_dir/home/devel/proj/.secret"
 _vm_run "$_vm_dir/bin:$PATH" _vm_t_sync >/dev/null
 _vm_c="$(cat "$_vm_dir/calls")"
 case "$_vm_c" in
@@ -117,22 +120,28 @@ case "$_vm_c" in
 esac
 is "the sync container binds its volume and no host path" "1" \
     "$(grep 'docker run -d --name kib-proj-1-sync' "$_vm_dir/calls" | grep -o ' -v ' | wc -l | tr -d ' ')"
+_vm_sh="$_vm_dir/state-xdg/kib-shadow/kib-proj-1"
 case "$_vm_c" in
-    *"sync create --name kib-proj-1"*"two-way-resolved"*"-c $_vm_dir/pat.sync.yml $_vm_dir/home/devel/proj docker://kib-proj-1-sync/src"*"sync flush kib-proj-1"*)
-        pass "Mutagen syncs the project in, host wins, and the launch waits for the first sync"
+    *"sync create --name kib-proj-1-host"*"-c $_vm_dir/pat.sync.yml $_vm_dir/home/devel/proj $_vm_sh"*"sync flush kib-proj-1-host"*"sync create --name kib-proj-1 "*"-c $_vm_dir/pat.sync.yml.vm $_vm_sh docker://kib-proj-1-sync/src"*"sync flush kib-proj-1"*)
+        pass "project ⇄ host-local shadow ⇄ VM, host wins, and the launch waits for both"
         ;;
-    *) fail "unexpected Mutagen session" "$_vm_c" ;;
+    *) fail "unexpected Mutagen sessions" "$_vm_c" ;;
 esac
-case "$_vm_c" in
-    *"sync flush kib-proj-1"*"docker exec -i -u 1000:1000 kib-proj-1-sync tar -xf - -C /src"*)
-        pass "after the first sync, the redacted/protected stand-ins are seeded into the volume"
-        ;;
-    *) fail "the guarded files are never seeded" "$_vm_c" ;;
-esac
+is "the VM's Mutagen agent never touches the project itself" "0" \
+    "$(grep -c "devel/proj docker://" "$_vm_dir/calls")"
 case "$(cat "$_vm_dir/pat.sync.yml")" in
-    *'"node_modules"'*'".env"'*'".secret"'*'"**/.git/**/hooks"'*) pass "the sync ignores build dirs, the guard and .kibignore" ;;
-    *) fail "the sync ignores miss a tier" "$(cat "$_vm_dir/pat.sync.yml")" ;;
+    *'"node_modules"'*'".env"'*'".secret"'*'"**/.git/**/hooks"'*) pass "the host hop drops build dirs, the guard and .kibignore" ;;
+    *) fail "the host hop's ignores miss a tier" "$(cat "$_vm_dir/pat.sync.yml")" ;;
 esac
+case "$(cat "$_vm_dir/pat.sync.yml.vm")" in
+    *'"node_modules"'*) case "$(cat "$_vm_dir/pat.sync.yml.vm")" in
+        *.env* | *hooks*) fail "the VM hop drops the seeded stand-ins" ;;
+        *) pass "the VM hop drops only build dirs, so the seeded stand-ins reach the box" ;;
+    esac ;;
+    *) fail "the VM hop syncs build dirs" "$(cat "$_vm_dir/pat.sync.yml.vm")" ;;
+esac
+is "the stand-ins are seeded into the shadow, values redacted" "K=<redacted>" "$(cat "$_vm_sh/.secret")"
+is "the shadow is private" "$_vm_sh" "$(find "$_vm_sh" -maxdepth 0 -perm 700)"
 case " $(tr '\n' ' ' <"$_vm_dir/mg-fds") " in
     *" 200 "* | *" 205 "*) fail "Mutagen (whose daemon outlives kib) inherited a lock fd" ;;
     *) pass "Mutagen never inherits a lock fd, so its daemon cannot pin a project or the VM" ;;
@@ -140,14 +149,24 @@ esac
 rm -f "$_vm_dir/calls"
 _vm_run "$_vm_dir/bin:$PATH" _vm_t_sync stop >/dev/null
 case "$(cat "$_vm_dir/calls")" in
-    *"sync flush"*"sync terminate"*"docker volume rm kib-proj-1-src"*) pass "close: flush, then the volume is gone" ;;
-    *) fail "close did not flush then drop the volume" "$(cat "$_vm_dir/calls")" ;;
+    *"sync flush kib-proj-1"$'\n'*"sync flush kib-proj-1-host"*"sync terminate"*"docker volume rm kib-proj-1-src"*)
+        pass "close: flush VM → shadow → project, then the volume is gone"
+        ;;
+    *) fail "close did not flush both hops then drop the volume" "$(cat "$_vm_dir/calls")" ;;
 esac
+deny "close deletes the shadow" test -e "$_vm_sh"
 rm -f "$_vm_dir/calls"
 _vm_out="$(MG_FLUSH=1 _vm_run "$_vm_dir/bin:$PATH" _vm_t_sync stop)"
 case "$(cat "$_vm_dir/calls")" in
     *"volume rm"* | *"sync terminate"*) fail "a failed flush still dropped the box's edits" ;;
     *) pass "a failed flush keeps the volume, so no box edit is lost" ;;
+esac
+mkdir -p "$_vm_sh"
+_vm_out="$(MG_FLUSH_HOST=1 _vm_run "$_vm_dir/bin:$PATH" _vm_t_sync stop 2>&1)"
+allow "a failed host-hop flush keeps the shadow" test -d "$_vm_sh"
+case "$(DK_START=1 MG_LIST=1 MG_FLUSH_HOST=1 _vm_run "$_vm_dir/bin:$PATH" _vm_t_sync stop 2>&1)" in
+    *"did not sync back"*) fail "a cold start with nothing left over warns of lost edits" ;;
+    *) pass "a cold start with nothing left over cleans up silently" ;;
 esac
 case "$(_vm_run /usr/bin:/bin _mutagen_ensure)" in
     *"Run kib in a terminal"*) pass "no Mutagen and no tty: refused, never installed unasked" ;;

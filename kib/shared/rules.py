@@ -252,12 +252,22 @@ def _tightens_cmd(old_file: str, new_file: str) -> int:
 VM_LOCAL = ("node_modules", ".venv", "__pycache__", "target", ".next", ".nuxt", ".turbo")
 
 
-def _sync_config_cmd(guard_file: str, rule_file: str) -> int:
-    """`sync-config <guard-file> <rule-file>` — a Mutagen `-c` file. Not `--ignore`: the CLI
-    splits that on commas."""
-    paths = [*VM_LOCAL, *sync_ignores(load(guard_file, guard=True), load(rule_file))]
+def _print_sync_config(paths: list[str]) -> int:
+    """A Mutagen `-c` file. Not `--ignore`: the CLI splits that on commas."""
     print(json.dumps({"sync": {"defaults": {"ignore": {"paths": paths}}}}))
     return cli.OK
+
+
+def _sync_config_cmd(guard_file: str, rule_file: str) -> int:
+    """`sync-config <guard-file> <rule-file>` — project ⇄ shadow: the guard is applied here."""
+    return _print_sync_config(
+        [*VM_LOCAL, *sync_ignores(load(guard_file, guard=True), load(rule_file))]
+    )
+
+
+def _vm_sync_config_cmd() -> int:
+    """`vm-sync-config` — shadow ⇄ VM: the shadow holds nothing guarded, so build dirs only."""
+    return _print_sync_config(list(VM_LOCAL))
 
 
 def main(argv: list[str]) -> int:
@@ -267,6 +277,7 @@ def main(argv: list[str]) -> int:
             "optouts": (_optouts_cmd, 2),
             "tightens": (_tightens_cmd, 2),
             "sync-config": (_sync_config_cmd, 2),
+            "vm-sync-config": (_vm_sync_config_cmd, 0),
         },
         argv,
     )
