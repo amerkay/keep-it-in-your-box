@@ -55,7 +55,7 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
 ## Goals (done = all true)
 
 1. On every VM setup, the VM holds only: kib's checkout (read-only), the 5 shared `~/.claude` trees,
-   and open projects, without their redacted files.
+   a VM-only Node cache, and open projects, without their redacted files.
 2. Opening or closing any project never restarts the VM or touches another session.
 3. Switching VM mode on or off changes nothing else: same login, history and broker.
 4. `security-test.sh` (inside the box) and `tests/vm-check.sh` (on the host) pass on all four
@@ -69,41 +69,79 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
       file-change events in the box.
       Done 2026-11-05 (v0.18.1): all pass. Lag ≤55 ms host→VM, ≤111 ms VM→host; close 0.27 s.
       `two-way-resolved` does **not** report host-wins conflicts. Still open: first-sync time on a big repo
-- ⬜ **S2** `.kibignore` and the global guard → Mutagen ignores: check the `!`, root-anchored and
-      folder-seal rules map 1:1
+- ✅ **S2** `.kibignore` and the global guard → Mutagen ignores: check the `!`, root-anchored and
+      folder-seal rules map 1:1.
+      Done 2026-11-05: `rules.sync_ignores`, proven against a real Mutagen sync on 9 rule shapes
+      (`test_real_mutagen_syncs_exactly_what_verdict_passes`). Passed as a `-c` config file:
+      `--ignore` splits on commas
 - ⬜ **S3** macOS Docker Desktop: where the file-sharing list lives (`settings-store.json`,
       `FilesharingDirectories`); whether an edit plus restart applies it; whether an org admin lock
       blocks it
 - ✅ **S4** FUSE root at `/mnt/kib` in the Lima VM passes Ubuntu's `fusermount3` AppArmor profile.
       Done 2026-11-05: `/mnt/kib` mounts; `/run/kib` is `DENIED … profile="fusermount3"`
 - ⬜ **S5** Protected paths (`.git/config`, `.git/hooks`, `.vscode`, …) synced **host→VM only**,
-      so a VM escape can't plant them on the host. Fallback: the teardown audit, as today
-- ⬜ **S6** Sync lag on live channels: the macOS clipboard spool and sleep markers
+      so a VM escape can't plant them on the host. Fallback: the teardown audit, as today.
+      **Finding 2026-11-05 (Mutagen v0.18.1 source):** the host trusts the VM agent's snapshot and
+      never re-applies ignores. It only rejects `..` and `/` in names. So VM root can tamper with
+      the agent and write **any** path in an open project, ignores or not. A one-way side session
+      doesn't help: the hole is the main two-way session. Ignores still stop the honest sync.
+      Proposed: a host-side guard per open project. Copy the protected set at launch, poll it
+      like `rules-watch.sh`, and on any change restore it, pause the sync and alert
+- ⬜ **S6** Sync lag on live channels: the clipboard spool and sleep markers.
+      2026-11-05, Linux over 9p: clipboard text, screenshot and box→host write all work. Lag and
+      sleep markers not measured; redo once phase 3 moves the spool onto Mutagen
 - ⬜ **S7** macOS Lima (vz + virtiofs): the kib image builds and runs; `host.lima.internal`
       reaches the Mac
 
 ### Phase 1: VM base (rework the uncommitted VM code)
-- ⬜ Delete project mounts: `_vm_pick_root`, `vm-roots`, the restart and re-mount path
-- ⬜ Fixed mounts only: kib checkout read-only, 5 `~/.claude` trees read-write. Node cache stays
-      in the VM
-- ⬜ Pin the mount type per OS: Linux `9p`, macOS `virtiofs`. Never `reverse-sshfs`
-- ⬜ Allow VM mode on macOS (`vm_wanted`); skip the Docker Desktop-only checks in VM mode
-- ⬜ `fuse_root_path` → `/mnt/kib` on Lima (macOS Docker Desktop keeps `/run/kib`)
-- ⬜ `host.docker.internal` → Lima's host address on Lima (also fixes it on Linux)
-- ⬜ Keep: VM lifetime lock (fd 205/206), `engine_in_vm`, the rootless guard, closing fd 205 in
+- ✅ Delete project mounts: `_vm_pick_root`, `vm-roots`, the per-project restart
+- ✅ Fixed mounts only: kib checkout read-only, 5 `~/.claude` trees read-write. Node cache: its own
+      `node-vm` dir, so a binary VM root swapped never runs in a native box. **Until phase 3**
+      also `$KIB_STATE_ROOT`, `~/.claude/projects` and `~/.keep-it-in-your-box` (read-only)
+- ✅ A changed mount set (kib upgrade, today's old VM) re-mounts once, only with no session in it
+- ✅ Pin the mount type per OS: Linux `9p`, macOS `virtiofs`. Never `reverse-sshfs`
+- ✅ Allow VM mode on macOS (`vm_wanted`); skip the `$PWD` sharing probe on Lima
+- ✅ `fuse_root_path` → `/mnt/kib` on Lima (macOS Docker Desktop keeps `/run/kib`)
+- ✅ `host.docker.internal` → `192.168.5.2`, Lima's host address (S7 confirms it on vz)
+- ✅ Keep: VM lifetime lock (fd 205/206), `engine_in_vm`, the rootless guard, closing fd 205 in
       background jobs
+- ✅ Clipboard in Linux VM mode: the macOS spool bridge, on the host's `wl-paste`/`wl-copy` (the
+      Wayland socket can't cross into the VM). Same sanitiser. Lag over 9p: S6
+- ✅ Lock fds: Mutagen's daemon and Lima's host agent outlive kib, so neither may inherit
+      200–206. Found 2026-11-05: the leak kept every VM project and the VM itself alive
 
 ### Phase 2: Mutagen per project
-- ⬜ Installer: `Y/n` → official release into `~/.local/bin`, **checksum-verified** against the
-      release's `SHA256SUMS` (worked in S1, v0.18.1); refuse on `n`
-- ⬜ The sync container needs a passwd/group entry for the box's UID (Mutagen looks up the
+- ✅ Installer: `Y/n` → official release into `~/.local/bin`, SHA-256 **pinned in kib** per
+      platform (a `SHA256SUMS` beside the tarball vouches for nothing); refuse on `n` or no tty
+- ✅ The sync container needs a passwd/group entry for the box's UID (Mutagen looks up the
       username) and `--cap-add=CHOWN` (Mutagen `chown`s its injected agent as root). Found in S1
-- ⬜ First session of a project: volume `kib-src-<hash>` + capless sync container + Mutagen
-      session (host wins; ignores = redacted files + build dirs + protected paths, which go
-      one-way per S5)
-- ⬜ The FUSE sidecar serves `/src` from that volume, not `$PWD`. The box path stays `$PWD`
-- ⬜ The box waits for the first sync to finish before Claude starts, with a progress line
-- ⬜ Last session: `mutagen sync flush` → terminate → remove the volume and sync container
+- ✅ First session of a project: volume `<container>-src` (label `kib-src`) + capless,
+      network-less sync container + Mutagen session (host wins; ignores = build dirs + guard +
+      `.kibignore` + git's own config/hooks). Protected paths: see S5
+- ✅ kib's own Mutagen daemon (`~/.local/state/kib-mutagen`, off the VM's mounts), stopped with
+      the VM
+- ✅ The FUSE sidecar serves `/src` from that volume, not `$PWD`. The box path stays `$PWD`
+- ✅ The box waits for the first sync to finish before Claude starts, with a progress line
+- ✅ Last session: `mutagen sync flush` → terminate → remove the volume and sync container. A
+      failed flush keeps all of it; the next launch's session carries the edits back
+- ✅ Seed after the first sync (`kib/host/vmseed.py`): redacted files as their key-only render,
+      protected files (`.git/config`, hooks, `.vscode`, …) as real bytes. The sync ignores them,
+      so nothing seeded flows back. The renderers moved to `kib/shared/render.py` for this
+- ⬜ The seed is taken once per container: a host edit to a redacted or protected file shows in
+      the box at the next cold start. A box edit to `.git/config` stays in the VM
+- ⬜ A `.kibignore` rule added mid-session redacts live (FUSE) but the file stays in the volume
+      until the project closes. Fix: on a tightening, delete newly ignored paths from the volume
+
+### Phase 2b: found in the first Linux runs (2026-11-05)
+- ✅ Progress: Lima's boot is one line with a dot a second; its log prints only on failure
+- ✅ The sync container binds nothing from the host. `docker start` on a leftover one turned its
+      deleted passwd/group sources into directories, on the host, through 9p
+- ✅ `drop_planted_links` kept dropping kib's own placeholder-credential link (fixed on `main`)
+- ✅ The clipboard bridge is silent on the terminal (it printed `Terminated` at teardown)
+- ⬜ `session .claude.json unreadable — not merging back` after a VM session (^C exit). Fail-closed
+      held; cause unknown. Diagnose from the host
+- ⬜ Boot is ~27 s: 13 s guest boot, then a ~10 s Lima guest-agent retry. Proposed: keep the VM up
+      10 min after the last session (changes the "stops when the last closes" rule: user's call)
 
 ### Phase 3: hybrid host data
 - ⬜ Move per-project state into one folder: `$KIB_STATE_ROOT/<slug>/` (session, shared,
@@ -174,14 +212,14 @@ Run each in a **host terminal** with at least one kib session open. Every line m
 ```
 KIB="$(cd "$(dirname "$(readlink -f "$(command -v kib)")")/.." && pwd)"
 limactl shell kib-vm -- findmnt -rn -t 9p,virtiofs,fuse.sshfs -o TARGET,FSTYPE,OPTIONS
-limactl shell kib-vm -- findmnt -rn -t 9p,virtiofs,fuse.sshfs -o TARGET | grep -vxE "$KIB|$HOME/\.claude/(skills|plugins|agents|commands|hooks)" && echo "❌ unexpected host mount above" || echo "✅ only kib's mounts"
+limactl shell kib-vm -- findmnt -rn -t 9p,virtiofs,fuse.sshfs -o TARGET | grep -vxE "$KIB|$HOME/\.claude/(skills|plugins|agents|commands|hooks)|$HOME/\.cache/keep-it-in-your-box/node-vm" && echo "❌ unexpected host mount above" || echo "✅ only kib's mounts"
 limactl shell kib-vm -- findmnt -rn -t fuse.sshfs -o TARGET | grep -q . && echo "❌ reverse-sshfs in use" || echo "✅ no reverse-sshfs"
 limactl shell kib-vm -- test -e "$HOME/.ssh" && echo "❌ ~/.ssh visible in the VM" || echo "✅ ~/.ssh not in the VM"
-DOCKER_HOST="unix://$HOME/.lima/kib-vm/sock/docker.sock" docker volume ls -q --filter name=kib-src
-for v in $(DOCKER_HOST="unix://$HOME/.lima/kib-vm/sock/docker.sock" docker volume ls -q --filter name=kib-src); do DOCKER_HOST="unix://$HOME/.lima/kib-vm/sock/docker.sock" docker run --rm -v "$v:/s:ro" alpine sh -c 'find /s -name ".env*" ! -name ".env.example" ! -name ".env.sample" ! -name ".env.template" | grep -q . && echo "❌ secrets synced in '"$v"'" || echo "✅ no .env in '"$v"'"'; done
+DOCKER_HOST="unix://$HOME/.lima/kib-vm/sock/docker.sock" docker volume ls -q --filter label=kib-src
+for v in $(DOCKER_HOST="unix://$HOME/.lima/kib-vm/sock/docker.sock" docker volume ls -q --filter label=kib-src); do DOCKER_HOST="unix://$HOME/.lima/kib-vm/sock/docker.sock" docker run --rm -v "$v:/s:ro" alpine sh -c 'find /s -name ".env*" ! -name ".env.example" ! -name ".env.sample" ! -name ".env.template" | grep -q . && echo "❌ secrets synced in '"$v"'" || echo "✅ no .env in '"$v"'"'; done
 ```
 
-The volume list must show one `kib-src-*` per **open** project and nothing else.
+The volume list must show one `kib-<project>-<hash>-src` per **open** project and nothing else.
 
 **Baseline, 2026-11-05 (before phases 1–3):** `❌` is expected today. The current VM code also
 mounts a project folder (`~/scripts`), `~/.claude/projects`, kib's state, the Node cache and
@@ -195,7 +233,7 @@ grep -A12 FilesharingDirectories ~/Library/Group\ Containers/group.com.docker/se
 docker run --rm --privileged --pid=host alpine nsenter -t 1 -m -- ls /run/host_virtiofs/Users/"$USER"
 docker run --rm --privileged --pid=host alpine nsenter -t 1 -m -- test -e /run/host_virtiofs/Users/"$USER"/.ssh && echo "❌ ~/.ssh visible in the VM" || echo "✅ ~/.ssh not in the VM"
 docker run --rm --privileged --pid=host alpine nsenter -t 1 -m -- test -e /run/host_virtiofs/Users/"$USER"/Documents && echo "❌ ~/Documents visible in the VM" || echo "✅ ~/Documents not in the VM"
-docker volume ls -q --filter name=kib-src
+docker volume ls -q --filter label=kib-src
 ```
 
 The `ls` must list only kib's checkout and `.claude`. The volume list must show only open projects.
