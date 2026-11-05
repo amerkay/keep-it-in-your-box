@@ -40,7 +40,7 @@ _fuse.__dict__.update(
 sys.modules.setdefault("fuse", _fuse)
 
 from kib.guest import fuse  # noqa: E402  — must follow the stub above
-from kib.shared import rules  # noqa: E402
+from kib.shared import render, rules  # noqa: E402
 
 GUARD = Path(__file__).resolve().parent.parent.parent / "guest" / "policy" / "global.kibignore"
 
@@ -130,7 +130,7 @@ def test_read_of_a_masked_path_with_no_known_shape_returns_the_stub(
 ) -> None:
     (tmp_path / "src").mkdir(exist_ok=True)
     (tmp_path / "src" / "secret.pem").write_text("-----BEGIN KEY-----\nabc\n")
-    assert redact("secret.pem\n").read("/secret.pem", 4096, 0, 0) == fuse.STUB
+    assert redact("secret.pem\n").read("/secret.pem", 4096, 0, 0) == render.STUB
 
 
 def test_a_masked_path_the_host_does_not_have_is_enoent(
@@ -241,7 +241,7 @@ def test_a_shape_the_parser_cannot_vouch_for_falls_back_to_the_stub(
     (tmp_path / "src").mkdir(exist_ok=True)
     (tmp_path / "src" / ".env").write_text(body)
     out = redact("").read("/.env", 4096, 0, 0)
-    assert out == fuse.STUB
+    assert out == render.STUB
     assert b"MIIsecret" not in out
 
 
@@ -258,10 +258,10 @@ def test_a_yaml_bomb_is_stubbed_without_being_expanded(
         f"{names[i]}: [&{names[i]} [" + ",".join([f"*{names[i - 1]}"] * 9) + "]]\n"
         for i in range(1, len(names))
     )
-    assert len(bomb) < fuse.RENDER_MAX
+    assert len(bomb) < render.RENDER_MAX
     (tmp_path / "src" / ".env").write_text(bomb)
-    assert redact("").read("/.env", 4096, 0, 0) == fuse.STUB
-    assert redact("").getattr("/.env")["st_size"] == len(fuse.STUB)
+    assert redact("").read("/.env", 4096, 0, 0) == render.STUB
+    assert redact("").getattr("/.env")["st_size"] == len(render.STUB)
 
 
 def test_deeply_nested_json_falls_back_instead_of_erroring(
@@ -271,14 +271,14 @@ def test_deeply_nested_json_falls_back_instead_of_erroring(
     caller cannot explain — RecursionError is not a ValueError."""
     (tmp_path / "src").mkdir(exist_ok=True)
     (tmp_path / "src" / "creds.json").write_text("[" * 30_000 + "]" * 30_000)
-    assert redact("creds.json\n").read("/creds.json", 4096, 0, 0) == fuse.STUB
+    assert redact("creds.json\n").read("/creds.json", 4096, 0, 0) == render.STUB
 
 
 def test_an_oversized_file_is_not_rendered(redact: Callable[[str], Any], tmp_path: Path) -> None:
     """Beyond the cap it is not one of these shapes, whatever it parses as."""
     (tmp_path / "src").mkdir(exist_ok=True)
-    (tmp_path / "src" / ".env").write_text("K=v\n" * (fuse.RENDER_MAX // 2))
-    assert redact("").read("/.env", 4096, 0, 0) == fuse.STUB
+    (tmp_path / "src" / ".env").write_text("K=v\n" * (render.RENDER_MAX // 2))
+    assert redact("").read("/.env", 4096, 0, 0) == render.STUB
 
 
 def test_the_reported_size_matches_what_read_serves(

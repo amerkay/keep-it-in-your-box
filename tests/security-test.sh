@@ -405,7 +405,7 @@ section "Redaction — .env and .kibignore"
 (printf 'SECRET=redacted-probe-value\n' >"$ARTIFACTS/.env") 2>/dev/null || true
 deny "write .env is refused" bash -c "echo x > '$ARTIFACTS/.env' 2>/dev/null"
 
-# A redacted file reads as its KEY NAMES with every value replaced (kib.guest.fuse.render).
+# A redacted file reads as its KEY NAMES with every value replaced (kib.shared.render).
 # Both halves matter: hiding the names is what used to send the agent to ask the user, who
 # then pasted the secret into the transcript — the leak the redaction existed to prevent.
 # Compare without printing: no real value may reach the terminal or a log.
