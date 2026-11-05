@@ -553,6 +553,7 @@ kib_cleanup() {
         fi
         exec 202>&-
     fi
+    vm_down # after the containers are gone: the last kib out stops the VM
 
     # NO `tput reset` here or before the exec below: it wipes the terminal AND its scrollback,
     # erasing a short command's output the instant it exits. Claude's TUI manages its own
@@ -581,7 +582,7 @@ kib_run_session() {
 
     # 200>&- / 201>&-: the guard must not inherit our lock fds. A guard outliving kib would
     # keep holding the project's shared lock and stop the container from ever being torn down.
-    "$KIB_ROOT/host/sleep-guard.sh" "$CNAME" "$SESSION_TAG" "$SLEEP_STATE" 200>&- 201>&- &
+    "$KIB_ROOT/host/sleep-guard.sh" "$CNAME" "$SESSION_TAG" "$SLEEP_STATE" 200>&- 201>&- 205>&- &
     SLEEP_GUARD_PID=$!
 
     trap kib_cleanup EXIT

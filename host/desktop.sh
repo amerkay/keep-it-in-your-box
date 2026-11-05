@@ -60,7 +60,7 @@ start_wayland_notifier() {
             last=$now
             notify-send -u critical -i dialog-error "kib · $t" "$b Project: $2" || true
         done' _ "$WL_CNAME" "$(basename "$PWD")" \
-        >/dev/null 2>&1 200>&- 201>&- &
+        >/dev/null 2>&1 200>&- 201>&- 205>&- &
     echo $! >"$WL_ROOT/notify.pid"
 }
 
@@ -128,7 +128,7 @@ start_clipboard_bridge() {
     mkdir -p "$CLIP_STATE"
     chmod 755 "$CLIP_STATE" # the container traverses this as root before gosu
     # 200>&- 201>&- is LOAD-BEARING — see start_wayland_notifier.
-    detach_pgrp "$KIB_ROOT/host/clipboard-bridge.sh" "$CLIP_STATE" "$(basename "$PWD")" 200>&- 201>&-
+    detach_pgrp "$KIB_ROOT/host/clipboard-bridge.sh" "$CLIP_STATE" "$(basename "$PWD")" 200>&- 201>&- 205>&-
     # The pid file is a SIBLING of the spool, not inside it: $CLIP_STATE is bind-mounted rw, so
     # a file there is sandbox-writable, and teardown `kill -TERM -<pid>`s whatever it reads —
     # a sandbox that could write 1 there would turn teardown into a host process-group kill.

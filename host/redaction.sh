@@ -223,7 +223,7 @@ prepare_redaction() {
     # pidfile is in $STATE_DIR, NOT bind-mounted into the box: teardown kills whatever group it
     # names. The path stays a LITERAL — tests/check/wiring.sh finds exec'd scripts by grepping
     # this call shape, and a variable hides them from it.
-    detach_pgrp "$KIB_ROOT/host/rules-watch.sh" "$PATTERNS_STATE" "$FUSE_CNAME" 200>&- 201>&-
+    detach_pgrp "$KIB_ROOT/host/rules-watch.sh" "$PATTERNS_STATE" "$FUSE_CNAME" 200>&- 201>&- 205>&-
     echo $! >"$PATTERNS_STATE.watch.pid"
     disown 2>/dev/null || true
 }

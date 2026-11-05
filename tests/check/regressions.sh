@@ -165,7 +165,7 @@ done); do
         # A file with no background job yields one empty line from the heredoc below.
         if [ -z "$fd_line" ]; then continue; fi
         case "$fd_line" in
-            *'200>&-'*'201>&-'*) ;;
+            *'200>&-'*'201>&-'*'205>&-'*) ;;
             *) fd_bad="$fd_bad $fd_f:$(printf '%s' "$fd_line" | sed 's/^ *//' | cut -c1-40)" ;;
         esac
     done <<EOF
@@ -173,10 +173,10 @@ $(grep -hE '(detach_pgrp |[^&>]& *$)' "$KIB_ROOT/$fd_f" | grep -v '&&')
 EOF
 done
 if [ -z "$fd_bad" ]; then
-    pass "every backgrounded host process closes the lock fds (200/201)"
+    pass "every backgrounded host process closes the lock fds (200/201/205)"
 else
     fail "a backgrounded host process inherits the project lock:$fd_bad" \
-        "it holds the shared lock, so the last session out cannot tear the containers down"
+        "it holds a shared lock, so the last session out cannot tear down the containers or the VM"
 fi
 unset fd_bad fd_f fd_line
 

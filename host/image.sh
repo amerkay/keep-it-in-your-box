@@ -67,7 +67,7 @@ check_for_updates() {
     # 200>&- 201>&- is LOAD-BEARING: a build outlives the session that started it, and an
     # inherited shared lock stops the last terminal out from taking it exclusively — teardown
     # is then skipped and the containers are stranded until the build ends.
-    detach_pgrp "$KIB_ROOT/tools/build-image.sh" --background >/dev/null 2>&1 200>&- 201>&-
+    detach_pgrp "$KIB_ROOT/tools/build-image.sh" --background >/dev/null 2>&1 200>&- 201>&- 205>&-
     echo $! >"$BUILD_PID"
     disown
     echo "🔨 Starting background rebuild... (log: $BUILD_LOG)" >&2

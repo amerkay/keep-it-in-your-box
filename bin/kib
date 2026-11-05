@@ -168,6 +168,10 @@ fi
 # shellcheck source=SCRIPTDIR/../host/_load.sh
 . "$KIB_ROOT/host/_load.sh"
 
+# Linux + Lima: every docker call below targets the VM's engine (docs/vm.md). Host-global verbs
+# that never touch docker stay off it.
+case "$VERB" in sleep-monitor | mcp | audit) ;; *) vm_use "$VERB" ;; esac
+
 # ── Host-global verbs: no project, no identity, no docker ────────
 # Must work while the sandbox is broken or unbuilt, so they run before preflight and exit on
 # their own status. `&& exit 0 || exit $?` is deliberate: called bare, a function returning

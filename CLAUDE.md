@@ -189,7 +189,7 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
 - **Never unlink lock files**, and every backgrounded host process must close fds 200/201
   (`200>&- 201>&-`) — one miss strands every project's containers. Lock fds are allocated, not
   picked: 200/201 project + boot, 202 teardown's exclusive re-take, 203 canonical `.claude.json`,
-  204 the rule restage. Reusing one that is held higher up the call stack releases it.
+  204 the rule restage, 205 the Lima VM's session count, 206 its boot. Reusing one that is held higher up the call stack releases it.
   (`container-lifecycle.md`)
 - **The host-executed-config guard is two tiers, split by WHEN a file fires — ambient trigger vs
   deliberate `claude` launch.** `[protect]` refuses the write, so it is only worth it where no
