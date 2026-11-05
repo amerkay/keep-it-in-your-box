@@ -32,7 +32,7 @@ _vm_t_returns() {
 _vm_t_shared() { exec 207>"$VM_LOCK" && flock -s 207 && vm_up && vm_down; }
 
 _vm_run() { ( # <PATH> <cmd…> — a fresh subshell with the units loaded, HOME and state faked
-    export HOME="$_vm_dir/home" KIB_STATE_ROOT="$_vm_dir/state"
+    export HOME="$_vm_dir/home" KIB_STATE_ROOT="$_vm_dir/state" KIB_VM="${KIB_VM-on}"
     export KIB_CONFIG="$_vm_dir/home/.keep-it-in-your-box/config" KIB_NODE_CACHE="$_vm_dir/node"
     PATH="$1"
     unset KIB_PORTABLE_SOURCED # a fresh load, as bin/kib does
@@ -42,6 +42,11 @@ _vm_run() { ( # <PATH> <cmd…> — a fresh subshell with the units loaded, HOME
     cd "$HOME/devel/proj" && "$@"
 ) 2>&1 </dev/null; }
 
+is "VM mode is opt-in: off without vm = on" "returned" "$(KIB_VM='' _vm_run "$_vm_dir/bin:$PATH" _vm_t_returns | tail -1)"
+case "$(KIB_VM='' DOCKER_HOST="unix://$_vm_dir/.lima/kib-vm/sock/docker.sock" _vm_run "$PATH" _vm_t_returns 2>&1)" in
+    *"unset DOCKER_HOST"*) pass "VM off but DOCKER_HOST aims at kib-vm: refused with the fix" ;;
+    *) fail "a leftover DOCKER_HOST at kib-vm was not caught" ;;
+esac
 is "an inherited _KIB_ENGINE_VM=1 is ignored" "native" "$(_KIB_ENGINE_VM=1 _vm_run "$PATH" _vm_t_engine)"
 is "no tty: only the project is mounted, never its parent" "$_vm_dir/home/devel/proj" \
     "$(_vm_run "$PATH" _vm_pick_root "$_vm_dir/home/devel/proj")"

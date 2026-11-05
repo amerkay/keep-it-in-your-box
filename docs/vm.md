@@ -7,6 +7,9 @@ Docker Desktop already work this way.
 Install [Lima](https://lima-vm.io) once. From then on `kib` and `cc` run every box in a VM, with
 nothing to configure.
 
+> **Opt-in for now.** Until [`PLAN_VM_SECURITY.md`](../PLAN_VM_SECURITY.md) is done, turn it on with
+> `vm = on` in `~/.keep-it-in-your-box/config` (or `KIB_VM=on kib` once).
+
 ## Set up (once, about 5 minutes)
 
 Check that your machine can run a VM:
@@ -69,7 +72,7 @@ which takes a few minutes. After that, the VM starts in seconds with your first 
 
 | To | Run |
 |---|---|
-| Turn it off | add `vm = off` to `~/.keep-it-in-your-box/config` (or `KIB_VM=off kib` once) |
+| Turn it on / off | `vm = on` / `vm = off` in `~/.keep-it-in-your-box/config` (or `KIB_VM=on kib` once) |
 | See mounted folders | `cat ~/.local/state/keep-it-in-your-box/vm-roots` |
 | Remove a mount | delete its line from that file, then `limactl delete -f kib-vm` |
 | Resize | `limactl stop kib-vm && limactl edit kib-vm --cpus 4 --memory 8` |

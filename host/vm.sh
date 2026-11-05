@@ -12,7 +12,7 @@ VM_ROOTS="$KIB_STATE_ROOT/vm-roots" # project roots the VM mounts, one per line
 VM_LOCK="$KIB_STATE_ROOT/.locks/vm.lock"
 
 vm_wanted() {
-    case "${KIB_VM:-$KIB_CFG_VM}" in off | 0 | false | no) return 1 ;; esac
+    case "${KIB_VM:-$KIB_CFG_VM}" in on | auto | 1 | true | yes) ;; *) return 1 ;; esac
     ! is_macos && [ "$(docker context show 2>/dev/null)" != desktop-linux ]
 }
 
@@ -136,7 +136,15 @@ vm_down() {
 }
 
 vm_use() { # <verb>
-    vm_wanted || return 0
+    if ! vm_wanted; then
+        # Native kib driving the VM's engine mounts FUSE in the VM, then waits for it here forever.
+        case "${DOCKER_HOST:-}" in *"/$KIB_VM_NAME/sock/"*)
+            die "DOCKER_HOST points at kib's VM ($DOCKER_HOST), but VM mode is off." \
+                "Run: unset DOCKER_HOST   (or turn VM mode on: vm = on)"
+            ;;
+        esac
+        return 0
+    fi
     if ! command -v limactl >/dev/null 2>&1; then
         case "$1" in claude | exec) ;; *) return 0 ;; esac
         echo "⚠️  kib: this box shares your kernel — a kernel exploit inside it owns this machine." >&2
