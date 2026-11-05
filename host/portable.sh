@@ -28,7 +28,11 @@ is_macos() { [ "$KIB_OS" = darwin ]; }
 # The engine runs in a VM: Docker Desktop on macOS, or kib's Lima VM (host/vm.sh). Set here, never
 # from the environment — an inherited 1 would aim engine_ns_exec's privileged nsenter at THIS host.
 _KIB_ENGINE_VM=0
-engine_in_vm() { is_macos || [ "$_KIB_ENGINE_VM" = 1 ]; }
+engine_lima() { [ "$_KIB_ENGINE_VM" = 1 ]; }
+engine_in_vm() { is_macos || engine_lima; }
+
+# Lima's file share per OS. Never reverse-sshfs: it can reach host paths no mount names.
+if is_macos; then LIMA_VM_TYPE=vz LIMA_MOUNT_TYPE=virtiofs; else LIMA_VM_TYPE=qemu LIMA_MOUNT_TYPE=9p; fi
 
 _is_uint() { case "$1" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac }
 
@@ -101,6 +105,10 @@ hash8() {
     else
         printf '%s' "$1" | sha256sum | cut -c1-8
     fi
+}
+
+sha256_file() {
+    if [ "$KIB_OS" = darwin ]; then shasum -a 256 <"$1"; else sha256sum <"$1"; fi | cut -d' ' -f1
 }
 
 # ── own-process-group launcher ────────────────────────────────────
@@ -278,7 +286,9 @@ box_gid() {
 # on the Mac. Only the mountPOINT is constrained — the project still arrives over virtiofs as the
 # sidecar's source. (docs/design-notes/macos.md)
 fuse_root_path() { # <per-project key>
-    if engine_in_vm; then
+    if engine_lima; then
+        printf '/mnt/kib/fuse.%s\n' "$1" # Ubuntu's fusermount3 AppArmor profile denies /run
+    elif engine_in_vm; then
         printf '/run/kib/fuse.%s\n' "$1"
     else
         printf '%s/fuse.%s\n' "$KIB_STATE_ROOT" "$1"
@@ -499,8 +509,8 @@ preflight_platform() {
         "perl ships with macOS; restore it (or install via Homebrew: brew install perl)."
 
     # An engine not sharing $PWD would silently mount an empty project. Only checkable once
-    # the image exists, so skip until then.
-    if docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+    # the image exists, so skip until then. Lima shares no project: Mutagen syncs it in.
+    if ! engine_lima && docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
         if ! docker run --rm --entrypoint true -v "$PWD:/kib-probe:ro" "$IMAGE_NAME" >/dev/null 2>&1; then
             die "this Docker engine did not share $PWD into a container." \
                 "kib mounts your project by path, so the engine must expose it." \

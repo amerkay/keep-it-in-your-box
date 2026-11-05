@@ -155,6 +155,11 @@ prepare_redaction() {
     # bind mount with no protection.
     _stage_patterns "$PATTERNS_STATE"
     _stage_passwd
+    local src="$PWD"
+    if engine_lima; then
+        vm_sync_start # Lima mounts no project: Mutagen syncs it into a volume
+        src="$CNAME-src"
+    fi
 
     # A view teardown could not unmount is still live over the real project. Refuse HERE rather
     # than stack a second mount on it — teardown only warns, so that it can never abort the exit
@@ -177,7 +182,7 @@ prepare_redaction() {
         --device /dev/fuse --security-opt apparmor=unconfined \
         --user "$(box_uid):$(box_gid)" --userns=host \
         --network none \
-        -v "$PWD:/src" \
+        -v "$src:/src" \
         -v "$PATTERNS_STATE:/kib-patterns:ro" \
         -v "$PASSWD_STATE:/etc/passwd:ro" \
         -v "$GROUP_STATE:/etc/group:ro" \

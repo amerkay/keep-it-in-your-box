@@ -38,6 +38,7 @@ kib_identity() {
     fi
 
     FUSE_CNAME="${CNAME}-fuse"
+    SYNC_CNAME="${CNAME}-sync" # Lima only: the Mutagen endpoint, and $CNAME-src its volume
     # Platform-sensitive: on macOS the propagation root must live inside the engine VM, not on
     # a virtiofs share of the Mac. host/portable.sh owns that choice.
     FUSE_ROOT="$(fuse_root_path "${PROJ_HASH}${SCRATCH_SUFFIX}")"
@@ -186,6 +187,7 @@ teardown_container() {
 
     # After the container, so its :rslave view of the mount is gone before we unmount it.
     teardown_redaction
+    vm_sync_stop # after the sidecar serving its volume
 
     # Each no-ops on the platform that does not use it.
     stop_wayland_guard
@@ -261,8 +263,8 @@ start_container() {
         # things, and it keeps docker-default's `deny mount,`.
 
         # Bridge network + Claude's own domain allowlist. --add-host so a dev server on the
-        # host stays reachable.
-        --add-host=host.docker.internal:host-gateway
+        # host stays reachable. host/vm.sh swaps in Lima's host address.
+        --add-host="host.docker.internal:${KIB_HOST_GATEWAY:-host-gateway}"
 
         -e DISABLE_TELEMETRY=1
         -e DISABLE_ERROR_REPORTING=1
