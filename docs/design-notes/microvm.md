@@ -13,6 +13,22 @@ agent). And the field's VM adopters bought a kernel boundary and nothing above i
 SporeVM has no networking at all on Linux/AMD64, `matchlock` is open NAT passthrough, and
 `microsandbox` allows the public internet by default.
 
+**Changed 2026-11-05: on Linux the Docker engine runs in one Lima VM, while kib stays on the
+host** ([`../vm.md`](../vm.md), `host/vm.sh`). That is exactly the engine-in-a-VM shape macOS gets
+from Docker Desktop. `vm.sh` points `DOCKER_HOST` at a rootful `template:docker-rootful` VM and
+sets `engine_in_vm`, so the existing macOS paths run unchanged: the FUSE root, the privileged
+`nsenter`, and no host DNS sync. The CAP gate rules out a VM *per container*, not one VM holding
+the agent and the FUSE sidecar together. The VM mounts only bind sources, at their own paths:
+project roots and parts of `~/.claude` read-write, the broker dir and kib's checkout read-only. A
+shared lock on fd 205 counts kib sessions, the same scheme as the project lock, and the last one
+out stops the VM.
+
+**Running all of kib inside the VM was tried first and abandoned the same day.** The guest's own
+`$HOME` left it with no `~/.claude`, no login and no broker. `~/.claude.json` is a file directly in
+`$HOME`, and Lima mounts only directories. The ssh hop also corrupted the TUI.
+
+gVisor stays rejected: it gives a weaker boundary than the VM and breaks host→box inotify.
+
 ## Why it is overkill
 
 kib's risks cross the boundary through **files the host executes later**, never through the kernel:

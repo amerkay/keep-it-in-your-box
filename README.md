@@ -157,7 +157,7 @@ This is a real boundary, but not a perfect one. What kib does **not** close:
 - **Decline the broker login and the real credential is copied in**, with a warning — rotate it if an untrusted session has run that way.
 - **`host.docker.internal` is routable** to your host network stack.
 - **Your project directory is writable**, by design: editing your code is the agent's job.
-- **Shared kernel.** A hardened container (`--cap-drop=ALL`, `no-new-privileges`, seccomp, AppArmor, empty `CapEff`, no Docker socket, no host block devices) — not a microVM.
+- **Shared kernel on Linux, unless you add a VM.** A hardened container (`--cap-drop=ALL`, `no-new-privileges`, seccomp, AppArmor, empty `CapEff`, no Docker socket, no host block devices) still shares your kernel. macOS and Docker Desktop already put it in a VM. On Linux, [install Lima once](docs/vm.md) and kib does the same automatically.
 
 The full audit, including the controls that **are** closed, is in [`docs/security/audit.md`](docs/security/audit.md).
 

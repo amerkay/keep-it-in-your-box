@@ -14,6 +14,6 @@ debugging time.
 | [clipboard-and-dns.md](clipboard-and-dns.md) | Wayland clipboard proxy, live-DNS sync |
 | [sleep-guard.md](sleep-guard.md) | Per-session sleep inhibition, proactive suspend, incident diagnosis |
 | [macos.md](macos.md) | macOS engine support: portability contract, virtiofs, pbpaste bridge |
-| [microvm.md](microvm.md) | Why a hypervisor closes none of kib's risks; the Ubuntu+macOS option matrix |
+| [microvm.md](microvm.md) | Why not a VM per container; why Linux runs the whole stack in one Lima VM |
 | [platform-matrix.md](platform-matrix.md) | Ubuntu vs macOS, row by row: what differs, how each row is proven, what still needs a Mac |
 | [terminal-and-security.md](terminal-and-security.md) | `tput`/left-arrow/daemon.log quirks, security posture, accepted risks |
