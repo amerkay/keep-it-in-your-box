@@ -442,6 +442,10 @@ drop_planted_links() {
     for f in "$SESSION_BASE"/{CLAUDE.md,.claude.json,history.jsonl} \
         "$SHARED_BASE"/{.credentials.json,settings.json,keybindings.json}; do
         [ -L "$f" ] || continue
+        case "$f:$(readlink "$f")" in
+            */.credentials.json:"$PLACEHOLDER_CRED_CPATH"-*/*) ;;
+            */.credentials.json:"$PLACEHOLDER_CRED_CPATH"-*) continue ;; # the broker's own
+        esac
         warn "this session left $f as a symlink to $(readlink "$f") — dropped, NOT merged back."
         rm -f "$f"
     done
