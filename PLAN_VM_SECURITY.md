@@ -96,15 +96,15 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
       the shadow in 1–3 s and never the project; a box edit 3 folders deep reached the host in ≤1 s
 - ⬜ **S6** Sync lag on live channels: the clipboard spool and sleep markers.
       2026-11-05, Linux over 9p: clipboard text, screenshot and box→host write all work. Lag and
-      sleep markers not measured; redo once phase 3 moves the spool onto Mutagen
+      sleep markers not measured; both stay on 9p (`vm-rw`)
 - ⬜ **S7** macOS Lima (vz + virtiofs): the kib image builds and runs; `host.lima.internal`
       reaches the Mac
 
 ### Phase 1: VM base (rework the uncommitted VM code)
 - ✅ Delete project mounts: `_vm_pick_root`, `vm-roots`, the per-project restart
 - ✅ Fixed mounts only: kib checkout read-only, 5 `~/.claude` trees read-write. Node cache: its own
-      `node-vm` dir, so a binary VM root swapped never runs in a native box. **Until phase 3**
-      also `$KIB_STATE_ROOT`, `~/.claude/projects` and `~/.keep-it-in-your-box` (read-only)
+      `node-vm` dir, so a binary VM root swapped never runs in a native box. Phase 3 adds
+      `vm-rw` and `vm-ro`
 - ✅ A changed mount set (kib upgrade, today's old VM) re-mounts once, only with no session in it
 - ✅ Pin the mount type per OS: Linux `9p`, macOS `virtiofs`. Never `reverse-sshfs`
 - ✅ Allow VM mode on macOS (`vm_wanted`); skip the `$PWD` sharing probe on Lima
@@ -153,11 +153,17 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
       closes
 
 ### Phase 3: hybrid host data
-- ⬜ Move per-project state into one folder: `$KIB_STATE_ROOT/<slug>/` (session, shared,
-      patterns, passwd, group, clipboard, sleep, broker)
-- ⬜ Sync that folder and `~/.claude/projects/<slug>` while the project is open
-- ⬜ Broker: copy only the tokens and `providers.d` entries of routes in use into the state
-      slice; remove them at close
+- ✅ Two fixed shares replace `$KIB_STATE_ROOT`, `~/.claude/projects` and
+      `~/.keep-it-in-your-box`: `vm-rw` (what the box writes: session, shared, transcripts, sleep
+      markers, clipboard spool, broker out) and `vm-ro`, read-only in the VM (rules, passwd,
+      broker config and tokens, and the host's own pidfiles, witness and sync config)
+- ✅ The session dir and transcripts move onto `vm-rw` at the first open and back at the last
+      close; canonical keeps a link meanwhile. One `mv`, no extra sync, no restart
+- ✅ Broker: the in-use tokens and `providers.d` are copied into the container's broker dir
+      (removed at close). No live rotation lost: a token write was already a rename
+- ✅ Verified on Linux 2026-11-06 (separate VM via `LIMA_HOME`): only kib's mounts, `vm-ro`
+      read-only, no token store or transcripts dir in the VM, broker and `/resume` work, `vm-rw`
+      empty after close
 
 ### Phase 4: prompts that survive Claude's full-screen UI
 - ⬜ Every decision is a blocking prompt before Claude starts: install Lima `[Y/n/never]`,
@@ -221,8 +227,10 @@ Run each in a **host terminal** with at least one kib session open. Every line m
 ```
 KIB="$(cd "$(dirname "$(readlink -f "$(command -v kib)")")/.." && pwd)"
 limactl shell kib-vm -- findmnt -rn -t 9p,virtiofs,fuse.sshfs -o TARGET,FSTYPE,OPTIONS
-limactl shell kib-vm -- findmnt -rn -t 9p,virtiofs,fuse.sshfs -o TARGET | grep -vxE "$KIB|$HOME/\.claude/(skills|plugins|agents|commands|hooks)|$HOME/\.cache/keep-it-in-your-box/node-vm" && echo "❌ unexpected host mount above" || echo "✅ only kib's mounts"
+limactl shell kib-vm -- findmnt -rn -t 9p,virtiofs,fuse.sshfs -o TARGET | grep -vxE "$KIB|$HOME/\.claude/(skills|plugins|agents|commands|hooks)|$HOME/\.cache/keep-it-in-your-box/node-vm|$HOME/\.local/state/keep-it-in-your-box/vm-r[wo]" && echo "❌ unexpected host mount above" || echo "✅ only kib's mounts"
 limactl shell kib-vm -- findmnt -rn -t fuse.sshfs -o TARGET | grep -q . && echo "❌ reverse-sshfs in use" || echo "✅ no reverse-sshfs"
+limactl shell kib-vm -- touch "$HOME/.local/state/keep-it-in-your-box/vm-ro/x" 2>/dev/null && echo "❌ vm-ro is writable from the VM" || echo "✅ vm-ro is read-only in the VM"
+ls "$HOME/.local/state/keep-it-in-your-box/vm-rw"   # one dir per OPEN project, plus .state
 limactl shell kib-vm -- test -e "$HOME/.ssh" && echo "❌ ~/.ssh visible in the VM" || echo "✅ ~/.ssh not in the VM"
 DOCKER_HOST="unix://$HOME/.lima/kib-vm/sock/docker.sock" docker volume ls -q --filter label=kib-src
 for v in $(DOCKER_HOST="unix://$HOME/.lima/kib-vm/sock/docker.sock" docker volume ls -q --filter label=kib-src); do DOCKER_HOST="unix://$HOME/.lima/kib-vm/sock/docker.sock" docker run --rm -v "$v:/s:ro" alpine sh -c 'find /s -name ".env*" ! -name ".env.example" ! -name ".env.sample" ! -name ".env.template" | grep -q . && echo "❌ secrets synced in '"$v"'" || echo "✅ no .env in '"$v"'"'; done
