@@ -35,7 +35,7 @@ echo "⏳ installing gVisor in the VM…"
 vm sh -c 'set -e; a=$(uname -m); u=https://storage.googleapis.com/gvisor/releases/release/latest/$a
     cd /tmp && curl -fsSLO "$u/runsc" && curl -fsSLO "$u/runsc.sha512" && sha512sum -c runsc.sha512
     install -m 755 runsc /usr/local/bin/runsc && rm runsc runsc.sha512
-    runsc install && systemctl reload docker' >/dev/null 2>&1 || { echo "runsc install failed"; exit 1; }
+    runsc install && systemctl reload docker' >/dev/null || { echo "runsc install failed (above)"; exit 1; }
 sleep 2
 G=(--runtime=runsc)
 
