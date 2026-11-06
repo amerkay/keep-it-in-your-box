@@ -1,0 +1,1606 @@
+[
+ {
+  "name": "a protected path reads through",
+  "project": "",
+  "tree": {
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/objects/": ""
+  },
+  "steps": [
+   {
+    "op": "read",
+    "path": ".git/config",
+    "want": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n"
+   }
+  ],
+  "after": {
+   ".git/": "",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/objects/": ""
+  }
+ },
+ {
+  "name": "a redacted file reads as keys",
+  "project": "",
+  "tree": {
+   ".env": "K=s3cr3t\n"
+  },
+  "steps": [
+   {
+    "op": "stat",
+    "path": ".env",
+    "want": {
+     "type": "file",
+     "perm": "0o444",
+     "size": 13
+    }
+   },
+   {
+    "op": "read",
+    "path": ".env",
+    "want": "K=<redacted>\n"
+   },
+   {
+    "op": "readdir",
+    "path": "",
+    "want": [
+     ".env"
+    ]
+   }
+  ],
+  "after": {
+   ".env": "K=s3cr3t\n"
+  }
+ },
+ {
+  "name": "a placeholder passes",
+  "project": "",
+  "tree": {
+   ".env.example": "OLD=placeholder\n"
+  },
+  "steps": [
+   {
+    "op": "read",
+    "path": ".env.example",
+    "want": "OLD=placeholder\n"
+   },
+   {
+    "op": "stat",
+    "path": ".env.example",
+    "want": {
+     "type": "file",
+     "perm": "0o644",
+     "size": 16
+    }
+   }
+  ],
+  "after": {
+   ".env.example": "OLD=placeholder\n"
+  }
+ },
+ {
+  "name": "a placeholder is edited through .env.example.tmp.170.e4cc80fbd4d5",
+  "project": "",
+  "tree": {
+   ".env.example": "OLD=p\n"
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": ".env.example.tmp.170.e4cc80fbd4d5",
+    "data": "NEW=p\n",
+    "want": "OK"
+   },
+   {
+    "op": "rename",
+    "path": ".env.example.tmp.170.e4cc80fbd4d5",
+    "to": ".env.example",
+    "want": "OK"
+   }
+  ],
+  "after": {
+   ".env.example": "NEW=p\n"
+  }
+ },
+ {
+  "name": "a placeholder is edited through .env.example~",
+  "project": "",
+  "tree": {
+   ".env.example": "OLD=p\n"
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": ".env.example~",
+    "data": "NEW=p\n",
+    "want": "OK"
+   },
+   {
+    "op": "rename",
+    "path": ".env.example~",
+    "to": ".env.example",
+    "want": "OK"
+   }
+  ],
+  "after": {
+   ".env.example": "NEW=p\n"
+  }
+ },
+ {
+  "name": "the write-sibling carve-out stops at secret names",
+  "project": "",
+  "tree": {},
+  "steps": [
+   {
+    "op": "put",
+    "path": ".env.tmp.170.abc",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": ".env.local~",
+    "data": "x\n",
+    "want": "EPERM@open"
+   }
+  ],
+  "after": {}
+ },
+ {
+  "name": "a redacted directory shows one marker",
+  "project": "secrets",
+  "tree": {
+   "secrets/inner": "s3cr3t\n",
+   "secrets/sub/x": "s3cr3t\n"
+  },
+  "steps": [
+   {
+    "op": "stat",
+    "path": "secrets",
+    "want": {
+     "type": "dir",
+     "perm": "0o555",
+     "size": null
+    }
+   },
+   {
+    "op": "readdir",
+    "path": "secrets",
+    "want": [
+     "REDACTED.md"
+    ]
+   },
+   {
+    "op": "read",
+    "path": "secrets/REDACTED.md",
+    "want": "STUB"
+   },
+   {
+    "op": "stat",
+    "path": "secrets/REDACTED.md",
+    "want": {
+     "type": "file",
+     "perm": "0o444",
+     "size": 256
+    }
+   },
+   {
+    "op": "stat",
+    "path": "secrets/inner",
+    "want": "ENOENT"
+   },
+   {
+    "op": "read",
+    "path": "secrets/inner",
+    "want": "ENOENT"
+   },
+   {
+    "op": "readdir",
+    "path": "secrets/sub",
+    "want": []
+   },
+   {
+    "op": "put",
+    "path": "secrets/new",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "unlink",
+    "path": "secrets/inner",
+    "want": "EPERM"
+   }
+  ],
+  "after": {
+   "secrets/": "",
+   "secrets/inner": "s3cr3t\n",
+   "secrets/sub/": "",
+   "secrets/sub/x": "s3cr3t\n"
+  }
+ },
+ {
+  "name": "inside a redacted FILE path",
+  "project": "blob",
+  "tree": {
+   "blob": "s3cr3t\n"
+  },
+  "steps": [
+   {
+    "op": "stat",
+    "path": "blob/x",
+    "want": {
+     "type": "file",
+     "perm": "0o444",
+     "size": 256
+    }
+   },
+   {
+    "op": "read",
+    "path": "blob",
+    "want": "STUB"
+   }
+  ],
+  "after": {
+   "blob": "s3cr3t\n"
+  }
+ },
+ {
+  "name": "a stub for an unknown shape",
+  "project": "secret.pem",
+  "tree": {
+   "secret.pem": "-----BEGIN KEY-----\ns3cr3t\n"
+  },
+  "steps": [
+   {
+    "op": "read",
+    "path": "secret.pem",
+    "want": "STUB"
+   },
+   {
+    "op": "stat",
+    "path": "secret.pem",
+    "want": {
+     "type": "file",
+     "perm": "0o444",
+     "size": 256
+    }
+   }
+  ],
+  "after": {
+   "secret.pem": "-----BEGIN KEY-----\ns3cr3t\n"
+  }
+ },
+ {
+  "name": "a masked path the host lacks is ENOENT, and stays unwritable",
+  "project": "",
+  "tree": {},
+  "steps": [
+   {
+    "op": "stat",
+    "path": ".env.local",
+    "want": "ENOENT"
+   },
+   {
+    "op": "open-r",
+    "path": ".env.local",
+    "want": "ENOENT"
+   },
+   {
+    "op": "put",
+    "path": ".env.local",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "mkdir",
+    "path": ".env.d",
+    "want": "EPERM"
+   }
+  ],
+  "after": {}
+ },
+ {
+  "name": "every write to a redacted file is refused",
+  "project": "",
+  "tree": {
+   ".env": "K=s3cr3t\n"
+  },
+  "steps": [
+   {
+    "op": "open-w",
+    "path": ".env",
+    "want": "EPERM"
+   },
+   {
+    "op": "put",
+    "path": ".env",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "truncate",
+    "path": ".env",
+    "length": 0,
+    "want": "EPERM"
+   },
+   {
+    "op": "unlink",
+    "path": ".env",
+    "want": "EPERM"
+   },
+   {
+    "op": "rename",
+    "path": ".env",
+    "to": "x",
+    "want": "EPERM"
+   },
+   {
+    "op": "link",
+    "path": "alias",
+    "to": ".env",
+    "want": "EPERM"
+   },
+   {
+    "op": "symlink",
+    "path": "sl",
+    "to": ".env",
+    "want": "OK"
+   },
+   {
+    "op": "read",
+    "path": "sl",
+    "want": "K=<redacted>\n"
+   }
+  ],
+  "after": {
+   ".env": "K=s3cr3t\n",
+   "sl": "-> .env"
+  }
+ },
+ {
+  "name": "git paths are protected at any nesting",
+  "project": "",
+  "tree": {
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/objects/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": ".git/config",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": "sub/.git/config",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": ".git/modules/x/config",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": ".git/modules/x/modules/y/config",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": ".git/worktrees/w/config.worktree",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": ".git/hooks/pre-commit",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": "sub/.git/hooks/pre-push",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": ".git/modules/x/hooks/pre-commit",
+    "data": "x\n",
+    "want": "EPERM@open"
+   }
+  ],
+  "after": {
+   ".git/": "",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/hooks/": "",
+   ".git/modules/": "",
+   ".git/modules/x/": "",
+   ".git/modules/x/hooks/": "",
+   ".git/modules/x/modules/": "",
+   ".git/modules/x/modules/y/": "",
+   ".git/objects/": "",
+   ".git/worktrees/": "",
+   ".git/worktrees/w/": "",
+   "sub/": "",
+   "sub/.git/": "",
+   "sub/.git/hooks/": ""
+  }
+ },
+ {
+  "name": "host-executed files are protected",
+  "project": "",
+  "tree": {},
+  "steps": [
+   {
+    "op": "put",
+    "path": ".githooks/pre-commit",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": ".gitmodules",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": ".cursor/mcp.json",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": ".zed/tasks.json",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": ".zed/debug.json",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": ".run/app.run.xml",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": ".mvn/jvm.config",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": ".exrc",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": ".nvim.lua",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": ".ripgreprc",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": ".yarnrc.yml",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": "sub/.githooks/pre-push",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": ".vscode/tasks.json",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": ".devcontainer/d.json",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": ".envrc",
+    "data": "x\n",
+    "want": "EPERM@open"
+   }
+  ],
+  "after": {
+   ".cursor/": "",
+   ".devcontainer/": "",
+   ".githooks/": "",
+   ".mvn/": "",
+   ".run/": "",
+   ".vscode/": "",
+   ".zed/": "",
+   "sub/": "",
+   "sub/.githooks/": ""
+  }
+ },
+ {
+  "name": "lookalikes and mixed-use files are writable",
+  "project": "",
+  "tree": {},
+  "steps": [
+   {
+    "op": "put",
+    "path": "src/main.py",
+    "data": "x\n",
+    "want": "OK"
+   },
+   {
+    "op": "put",
+    "path": "hooks/deploy.sh",
+    "data": "x\n",
+    "want": "OK"
+   },
+   {
+    "op": "put",
+    "path": "config",
+    "data": "x\n",
+    "want": "OK"
+   },
+   {
+    "op": "put",
+    "path": "src/config",
+    "data": "x\n",
+    "want": "OK"
+   },
+   {
+    "op": "put",
+    "path": ".cursor/rules/style.md",
+    "data": "x\n",
+    "want": "OK"
+   },
+   {
+    "op": "put",
+    "path": ".claude/commands/deploy.md",
+    "data": "x\n",
+    "want": "OK"
+   },
+   {
+    "op": "put",
+    "path": ".claude/settings.json",
+    "data": "x\n",
+    "want": "OK"
+   },
+   {
+    "op": "put",
+    "path": ".claude/hooks/notify.sh",
+    "data": "x\n",
+    "want": "OK"
+   },
+   {
+    "op": "put",
+    "path": "vendor/pkg/.claude/hooks/x.sh",
+    "data": "x\n",
+    "want": "OK"
+   },
+   {
+    "op": "put",
+    "path": ".claude-plugin/plugin.json",
+    "data": "x\n",
+    "want": "OK"
+   },
+   {
+    "op": "put",
+    "path": ".mcp.json",
+    "data": "x\n",
+    "want": "OK"
+   },
+   {
+    "op": "put",
+    "path": "mise.toml",
+    "data": "x\n",
+    "want": "OK"
+   },
+   {
+    "op": "put",
+    "path": ".idea/workspace.xml",
+    "data": "x\n",
+    "want": "OK"
+   }
+  ],
+  "after": {
+   ".claude-plugin/": "",
+   ".claude-plugin/plugin.json": "x\n",
+   ".claude/": "",
+   ".claude/commands/": "",
+   ".claude/commands/deploy.md": "x\n",
+   ".claude/hooks/": "",
+   ".claude/hooks/notify.sh": "x\n",
+   ".claude/settings.json": "x\n",
+   ".cursor/": "",
+   ".cursor/rules/": "",
+   ".cursor/rules/style.md": "x\n",
+   ".idea/": "",
+   ".idea/workspace.xml": "x\n",
+   ".mcp.json": "x\n",
+   "config": "x\n",
+   "hooks/": "",
+   "hooks/deploy.sh": "x\n",
+   "mise.toml": "x\n",
+   "src/": "",
+   "src/config": "x\n",
+   "src/main.py": "x\n",
+   "vendor/": "",
+   "vendor/pkg/": "",
+   "vendor/pkg/.claude/": "",
+   "vendor/pkg/.claude/hooks/": "",
+   "vendor/pkg/.claude/hooks/x.sh": "x\n"
+  }
+ },
+ {
+  "name": "guarded paths cannot be deleted",
+  "project": "",
+  "tree": {
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/objects/": "",
+   ".vscode/settings.json": "{}\n",
+   "sub/.githooks/pre-push": "x\n",
+   ".envrc": "export FOO=1\n"
+  },
+  "steps": [
+   {
+    "op": "unlink",
+    "path": ".vscode/settings.json",
+    "want": "EPERM"
+   },
+   {
+    "op": "unlink",
+    "path": ".git/config",
+    "want": "EPERM"
+   },
+   {
+    "op": "unlink",
+    "path": "sub/.githooks/pre-push",
+    "want": "EPERM"
+   },
+   {
+    "op": "unlink",
+    "path": ".envrc",
+    "want": "EPERM"
+   },
+   {
+    "op": "rmdir",
+    "path": ".vscode",
+    "want": "EPERM"
+   }
+  ],
+  "after": {
+   ".envrc": "export FOO=1\n",
+   ".git/": "",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/objects/": "",
+   ".vscode/": "",
+   ".vscode/settings.json": "{}\n",
+   "sub/": "",
+   "sub/.githooks/": "",
+   "sub/.githooks/pre-push": "x\n"
+  }
+ },
+ {
+  "name": "a project cannot un-protect its git config",
+  "project": "!.git/config",
+  "tree": {
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/objects/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": ".git/config",
+    "data": "x\n",
+    "want": "EPERM@open"
+   }
+  ],
+  "after": {
+   ".git/": "",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/objects/": ""
+  }
+ },
+ {
+  "name": "a refusal is EPERM",
+  "project": "",
+  "tree": {
+   ".env": "A=1\n",
+   ".envrc": "export FOO=1\n"
+  },
+  "steps": [
+   {
+    "op": "open-w",
+    "path": ".env",
+    "want": "EPERM"
+   },
+   {
+    "op": "open-w",
+    "path": ".envrc",
+    "want": "EPERM"
+   },
+   {
+    "op": "open-w",
+    "path": ".githooks/pre-commit",
+    "want": "ENOENT"
+   }
+  ],
+  "after": {
+   ".env": "A=1\n",
+   ".envrc": "export FOO=1\n",
+   ".githooks/": ""
+  }
+ },
+ {
+  "name": "a git dir is known by its layout",
+  "project": "",
+  "tree": {
+   "store/HEAD": "ref: x\n",
+   "store/objects/": "",
+   "store/refs/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": "store/config",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": "store/hooks/pre-commit",
+    "data": "x\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": "other/config",
+    "data": "x\n",
+    "want": "OK"
+   }
+  ],
+  "after": {
+   "other/": "",
+   "other/config": "x\n",
+   "store/": "",
+   "store/HEAD": "ref: x\n",
+   "store/hooks/": "",
+   "store/objects/": "",
+   "store/refs/": ""
+  }
+ },
+ {
+  "name": "a nested copy of a root anchor may be written",
+  "project": "",
+  "tree": {
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   ".envrc": "export FOO=1\n",
+   "wt/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": "wt/.envrc",
+    "data": "export FOO=1\n",
+    "want": "OK"
+   }
+  ],
+  "after": {
+   ".envrc": "export FOO=1\n",
+   ".vscode/": "",
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   "wt/": "",
+   "wt/.envrc": "export FOO=1\n"
+  }
+ },
+ {
+  "name": "a nested copy one byte off is refused",
+  "project": "",
+  "tree": {
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   ".envrc": "export FOO=1\n",
+   "wt/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": "wt/.envrc",
+    "data": "export FOO=2\n",
+    "want": "EPERM@write"
+   }
+  ],
+  "after": {
+   ".envrc": "export FOO=1\n",
+   ".vscode/": "",
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   "wt/": ""
+  }
+ },
+ {
+  "name": "a nested guarded path with no root copy is refused",
+  "project": "",
+  "tree": {
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   ".envrc": "export FOO=1\n",
+   "wt/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": "wt/.vscode/tasks.json",
+    "data": "x\n",
+    "want": "EPERM@open"
+   }
+  ],
+  "after": {
+   ".envrc": "export FOO=1\n",
+   ".vscode/": "",
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   "wt/": "",
+   "wt/.vscode/": ""
+  }
+ },
+ {
+  "name": "the root copy is never its own mirror",
+  "project": "",
+  "tree": {
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   ".envrc": "export FOO=1\n",
+   "wt/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": ".envrc",
+    "data": "export FOO=1\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": ".vscode/settings.json",
+    "data": "{\"a\": 1}\n",
+    "want": "EPERM@open"
+   }
+  ],
+  "after": {
+   ".envrc": "export FOO=1\n",
+   ".vscode/": "",
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   "wt/": ""
+  }
+ },
+ {
+  "name": "a short mirror is removed at close",
+  "project": "",
+  "tree": {
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   ".envrc": "export FOO=1\n",
+   "wt/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": "wt/.envrc",
+    "data": "export",
+    "want": "EPERM@close"
+   }
+  ],
+  "after": {
+   ".envrc": "export FOO=1\n",
+   ".vscode/": "",
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   "wt/": ""
+  }
+ },
+ {
+  "name": "a long mirror is refused",
+  "project": "",
+  "tree": {
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   ".envrc": "export FOO=1\n",
+   "wt/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": "wt/.envrc",
+    "data": "export FOO=1\nx",
+    "want": "EPERM@write"
+   }
+  ],
+  "after": {
+   ".envrc": "export FOO=1\n",
+   ".vscode/": "",
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   "wt/": ""
+  }
+ },
+ {
+  "name": "a read-only open of git config leaves it",
+  "project": "",
+  "tree": {
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/objects/": ""
+  },
+  "steps": [
+   {
+    "op": "open-r",
+    "path": ".git/config",
+    "want": "OK"
+   }
+  ],
+  "after": {
+   ".git/": "",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/objects/": ""
+  }
+ },
+ {
+  "name": "git paths are never mirrorable",
+  "project": "",
+  "tree": {
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   ".envrc": "export FOO=1\n",
+   "wt/": "",
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/objects/": "",
+   ".git/hooks/pre-commit": "#!/bin/sh\n"
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": "wt/.git/config",
+    "data": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+    "want": "EPERM@open"
+   },
+   {
+    "op": "put",
+    "path": "wt/.git/hooks/pre-commit",
+    "data": "#!/bin/sh\n",
+    "want": "EPERM@open"
+   }
+  ],
+  "after": {
+   ".envrc": "export FOO=1\n",
+   ".git/": "",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/hooks/": "",
+   ".git/hooks/pre-commit": "#!/bin/sh\n",
+   ".git/objects/": "",
+   ".vscode/": "",
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   "wt/": "",
+   "wt/.git/": "",
+   "wt/.git/hooks/": ""
+  }
+ },
+ {
+  "name": "a redacted path is never mirrorable",
+  "project": "",
+  "tree": {
+   ".env": "A=1\n"
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": "wt/.env",
+    "data": "A=1\n",
+    "want": "EPERM@open"
+   }
+  ],
+  "after": {
+   ".env": "A=1\n",
+   "wt/": ""
+  }
+ },
+ {
+  "name": "no mirror by rename, link or symlink",
+  "project": "",
+  "tree": {
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   ".envrc": "export FOO=1\n",
+   "wt/": "",
+   "wt/payload": "export FOO=2\n",
+   "wt/same": "export FOO=1\n"
+  },
+  "steps": [
+   {
+    "op": "rename",
+    "path": "wt/payload",
+    "to": "wt/.envrc",
+    "want": "EPERM"
+   },
+   {
+    "op": "rename",
+    "path": "wt/same",
+    "to": "wt/.envrc",
+    "want": "EPERM"
+   },
+   {
+    "op": "symlink",
+    "path": "wt/.envrc",
+    "to": "/etc/passwd",
+    "want": "EPERM"
+   },
+   {
+    "op": "link",
+    "path": "wt/.envrc",
+    "to": "wt/payload",
+    "want": "EPERM"
+   },
+   {
+    "op": "link",
+    "path": "wt/alias",
+    "to": ".envrc",
+    "want": "EPERM"
+   },
+   {
+    "op": "rename",
+    "path": ".envrc",
+    "to": "wt/moved",
+    "want": "EPERM"
+   }
+  ],
+  "after": {
+   ".envrc": "export FOO=1\n",
+   ".vscode/": "",
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   "wt/": "",
+   "wt/payload": "export FOO=2\n",
+   "wt/same": "export FOO=1\n"
+  }
+ },
+ {
+  "name": "a mirror cannot be reshaped by truncate",
+  "project": "",
+  "tree": {
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   ".envrc": "export FOO=1\n",
+   "wt/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": "wt/.envrc",
+    "data": "export FOO=1\n",
+    "want": "OK"
+   },
+   {
+    "op": "truncate",
+    "path": "wt/.envrc",
+    "length": 6,
+    "want": "EPERM"
+   }
+  ],
+  "after": {
+   ".envrc": "export FOO=1\n",
+   ".vscode/": "",
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   "wt/": "",
+   "wt/.envrc": "export FOO=1\n"
+  }
+ },
+ {
+  "name": "a guarded directory is created when the root one exists",
+  "project": "",
+  "tree": {
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   ".envrc": "export FOO=1\n",
+   "wt/": ""
+  },
+  "steps": [
+   {
+    "op": "mkdir",
+    "path": "wt/.vscode",
+    "want": "OK"
+   },
+   {
+    "op": "mkdir",
+    "path": "wt/.devcontainer",
+    "want": "EPERM"
+   }
+  ],
+  "after": {
+   ".envrc": "export FOO=1\n",
+   ".vscode/": "",
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   "wt/": "",
+   "wt/.vscode/": ""
+  }
+ },
+ {
+  "name": "a mirror may be deleted, its anchor not",
+  "project": "",
+  "tree": {
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   ".envrc": "export FOO=1\n",
+   "wt/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": "wt/.envrc",
+    "data": "export FOO=1\n",
+    "want": "OK"
+   },
+   {
+    "op": "unlink",
+    "path": "wt/.envrc",
+    "want": "OK"
+   },
+   {
+    "op": "unlink",
+    "path": ".envrc",
+    "want": "EPERM"
+   }
+  ],
+  "after": {
+   ".envrc": "export FOO=1\n",
+   ".vscode/": "",
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   "wt/": ""
+  }
+ },
+ {
+  "name": "git config write: 0",
+  "project": "",
+  "tree": {
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/objects/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": ".git/config.lock",
+    "data": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+    "want": "OK"
+   },
+   {
+    "op": "rename",
+    "path": ".git/config.lock",
+    "to": ".git/config",
+    "want": "OK"
+   }
+  ],
+  "after": {
+   ".git/": "",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/objects/": ""
+  }
+ },
+ {
+  "name": "git config write: 1",
+  "project": "",
+  "tree": {
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/objects/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": ".git/config.lock",
+    "data": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[core]\n\tfsmonitor = /e\n",
+    "want": "OK"
+   },
+   {
+    "op": "rename",
+    "path": ".git/config.lock",
+    "to": ".git/config",
+    "want": "EPERM"
+   }
+  ],
+  "after": {
+   ".git/": "",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/config.lock": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[core]\n\tfsmonitor = /e\n",
+   ".git/objects/": ""
+  }
+ },
+ {
+  "name": "git config write: 2",
+  "project": "",
+  "tree": {
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/objects/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": ".git/config.lock",
+    "data": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[core]\n\thooksPath = .git/alt\n",
+    "want": "OK"
+   },
+   {
+    "op": "rename",
+    "path": ".git/config.lock",
+    "to": ".git/config",
+    "want": "EPERM"
+   }
+  ],
+  "after": {
+   ".git/": "",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/config.lock": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[core]\n\thooksPath = .git/alt\n",
+   ".git/objects/": ""
+  }
+ },
+ {
+  "name": "git config write: 3",
+  "project": "",
+  "tree": {
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/objects/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": ".git/config.lock",
+    "data": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[alias]\n\tst = !/e\n",
+    "want": "OK"
+   },
+   {
+    "op": "rename",
+    "path": ".git/config.lock",
+    "to": ".git/config",
+    "want": "EPERM"
+   }
+  ],
+  "after": {
+   ".git/": "",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/config.lock": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[alias]\n\tst = !/e\n",
+   ".git/objects/": ""
+  }
+ },
+ {
+  "name": "git config write: 4",
+  "project": "",
+  "tree": {
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/objects/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": ".git/config.lock",
+    "data": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[include]\n\tpath = evil.inc\n",
+    "want": "OK"
+   },
+   {
+    "op": "rename",
+    "path": ".git/config.lock",
+    "to": ".git/config",
+    "want": "EPERM"
+   }
+  ],
+  "after": {
+   ".git/": "",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/config.lock": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[include]\n\tpath = evil.inc\n",
+   ".git/objects/": ""
+  }
+ },
+ {
+  "name": "git config write: 5",
+  "project": "",
+  "tree": {
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/objects/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": ".git/config.lock",
+    "data": "[core]hooksPath = /tmp/evil\n",
+    "want": "OK"
+   },
+   {
+    "op": "rename",
+    "path": ".git/config.lock",
+    "to": ".git/config",
+    "want": "EPERM"
+   }
+  ],
+  "after": {
+   ".git/": "",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/config.lock": "[core]hooksPath = /tmp/evil\n",
+   ".git/objects/": ""
+  }
+ },
+ {
+  "name": "git config write: 6",
+  "project": "",
+  "tree": {
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/objects/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": ".git/config.lock",
+    "data": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[filter \"lfs\"]\n\tclean = git-lfs clean\n",
+    "want": "OK"
+   },
+   {
+    "op": "rename",
+    "path": ".git/config.lock",
+    "to": ".git/config",
+    "want": "EPERM"
+   }
+  ],
+  "after": {
+   ".git/": "",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/config.lock": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[filter \"lfs\"]\n\tclean = git-lfs clean\n",
+   ".git/objects/": ""
+  }
+ },
+ {
+  "name": "git config write: 7",
+  "project": "",
+  "tree": {
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[filter \"lfs\"]\n\tclean = git-lfs clean\n",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/objects/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": ".git/config.lock",
+    "data": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[filter \"lfs\"]\n\tclean = git-lfs clean\n[remote \"n\"]\n\turl = h\n",
+    "want": "OK"
+   },
+   {
+    "op": "rename",
+    "path": ".git/config.lock",
+    "to": ".git/config",
+    "want": "OK"
+   }
+  ],
+  "after": {
+   ".git/": "",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[filter \"lfs\"]\n\tclean = git-lfs clean\n[remote \"n\"]\n\turl = h\n",
+   ".git/objects/": ""
+  }
+ },
+ {
+  "name": "git config write: 8",
+  "project": "",
+  "tree": {
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[filter \"lfs\"]\n\tclean = git-lfs clean\n",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/objects/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": ".git/config.lock",
+    "data": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[filter \"lfs\"]\n\tclean = git-lfs clean\n[core]\n\tfsmonitor = /e\n",
+    "want": "OK"
+   },
+   {
+    "op": "rename",
+    "path": ".git/config.lock",
+    "to": ".git/config",
+    "want": "EPERM"
+   }
+  ],
+  "after": {
+   ".git/": "",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[filter \"lfs\"]\n\tclean = git-lfs clean\n",
+   ".git/config.lock": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[filter \"lfs\"]\n\tclean = git-lfs clean\n[core]\n\tfsmonitor = /e\n",
+   ".git/objects/": ""
+  }
+ },
+ {
+  "name": "git config write: 9",
+  "project": "",
+  "tree": {
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/objects/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": ".git/config.lock",
+    "data": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[core]\n\tfsmonitor = /e\n",
+    "want": "OK"
+   },
+   {
+    "op": "rename",
+    "path": ".git/config.lock",
+    "to": ".git/config",
+    "want": "EPERM"
+   }
+  ],
+  "after": {
+   ".git/": "",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/config.lock": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[core]\n\tfsmonitor = /e\n",
+   ".git/objects/": ""
+  }
+ },
+ {
+  "name": "git config write: 10",
+  "project": "",
+  "tree": {
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/objects/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": ".git/config.lock",
+    "data": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+    "want": "OK"
+   },
+   {
+    "op": "rename",
+    "path": ".git/config.lock",
+    "to": ".git/config",
+    "want": "OK"
+   }
+  ],
+  "after": {
+   ".git/": "",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/objects/": ""
+  }
+ },
+ {
+  "name": "an undecodable git config write is refused",
+  "project": "",
+  "tree": {
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/objects/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": ".git/config.lock",
+    "hex": "fffe00636f6e666967",
+    "want": "OK"
+   },
+   {
+    "op": "rename",
+    "path": ".git/config.lock",
+    "to": ".git/config",
+    "want": "EPERM"
+   }
+  ],
+  "after": {
+   ".git/": "",
+   ".git/HEAD": "ref: refs/heads/main\n",
+   ".git/config": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   ".git/config.lock": "hex:fffe00636f6e666967",
+   ".git/objects/": ""
+  }
+ },
+ {
+  "name": "ordinary files pass through",
+  "project": "",
+  "tree": {
+   "a/b.txt": "hello\n"
+  },
+  "steps": [
+   {
+    "op": "read",
+    "path": "a/b.txt",
+    "want": "hello\n"
+   },
+   {
+    "op": "put",
+    "path": "a/c.txt",
+    "want": "OK"
+   },
+   {
+    "op": "rename",
+    "path": "a/c.txt",
+    "to": "a/d.txt",
+    "want": "OK"
+   },
+   {
+    "op": "link",
+    "path": "a/e.txt",
+    "to": "a/d.txt",
+    "want": "OK"
+   },
+   {
+    "op": "symlink",
+    "path": "a/f",
+    "to": "b.txt",
+    "want": "OK"
+   },
+   {
+    "op": "read",
+    "path": "a/f",
+    "want": "hello\n"
+   },
+   {
+    "op": "truncate",
+    "path": "a/b.txt",
+    "length": 2,
+    "want": "OK"
+   },
+   {
+    "op": "mkdir",
+    "path": "a/g",
+    "want": "OK"
+   },
+   {
+    "op": "rmdir",
+    "path": "a/g",
+    "want": "OK"
+   },
+   {
+    "op": "unlink",
+    "path": "a/e.txt",
+    "want": "OK"
+   },
+   {
+    "op": "readdir",
+    "path": "a",
+    "want": [
+     "b.txt",
+     "d.txt",
+     "f"
+    ]
+   }
+  ],
+  "after": {
+   "a/": "",
+   "a/b.txt": "he",
+   "a/d.txt": "x\n",
+   "a/f": "-> b.txt"
+  }
+ }
+]

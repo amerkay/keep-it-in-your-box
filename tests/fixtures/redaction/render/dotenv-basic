@@ -1,0 +1,4 @@
+# a comment
+API_KEY=s3cr3t
+
+export DB_URL = postgres://u:s3cr3t@h/db

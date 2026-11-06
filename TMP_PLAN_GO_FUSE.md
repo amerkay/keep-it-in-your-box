@@ -24,16 +24,22 @@ Comes before `TMP_PLAN_GVISOR.md`.
 - Off FUSE: the VM-local folders, at any depth, on VM volumes; Python caches moved by env
 - No setting, no fallback: Go replaces Python once it passes
 
-## Phase 0: fixtures from Python (before any Go)
+## Phase 0: fixtures from Python — ✅ done
 
-- [ ] `tests/fixtures/redaction/`: files of every shape (dotenv, JSON, YAML with and without
-      aliases, partly one shape, binary, odd names like `env_vars/env_prod`, `env-dev.yml`)
-- [ ] Rule cases: bare names at any depth, `/` anchors with exact depth, `**` as one segment,
-      directory seals, `!` on the same component, leading `/` and `..` dropped, guard sections
-- [ ] Protect cases: byte-identical nested copies, the root copy never writable, `git config`
-      keys (`core.hooksPath`, `core.fsmonitor`, `core.sshCommand`, `core.pager`, `alias.*`,
-      `filter.*.clean`), `link()` source checks
-- [ ] A one-off script records Python's verdicts and key names as JSON; committed
+- [x] `tests/fixtures/redaction/`: `rules.json` (verdicts, opt-outs, tightens), `render.json` +
+      `render/` (one input file per shape case), `gitconfig.json` (entries, write checks),
+      `fs.json` (steps against a tree, as a mount sees them, and the tree after)
+- [x] `record.py` writes them from today's Python; `tests/guest/test_redaction_fixtures.py`
+      fails when they are stale. A `note` marks each place Go is meant to differ
+- Found, for Phase 1:
+  - Matching is case-sensitive: on a case-insensitive disk (macOS, once `~` is mounted) `.ENV`
+    opens the real `.env` and `.GIT/hooks/x` writes the real hook. Go folds case (stricter)
+  - `!*` un-redacts every `.env`, but the launch's opt-out list misses it (it only names
+    negations that match a guard path literally). Go names every wildcard negation too
+  - `git_ini_entries` stays in Python on the host too (`asset_scan`): `gitconfig.json` keeps
+    the two in step
+  - A `@close` refusal (a short mirror) may not reach `close()` on a real mount; Go's mount
+    tests check the tree after instead
 
 ## Phase 1: the Go daemon (`guest/fuse/`)
 

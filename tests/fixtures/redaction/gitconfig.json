@@ -1,0 +1,448 @@
+{
+ "ambiguous_entry": [
+  "<file>",
+  "<ambiguous line separator>",
+  ""
+ ],
+ "entries": [
+  {
+   "text": "[core]hooksPath = /tmp/evil",
+   "want": [
+    [
+     "core",
+     "hookspath",
+     "/tmp/evil"
+    ]
+   ]
+  },
+  {
+   "text": "[core]\n\tfsmonitor = /tmp/fsm.sh\n",
+   "want": [
+    [
+     "core",
+     "fsmonitor",
+     "/tmp/fsm.sh"
+    ]
+   ]
+  },
+  {
+   "text": "[filter \"lfs\"]\n\tclean = git-lfs clean\n",
+   "want": [
+    [
+     "filter",
+     "clean",
+     "git-lfs clean"
+    ]
+   ]
+  },
+  {
+   "text": "# core.hooksPath = x\n; fsmonitor = y\n",
+   "want": []
+  },
+  {
+   "text": "[filter \"e]v\"]clean = payload",
+   "want": [
+    [
+     "filter",
+     "clean",
+     "payload"
+    ]
+   ]
+  },
+  {
+   "text": "[filter \"a\\\"]b\"]clean = payload",
+   "want": [
+    [
+     "filter",
+     "clean",
+     "payload"
+    ]
+   ]
+  },
+  {
+   "text": "\t[filter \"e]v\"]clean = payload",
+   "want": [
+    [
+     "filter",
+     "clean",
+     "payload"
+    ]
+   ]
+  },
+  {
+   "text": "[filter \"a;b\"]clean = payload",
+   "want": [
+    [
+     "filter",
+     "clean",
+     "payload"
+    ]
+   ]
+  },
+  {
+   "text": "[filter \"a#b\"]clean = payload",
+   "want": [
+    [
+     "filter",
+     "clean",
+     "payload"
+    ]
+   ]
+  },
+  {
+   "text": "[include]\n\tpath\n",
+   "want": [
+    [
+     "include",
+     "path",
+     ""
+    ]
+   ]
+  },
+  {
+   "text": "[core]\n\tsshCommand = \"ssh #x\"\n",
+   "want": [
+    [
+     "core",
+     "sshcommand",
+     "\"ssh #x\""
+    ]
+   ]
+  },
+  {
+   "text": "﻿[core]fsmonitor = /tmp/payload",
+   "want": [
+    [
+     "core",
+     "fsmonitor",
+     "/tmp/payload"
+    ]
+   ]
+  },
+  {
+   "text": "﻿[core]\n\thooksPath = /tmp/payload\n",
+   "want": [
+    [
+     "core",
+     "hookspath",
+     "/tmp/payload"
+    ]
+   ]
+  },
+  {
+   "text": "[filter \" x\"]clean = /tmp/payload",
+   "want": [
+    [
+     "<file>",
+     "<ambiguous line separator>",
+     ""
+    ],
+    [
+     "filter",
+     "clean",
+     "/tmp/payload"
+    ]
+   ]
+  },
+  {
+   "text": "[filter \" x\"]clean = /tmp/payload",
+   "want": [
+    [
+     "<file>",
+     "<ambiguous line separator>",
+     ""
+    ],
+    [
+     "filter",
+     "clean",
+     "/tmp/payload"
+    ]
+   ]
+  },
+  {
+   "text": "[filter \"x\"]clean = /tmp/payload",
+   "want": [
+    [
+     "<file>",
+     "<ambiguous line separator>",
+     ""
+    ],
+    [
+     "filter",
+     "clean",
+     "/tmp/payload"
+    ]
+   ]
+  },
+  {
+   "text": "[filter \"\u000bx\"]clean = /tmp/payload",
+   "want": [
+    [
+     "<file>",
+     "<ambiguous line separator>",
+     ""
+    ],
+    [
+     "filter",
+     "clean",
+     "/tmp/payload"
+    ]
+   ]
+  },
+  {
+   "text": "[filter \"\fx\"]clean = /tmp/payload",
+   "want": [
+    [
+     "<file>",
+     "<ambiguous line separator>",
+     ""
+    ],
+    [
+     "filter",
+     "clean",
+     "/tmp/payload"
+    ]
+   ]
+  },
+  {
+   "text": "[filter \"\u001cx\"]clean = /tmp/payload",
+   "want": [
+    [
+     "<file>",
+     "<ambiguous line separator>",
+     ""
+    ],
+    [
+     "filter",
+     "clean",
+     "/tmp/payload"
+    ]
+   ]
+  },
+  {
+   "text": "[filter \"\u001dx\"]clean = /tmp/payload",
+   "want": [
+    [
+     "<file>",
+     "<ambiguous line separator>",
+     ""
+    ],
+    [
+     "filter",
+     "clean",
+     "/tmp/payload"
+    ]
+   ]
+  },
+  {
+   "text": "[filter \"\u001ex\"]clean = /tmp/payload",
+   "want": [
+    [
+     "<file>",
+     "<ambiguous line separator>",
+     ""
+    ],
+    [
+     "filter",
+     "clean",
+     "/tmp/payload"
+    ]
+   ]
+  },
+  {
+   "text": "[core]\rhooksPath = x",
+   "want": [
+    [
+     "<file>",
+     "<ambiguous line separator>",
+     ""
+    ],
+    [
+     "core",
+     "hookspath",
+     "x"
+    ]
+   ]
+  },
+  {
+   "text": "[core]\r\n\tbare = false\r\n",
+   "want": []
+  },
+  {
+   "text": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   "want": []
+  },
+  {
+   "text": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[filter \"lfs\"]\n\tclean = git-lfs clean\n",
+   "want": [
+    [
+     "filter",
+     "clean",
+     "git-lfs clean"
+    ]
+   ]
+  },
+  {
+   "text": "[alias]\n\tst = !/e\n",
+   "want": [
+    [
+     "alias",
+     "st",
+     "!/e"
+    ]
+   ]
+  },
+  {
+   "text": "[includeIf \"gitdir:/x/\"]\n\tpath = y\n",
+   "want": [
+    [
+     "includeif",
+     "path",
+     "y"
+    ]
+   ]
+  },
+  {
+   "text": "[pager]\n\tlog = less\n",
+   "want": [
+    [
+     "pager",
+     "log",
+     "less"
+    ]
+   ]
+  },
+  {
+   "text": "[core]\n\tpager = less\n\teditor = vim\n",
+   "want": [
+    [
+     "core",
+     "editor",
+     "vim"
+    ],
+    [
+     "core",
+     "pager",
+     "less"
+    ]
+   ]
+  },
+  {
+   "text": "[credential]\n\thelper = store\n",
+   "want": [
+    [
+     "credential",
+     "helper",
+     "store"
+    ]
+   ]
+  },
+  {
+   "text": "[submodule \"lib\"]\n\tupdate = !sh\n",
+   "want": [
+    [
+     "submodule",
+     "update",
+     "!sh"
+    ]
+   ]
+  },
+  {
+   "text": "[CORE]\n\tHOOKSPATH = x\n",
+   "want": [
+    [
+     "core",
+     "hookspath",
+     "x"
+    ]
+   ]
+  },
+  {
+   "text": "[core.x]\n\thooksPath = y\n",
+   "want": [
+    [
+     "core.x",
+     "hookspath",
+     "y"
+    ]
+   ]
+  },
+  {
+   "text": "[core]\n\thooksPath\n",
+   "want": [
+    [
+     "core",
+     "hookspath",
+     ""
+    ]
+   ]
+  },
+  {
+   "text": "[core] # c\n\tfsmonitor = x ; c\n",
+   "want": [
+    [
+     "core",
+     "fsmonitor",
+     "x"
+    ]
+   ]
+  }
+ ],
+ "write_ok": [
+  {
+   "candidate": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   "current": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   "want": true
+  },
+  {
+   "candidate": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[core]\n\tfsmonitor = /e\n",
+   "current": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   "want": false
+  },
+  {
+   "candidate": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[core]\n\thooksPath = .git/alt\n",
+   "current": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   "want": false
+  },
+  {
+   "candidate": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[alias]\n\tst = !/e\n",
+   "current": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   "want": false
+  },
+  {
+   "candidate": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[include]\n\tpath = evil.inc\n",
+   "current": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   "want": false
+  },
+  {
+   "candidate": "[core]hooksPath = /tmp/evil\n",
+   "current": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   "want": false
+  },
+  {
+   "candidate": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[filter \"lfs\"]\n\tclean = git-lfs clean\n",
+   "current": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   "want": false
+  },
+  {
+   "candidate": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[filter \"lfs\"]\n\tclean = git-lfs clean\n[remote \"n\"]\n\turl = h\n",
+   "current": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[filter \"lfs\"]\n\tclean = git-lfs clean\n",
+   "want": true
+  },
+  {
+   "candidate": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[filter \"lfs\"]\n\tclean = git-lfs clean\n[core]\n\tfsmonitor = /e\n",
+   "current": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[filter \"lfs\"]\n\tclean = git-lfs clean\n",
+   "want": false
+  },
+  {
+   "candidate": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n[core]\n\tfsmonitor = /e\n",
+   "current": null,
+   "want": false
+  },
+  {
+   "candidate": "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://x/y\n",
+   "current": null,
+   "want": true
+  }
+ ]
+}
