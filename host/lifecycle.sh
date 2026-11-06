@@ -23,6 +23,7 @@
 kib_identity() {
     PROJ_HASH="$(hash8 "$PWD")"
     CNAME="kib-$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | cut -c1-40)-$PROJ_HASH"
+    PKG_CACHE="$CNAME-cache" # before the scratch suffix: an ephemeral session shares it
 
     if [ "${KIB_FORCE_NEW_SESSION:-0}" = "1" ]; then
         # Clean slate: its own container and config dirs, so its daemon cannot collide with
@@ -328,6 +329,12 @@ start_container() {
     # to let the box create a directory the host executes — which failed the whole clone. The
     # samples are all disabled examples, so nothing is lost. (redaction-config-guard.md)
     ARGS+=(-e GIT_TEMPLATE_DIR=)
+
+    # Package caches outlive the container, per project: a shared one would let one box plant a
+    # package another project's box installs. XDG tools (uv, pip, yarn, …) land here unasked.
+    local c=/home/hostuser/.cache
+    ARGS+=(-v "$PKG_CACHE:$c" -e XDG_CACHE_HOME="$c")
+    ARGS+=(-e pnpm_config_store_dir="$c/pnpm-store" -e npm_config_cache="$c/npm")
 
     local git_name git_email
     git_name="$(git config --global user.name 2>/dev/null || true)"

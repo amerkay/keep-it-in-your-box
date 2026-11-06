@@ -38,7 +38,8 @@ If `/dev/kvm` is missing, turn on virtualization (VT-x / AMD-V) in your BIOS. If
 - **Build folders and caches stay in the VM**, built there for Linux, and never sync:
   `node_modules`, `.pnpm-store`, `.venv`, `venv`, `target`, `.next`, `.nuxt`, `.turbo`, and
   Python's `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`. Closing a project
-  deletes them, so its first install after reopening downloads again. The first sync shows the
+  deletes them; package downloads stay in its own cache volume (`kib-<project>-<hash>-cache`,
+  the box's `~/.cache`), so a reinstall after reopening copies instead of downloading. The first sync shows the
   file it is copying, so a big folder stands out: add it to `vm_skip` (below).
 - **Closing a project deletes its volume.** If the last sync fails, kib keeps it, and the next
   launch carries the edits back.

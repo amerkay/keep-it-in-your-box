@@ -13,6 +13,9 @@
   user edits while you do keeps their version. Re-read before editing, and redo a lost edit
   yourself. `node_modules`, `.pnpm-store`, `.venv`, `venv`, `target`, `.next`, `.nuxt`, `.turbo`
   and Python caches never sync: they stay in the VM, built for Linux.
+- `~/.cache` is this project's package cache (pnpm store, npm, uv, pip, …) and outlives the
+  container, so reinstalls are fast. Never point a repo's config at a cache inside the project
+  (`store-dir`, `cache-dir`): the VM never syncs it and loses it on close.
 - Host-side work (docker, `kib`, systemd, package installs) is the user's to run in a **host
   terminal**. `!` runs in *this container* and never reaches the host. Hand them a fenced block
   they can paste whole: no `!`, no `$` prompts, real paths, each command short and on its own

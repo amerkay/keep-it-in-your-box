@@ -140,6 +140,10 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
       `.pnpm-store`; caches now join the never-synced build dirs. The status line names the file
       being copied, and `vm_skip = …` in the config adds names (before the guard, so a `!` in it
       can't un-ignore a guarded file)
+- ✅ Package caches outlive a close: one volume per project (`<cname>-cache`, never shared: a box
+      could plant a package another project installs) at the box's `~/.cache`, with
+      `XDG_CACHE_HOME`, `pnpm_config_store_dir` (pnpm 12 ignores `npm_config_`; env beats a repo's
+      `storeDir`) and `npm_config_cache`. The entrypoint no longer `chown -R`s it
 - ✅ Last session: `mutagen sync flush` → terminate → remove the volume and sync container. A
       failed flush keeps all of it; the next launch's session carries the edits back
 - ✅ Seed after the first sync (`kib/host/vmseed.py`): redacted files as their key-only render,

@@ -323,7 +323,9 @@ chown "$HOST_UID:$HOST_GID" "/tmp/claude" "/tmp/claude-$HOST_UID" 2>/dev/null ||
 
 # Create and fix ownership of common cache/config directories.
 mkdir -p "$USER_HOME/.cache" "$USER_HOME/.config" "$USER_HOME/.local" "$USER_HOME/.local/bin" "$USER_HOME/.local/share" 2>/dev/null || true
-chown -R "$HOST_UID:$HOST_GID" "$USER_HOME/.cache" "$USER_HOME/.config" "$USER_HOME/.local" 2>/dev/null || true
+# .cache is kib's package-cache volume: owning its root is enough, a -R would walk it every start.
+chown "$HOST_UID:$HOST_GID" "$USER_HOME/.cache" 2>/dev/null || true
+chown -R "$HOST_UID:$HOST_GID" "$USER_HOME/.config" "$USER_HOME/.local" 2>/dev/null || true
 ensure_user_local_claude "$USER_HOME"
 ensure_user_nvm "$USER_HOME"
 chown -h "$HOST_UID:$HOST_GID" "$USER_HOME/.local/bin/claude" 2>/dev/null || true
