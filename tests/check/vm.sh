@@ -183,6 +183,12 @@ case "$_vm_c" in
         ;;
     *) fail "unexpected Mutagen sessions" "$_vm_c" ;;
 esac
+case "$_vm_c" in
+    *"sync flush kib-proj-1"*"sync flush kib-proj-1-host"*"sync terminate kib-proj-1 kib-proj-1-host"*"sync create"*)
+        pass "a failed close's sessions are flushed before they are replaced"
+        ;;
+    *) fail "leftover sessions were replaced without a flush, so the host wins every edit" "$_vm_c" ;;
+esac
 is "the VM's Mutagen agent never touches the project itself" "0" \
     "$(grep -c "devel/proj docker://" "$_vm_dir/calls")"
 case "$(cat "$_vm_dir/pat.sync.yml")" in

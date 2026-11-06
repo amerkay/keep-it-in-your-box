@@ -206,7 +206,12 @@ vm_sync_start() {
     uid="$(box_uid)" gid="$(box_gid)"
     kib_py shared.rules sync-config "$KIB_GUARD_FILE_HOST" "$PATTERNS_STATE" "$KIB_CFG_VM_SKIP" >"$cfg"
     kib_py shared.rules vm-sync-config "$KIB_CFG_VM_SKIP" >"$cfg.vm"
-    # A shadow and volume a failed close kept are reused: the new sessions carry their edits back.
+    # A failed close kept its sessions: flush them first, while they still hold their history,
+    # so the box's last edits reach the project. A new session would see every difference as a
+    # conflict, and the host's copy would win.
+    if docker start "$SYNC_CNAME" >/dev/null 2>&1; then
+        _mutagen sync flush "$CNAME" >/dev/null 2>&1 && _mutagen sync flush "$CNAME-host" >/dev/null 2>&1
+    fi
     _mutagen sync terminate "$CNAME" "$CNAME-host" >/dev/null 2>&1 || true
     docker rm -f "$SYNC_CNAME" >/dev/null 2>&1 || true
     docker volume create --label kib-src=1 "$CNAME-src" >/dev/null
@@ -272,13 +277,13 @@ vm_sync_stop() {
     if docker start "$SYNC_CNAME" >/dev/null 2>&1 \
         && ! _mutagen sync flush "$CNAME" >/dev/null 2>&1; then
         warn "the box's last edits did not sync back. They stay in the VM volume $CNAME-src," \
-            "and the next kib here carries them over."
+            "and the next kib in $PWD carries them over first."
         return 0
     fi
     if _mutagen sync list "$CNAME-host" >/dev/null 2>&1 \
         && ! _mutagen sync flush "$CNAME-host" >/dev/null 2>&1; then
         warn "the box's last edits did not sync back. They stay in $VM_SHADOW/$CNAME," \
-            "and the next kib here carries them over."
+            "and the next kib in $PWD carries them over first."
         return 0
     fi
     _mutagen sync terminate "$CNAME" "$CNAME-host" >/dev/null 2>&1 || true

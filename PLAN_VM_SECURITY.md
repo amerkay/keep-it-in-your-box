@@ -145,7 +145,8 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
       `XDG_CACHE_HOME`, `pnpm_config_store_dir` (pnpm 12 ignores `npm_config_`; env beats a repo's
       `storeDir`) and `npm_config_cache`. The entrypoint no longer `chown -R`s it
 - ✅ Last session: `mutagen sync flush` → terminate → remove the volume and sync container. A
-      failed flush keeps all of it; the next launch's session carries the edits back
+      failed flush keeps all of it, sessions included; the next launch flushes those first, while
+      they hold their history (a new session would let the host win every difference)
 - ✅ Seed after the first sync (`kib/host/vmseed.py`): redacted files as their key-only render,
       protected files (`.git/config`, hooks, `.vscode`, …) as real bytes. The sync ignores them,
       so nothing seeded flows back. The renderers moved to `kib/shared/render.py` for this
