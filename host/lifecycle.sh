@@ -211,7 +211,7 @@ start_container() {
     # Stages the rule file and pushes the mount flags onto REDACTION_ARGS below.
     prepare_redaction
     # Must precede the mounts below, which bind the proxy socket / spool dir.
-    if engine_in_vm; then
+    if engine_lima; then
         start_clipboard_bridge # an engine VM cannot reach this host's Wayland socket
     else
         start_wayland_guard
@@ -313,7 +313,7 @@ start_container() {
 
     # Clipboard mounts: the mediated Wayland socket on Linux (reads pass, writes refused), or
     # the bridge spool when the engine is in a VM. Both no-op if theirs did not come up.
-    if engine_in_vm; then
+    if engine_lima; then
         add_clipboard_bridge_args
     else
         add_wayland_args
@@ -321,7 +321,7 @@ start_container() {
 
     # Follow the host's live DNS. Linux only — on macOS the engine VM already tracks the host
     # resolver, so there is nothing to sync.
-    engine_in_vm || add_resolv_sync_args
+    engine_lima || add_resolv_sync_args
 
     # An empty template dir, so `git init`/`clone` create no .git/hooks at all. Git copies the
     # sample hooks from /usr/share/git-core/templates otherwise, and the guard rightly refuses
@@ -517,7 +517,7 @@ kib_bring_up() {
         wait_for_container_ready
         # Linux only: macOS's engine VM already tracks the host resolver. One info line, and
         # deliberately no desktop notification.
-        if engine_in_vm; then
+        if engine_lima; then
             echo "ℹ️  DNS: handled by the Docker engine VM — follows the host resolver." >&2
         else
             start_resolv_sync

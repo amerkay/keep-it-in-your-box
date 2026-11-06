@@ -180,11 +180,19 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
       printed again after Claude exits. Teardown findings already print after it
 - ✅ Verified on Linux 2026-11-06: the Lima prompt (y, n, never) and the replay after exit
 
-### Phase 5: macOS Docker Desktop fallback
-- ⬜ Detect `/Users` (or any parent of a kib path) in the sharing list → refuse
-- ⬜ `Y/n`: rewrite the list to kib's mounts only, restart Docker Desktop (the prompt warns this
-      stops **all** its containers), wait for the engine
-- ⬜ Same Mutagen volumes as Lima, so no project ever needs sharing
+### Phase 5: macOS is Lima only (decided 2026-11-06)
+Docker Desktop's sharing list is read-write only (S3), so a narrowed one still exposed kib's
+checkout and `vm-ro`. Dropped instead: no Docker Desktop code or dependency left.
+- ✅ macOS always runs VM mode. Declining the install refuses to launch, never another engine
+- ✅ One prompt installs what is missing: Lima, Mutagen, the Docker CLI (static, pinned) into
+      `~/.local`. `never` writes `vm = off` (Linux only)
+- ✅ kib's docker calls use their own `DOCKER_CONFIG`: Docker Desktop's `credsStore: desktop`
+      breaks pulls once it is gone. The image needs no BuildKit, so no buildx
+- ✅ Removed: Docker Desktop start/probe/preflight, `engine_in_vm` (now `engine_lima`), the
+      `desktop-linux` context check
+- ⬜ Verify on the Mac with Docker Desktop quit and its CLI off `PATH` (`tmp_macos_test.sh`)
+- ⬜ `bin/kib`'s `preflight_platform` comment still names the engine check: fix once no Linux
+      session is live (editing it under one corrupts it)
 
 ### Phase 6: policy and docs
 - ⬜ `guest/policy/etc-CLAUDE.md`: the project is a synced copy; **the host wins conflicts**, so

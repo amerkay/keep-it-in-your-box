@@ -120,7 +120,7 @@ stop_wayland_guard() {
 # osascript PNG extraction, and a WRITE reaches pbcopy only through kib.shared.clipboard — the
 # same filter the Wayland guard applies in flight, so both platforms strip the same bytes.
 start_clipboard_bridge() {
-    engine_in_vm || return 0
+    engine_lima || return 0
     command -v pbpaste >/dev/null 2>&1 || command -v wl-paste >/dev/null 2>&1 || {
         echo "ℹ️  clipboard: no pbpaste or wl-paste (wl-clipboard) — host paste is unavailable." >&2
         return 0
@@ -169,7 +169,7 @@ add_clipboard_bridge_args() {
 }
 
 stop_clipboard_bridge() {
-    engine_in_vm || return 0
+    engine_lima || return 0
     kill_pgrp "$CLIP_HOST.pid" # whole group: the bridge is its own (detach_pgrp)
     # .priv is the bridge's host-private staging dir (clipboard-bridge.sh). Its own EXIT trap
     # normally clears it; this covers the SIGKILL that skips the trap.

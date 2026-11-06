@@ -25,11 +25,10 @@ esac
 
 is_macos() { [ "$KIB_OS" = darwin ]; }
 
-# The engine runs in a VM: Docker Desktop on macOS, or kib's Lima VM (host/vm.sh). Set here, never
-# from the environment — an inherited 1 would aim engine_ns_exec's privileged nsenter at THIS host.
+# The engine runs in kib's Lima VM (host/vm.sh; always on macOS). Set here, never from the
+# environment — an inherited 1 would aim engine_ns_exec's privileged nsenter at THIS host.
 _KIB_ENGINE_VM=0
 engine_lima() { [ "$_KIB_ENGINE_VM" = 1 ]; }
-engine_in_vm() { is_macos || engine_lima; }
 
 # Lima's file share per OS. Never reverse-sshfs: it can reach host paths no mount names.
 # 9p uncached: its default write-back cache lets each side read the other's half-written file.
@@ -288,19 +287,12 @@ box_gid() {
 # mount propagation, so both containers must see the same directory AND the mount *event* must
 # be able to travel between them.
 #
-# That rules out any path the engine serves as a file share. On macOS /tmp, /Users, /Volumes and
-# /private are virtiofs views of the Mac — a file-sharing protocol with no mount namespace for an
-# event to land in, which is what made kib's old /tmp root look like "propagation cannot work on
-# macOS". /run is neither shared nor a macOS directory, so the daemon creates it INSIDE the
-# engine VM, where both containers share a kernel and propagation is ordinary. Never swap it for
-# /var: that is a symlink to /private/var, which IS shared, so the root would silently land back
-# on the Mac. Only the mountPOINT is constrained — the project still arrives over virtiofs as the
-# sidecar's source. (docs/design-notes/macos.md)
+# That rules out any path the engine serves as a file share: a share has no mount namespace for
+# the event to land in. In the VM the root is a VM-local dir, never a Lima mount; not /run, which
+# Ubuntu's fusermount3 AppArmor profile denies. (docs/design-notes/macos.md)
 fuse_root_path() { # <per-project key>
     if engine_lima; then
-        printf '/mnt/kib/fuse.%s\n' "$1" # Ubuntu's fusermount3 AppArmor profile denies /run
-    elif engine_in_vm; then
-        printf '/run/kib/fuse.%s\n' "$1"
+        printf '/mnt/kib/fuse.%s\n' "$1"
     else
         printf '%s/fuse.%s\n' "$KIB_STATE_ROOT" "$1"
     fi
@@ -310,7 +302,7 @@ fuse_root_path() { # <per-project key>
 # Two engines keep the FUSE root somewhere kib cannot act on directly, for different reasons: on
 # macOS it exists only inside the engine VM; under rootless it is our own path, but only the
 # daemon's namespace decides whether a :rshared bind there is accepted. Same shape, one shim.
-engine_ns() { engine_in_vm || is_rootless; }
+engine_ns() { engine_lima || is_rootless; }
 
 # dockerd's pid, host-visible because rootlesskit adds no pid namespace. The pidfile is checked
 # against /proc/<pid>/comm, never trusted: a SIGKILLed dockerd leaves the file behind, and a
@@ -339,7 +331,7 @@ _rootless_daemon_pid() {
 # a `cmd_a || cmd_b` fallback cannot tell "this nsenter rejected the flag" from "the command inside
 # failed" — so it re-ran the caller's whole script, including fuse_root_create's unmount-and-bind.
 engine_ns_exec() {
-    if engine_in_vm; then
+    if engine_lima; then
         docker run --rm --privileged --pid=host --entrypoint nsenter "$IMAGE_NAME" \
             -t 1 -m -- "$@" >/dev/null 2>&1
         return
@@ -401,7 +393,7 @@ _mount_is_shared() {
 # Create <root>/mnt owned by <uid>:<gid>, and guarantee the root propagates shared. Called once
 # per cold start, before the sidecar.
 fuse_root_create() { # <root> <uid> <gid>
-    if engine_in_vm; then
+    if engine_lima; then
         # A plain directory cannot be a propagation peer until it is a mount in its own right,
         # and the engine VM's root propagation is not ours to change. Bind it to itself, then
         # mark it rshared — idempotent, since the second call finds it already mounted.
@@ -462,7 +454,7 @@ fuse_root_create() { # <root> <uid> <gid>
 }
 
 fuse_root_destroy() { # <root>
-    if engine_in_vm; then
+    if engine_lima; then
         # The bind-to-self must go before the rm, or the next launch inherits a stacked mount.
         # shellcheck disable=SC2016  # $1 is the inner sh's argument, not ours
         engine_ns_exec sh -c 'umount -l "$1" 2>/dev/null; rm -rf "$1"' _ "$1" || true
@@ -482,53 +474,12 @@ fuse_root_destroy() { # <root>
 
 # The direct .dmg for THIS Mac's cpu. The landing page makes you pick, and picking wrong is a
 # multi-GB download that will not launch.
-_docker_desktop_dmg() {
-    case "$(uname -m)" in
-        arm64 | aarch64) echo "https://desktop.docker.com/mac/main/arm64/Docker.dmg" ;;
-        *) echo "https://desktop.docker.com/mac/main/amd64/Docker.dmg" ;;
-    esac
-}
-
-# Lead with the two engines that install from a .dmg. Colima is listed last and labelled: it
-# comes from Homebrew, which bootstraps itself by installing the Xcode command line tools —
-# multiple GB, and a surprise to anyone who just wanted a container runtime.
-_preflight_die_no_engine() {
-    die "no reachable Docker engine on this Mac." \
-        "kib is engine-agnostic. Easiest — download, drag to Applications, launch once:" \
-        "  • Docker Desktop  $(_docker_desktop_dmg)" \
-        "  • OrbStack        https://orbstack.dev  (lighter, also a .dmg)" \
-        "Colima works too, but needs Homebrew + the Xcode command line tools (several GB):" \
-        "  brew install colima docker && colima start" \
-        "Start the engine, then relaunch kib."
-}
-
-_docker_up() { docker info >/dev/null 2>&1; }
-
-# Docker Desktop installed but closed: start it in the background rather than refuse.
-_start_docker_desktop() {
-    open -ga Docker 2>/dev/null || return 1
-    printf '🐳 kib: starting Docker Desktop…\n' >&2
-    wait_until 120 1 _docker_up # ≤2min; a cold start is ~20-60s
-}
-
+# macOS: the engine is kib's Lima VM (vm_use), so only the shims' own dependency is left to check.
 preflight_platform() {
     [ "$KIB_OS" = darwin ] || return 0
-    command -v docker >/dev/null 2>&1 || _preflight_die_no_engine
-    _docker_up || _start_docker_desktop || _preflight_die_no_engine
     command -v perl >/dev/null 2>&1 || die \
         "perl was not found, but kib's macOS lock/setsid/notify shims need it." \
         "perl ships with macOS; restore it (or install via Homebrew: brew install perl)."
-
-    # An engine not sharing $PWD would silently mount an empty project. Only checkable once
-    # the image exists, so skip until then. Lima shares no project: Mutagen syncs it in.
-    if ! engine_lima && docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
-        if ! docker run --rm --entrypoint true -v "$PWD:/kib-probe:ro" "$IMAGE_NAME" >/dev/null 2>&1; then
-            die "this Docker engine did not share $PWD into a container." \
-                "kib mounts your project by path, so the engine must expose it." \
-                "Docker Desktop: Settings → Resources → File sharing must include" \
-                "this path (or its parent). OrbStack/Colima share \$HOME by default."
-        fi
-    fi
 }
 
 # ── ~/.keep-it-in-your-box/config (host-only user prefs) ──────────────────────

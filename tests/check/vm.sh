@@ -31,12 +31,12 @@ chmod +x "$_vm_dir/bin/"*
 
 # Subshells inherit these; a `sh -c` would not see the sourced functions.
 _vm_t_mounts() { _vm_mounts && printf '%s\n' "${VM_MOUNTS[@]}"; }
-_vm_t_up() { vm_use claude && printf '%s %s %s\n' "$DOCKER_HOST" "$(engine_in_vm && echo vm)" \
+_vm_t_up() { vm_use claude && printf '%s %s %s\n' "$DOCKER_HOST" "$(engine_lima && echo vm)" \
     "$KIB_HOST_GATEWAY"; }
 _vm_edits() { if [ -f "$_vm_dir/edits" ]; then wc -l <"$_vm_dir/edits" | tr -d ' '; else echo 0; fi; }
 _vm_t_last() { vm_up && vm_down; }
 _vm_stops() { if [ -f "$_vm_dir/stops" ]; then wc -l <"$_vm_dir/stops" | tr -d ' '; else echo 0; fi; }
-_vm_t_engine() { if engine_in_vm; then echo vm; else echo native; fi; }
+_vm_t_engine() { if engine_lima; then echo vm; else echo native; fi; }
 _vm_t_returns() {
     vm_use claude
     echo returned
@@ -44,7 +44,7 @@ _vm_t_returns() {
 _vm_t_sync() { # [stop] — the sync of a project named "proj", with the state a launch stages
     CNAME=kib-proj-1 SYNC_CNAME=kib-proj-1-sync IMAGE_NAME=img KIB_BOX_UID=1000 KIB_BOX_GID=1000
     PATTERNS_STATE="$_vm_dir/pat" _KIB_ENGINE_VM=1
-    KIB_GUARD_FILE_HOST="$KIB_ROOT/guest/policy/global.kibignore" MUTAGEN_BIN=mutagen
+    KIB_GUARD_FILE_HOST="$KIB_ROOT/guest/policy/global.kibignore"
     printf '.secret\n' >"$PATTERNS_STATE"
     exec 200>"$_vm_dir/l200" 205>"$_vm_dir/l205" # held by a real launch
     if [ -n "${1:-}" ]; then vm_sync_stop; else vm_sync_start; fi
@@ -202,9 +202,10 @@ case "$(DK_START=1 MG_LIST=1 MG_FLUSH_HOST=1 _vm_run "$_vm_dir/bin:$PATH" _vm_t_
     *"did not sync back"*) fail "a cold start with nothing left over warns of lost edits" ;;
     *) pass "a cold start with nothing left over cleans up silently" ;;
 esac
-case "$(_vm_run /usr/bin:/bin _mutagen_ensure)" in
-    *"Run kib in a terminal"*) pass "no Mutagen and no tty: refused, never installed unasked" ;;
-    *) fail "Mutagen install ran without a prompt" ;;
+_vm_t_mac() { KIB_OS=darwin && KIB_VM='' && vm_use claude && echo returned; }
+case "$(_vm_run /usr/bin:/bin _vm_t_mac)" in
+    *"runs every box in a Lima VM"*) pass "macOS without Lima: refused, never a non-VM engine" ;;
+    *) fail "macOS ran without Lima" ;;
 esac
 
 _vm_out="$(_vm_run /usr/bin:/bin _vm_t_returns)"
@@ -214,22 +215,20 @@ case "$_vm_out" in
 esac
 
 _vm_t_lima() { # <answer> — the install prompt's outcome, the config and any limactl it left
-    # shellcheck disable=SC2317 # called by _lima_install
-    lima_host_ready() { :; }
     rm -f "$KIB_CONFIG"
-    printf '%s\n' "$1" | _lima_install 2>&3 && echo installed || echo declined
+    printf '%s\n' "$1" | _vm_install " limactl mutagen" 2>&3 && echo installed || echo declined
     cat "$KIB_CONFIG" 2>/dev/null || true
     [ ! -e "$HOME/.local/bin/limactl" ] || echo limactl
 }
 mkdir -p "$_vm_dir/curl"
 printf '#!/bin/sh\nwhile [ "$1" != -o ]; do shift; done; echo junk >"$2"\n' >"$_vm_dir/curl/curl"
 chmod +x "$_vm_dir/curl/curl"
-is "Lima prompt: never writes vm = off" "declined vm = off" \
+is "VM tools prompt: never writes vm = off" "declined vm = off" \
     "$(_vm_run /usr/bin:/bin _vm_t_lima never 3>/dev/null | tr '\n' ' ' | sed 's/ $//')"
-is "Lima prompt: n declines this launch only" "declined" "$(_vm_run /usr/bin:/bin _vm_t_lima n 3>/dev/null)"
+is "VM tools prompt: n declines this launch only" "declined" "$(_vm_run /usr/bin:/bin _vm_t_lima n 3>/dev/null)"
 case "$(_vm_run "$_vm_dir/curl:/usr/bin:/bin" _vm_t_lima y 3>&1)" in
-    *"failed its checksum"*declined) pass "Lima prompt: a download off its pinned checksum installs nothing" ;;
-    *) fail "a Lima download off its checksum was installed or not refused" ;;
+    *"failed its checksum"*declined) pass "VM tools prompt: a download off its pinned checksum installs nothing" ;;
+    *) fail "a download off its checksum was installed or not refused" ;;
 esac
 
 _vm_t_notes() { _KIB_NOTES='' && warn one two && note three && printf '%s' "$_KIB_NOTES" >&3; }

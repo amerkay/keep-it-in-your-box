@@ -6,8 +6,8 @@
 # Reads:  KIB_CFG_VM KIB_VM KIB_CONFIG KIB_STATE_ROOT KIB_ROOT HOME LIMA_VM_TYPE LIMA_MOUNT_TYPE
 #         LIMA_MOUNT_SET CNAME SYNC_CNAME PATTERNS_STATE KIB_GUARD_FILE_HOST IMAGE_NAME SLUG
 #         CLAUDE_HOME
-# Writes: DOCKER_HOST (exported) _KIB_ENGINE_VM KIB_NODE_CACHE KIB_HOST_GATEWAY VM_MOUNTS
-#         MUTAGEN_BIN VM_RW VM_RO
+# Writes: DOCKER_HOST DOCKER_CONFIG (exported) _KIB_ENGINE_VM KIB_NODE_CACHE KIB_HOST_GATEWAY
+#         VM_MOUNTS VM_RW VM_RO PATH
 # shellcheck disable=SC2034
 
 KIB_VM_NAME="kib-vm"
@@ -16,8 +16,9 @@ VM_SPEC="$KIB_STATE_ROOT/vm-spec" # the mount set the VM was last booted with
 # ponytail: Lima's user-mode network address; read it from the VM if a network differs.
 LIMA_HOST_IP=192.168.5.2
 
-MUTAGEN_VERSION=v0.18.1
 LIMA_VERSION=2.2.1
+MUTAGEN_VERSION=v0.18.1
+DOCKER_VERSION=29.9.3
 # Open projects' state, and the VM's only view of kib's: what the box writes in VM_RW, what the
 # host writes for the VM (and its own per-container files) in VM_RO, read-only there.
 VM_RW="$KIB_STATE_ROOT/vm-rw"
@@ -27,9 +28,9 @@ MUTAGEN_DATA="${XDG_STATE_HOME:-$HOME/.local/state}/kib-mutagen"
 # Each open project's filtered copy, the VM's side of its sync. Never VM-mounted.
 VM_SHADOW="${XDG_STATE_HOME:-$HOME/.local/state}/kib-shadow"
 
-vm_wanted() {
+vm_wanted() { # always on macOS: kib runs no other engine there
+    is_macos && return 0
     case "${KIB_VM:-$KIB_CFG_VM}" in on | auto | 1 | true | yes) ;; *) return 1 ;; esac
-    is_macos || [ "$(docker context show 2>/dev/null)" != desktop-linux ]
 }
 
 # Every host path a bind names, at its own path. Not ~/.claude itself: its credential,
@@ -100,7 +101,9 @@ vm_up() {
     exec 206>&-
     unset DOCKER_CONTEXT
     DOCKER_HOST="unix://$(limactl list --format '{{.Dir}}' "$KIB_VM_NAME")/sock/docker.sock"
-    export DOCKER_HOST
+    # Not ~/.docker: Docker Desktop leaves `credsStore: desktop` there, which fails once it is gone.
+    DOCKER_CONFIG="$KIB_STATE_ROOT/docker"
+    export DOCKER_HOST DOCKER_CONFIG
     _KIB_ENGINE_VM=1
     KIB_HOST_GATEWAY="$LIMA_HOST_IP"
     # The engine-VM paths nsenter through a privileged container: only ever into a rootful VM.
@@ -111,67 +114,69 @@ vm_up() {
 # Any call may start Mutagen's daemon, which outlives kib: it must never hold a lock fd, or no kib
 # is ever the last one out (container-lifecycle.md). Same for limactl's host agent.
 _mutagen() {
-    MUTAGEN_DATA_DIRECTORY="$MUTAGEN_DATA" "$MUTAGEN_BIN" "$@" 200>&- 201>&- 202>&- 205>&- 206>&-
+    MUTAGEN_DATA_DIRECTORY="$MUTAGEN_DATA" mutagen "$@" 200>&- 201>&- 202>&- 205>&- 206>&-
 }
 
-_mutagen_ensure() {
-    local a arch sum bin="$HOME/.local/bin"
-    MUTAGEN_BIN="$(command -v mutagen || echo "$bin/mutagen")"
-    [ -x "$MUTAGEN_BIN" ] && return 0
-    [ -t 0 ] || die "VM mode syncs projects with Mutagen, which is not installed." \
-        "Run kib in a terminal once to install it, or turn VM mode off: vm = off in $KIB_CONFIG"
-    printf '🛡️  kib: VM mode syncs open projects with Mutagen (MIT, by Docker).\n' >&2
-    printf '   Install Mutagen %s into %s? [Y/n] ' "$MUTAGEN_VERSION" "$bin" >&2
-    read -r a || true
-    case "$a" in n* | N*) die "VM mode needs Mutagen. Or turn VM mode off: vm = off in $KIB_CONFIG" ;; esac
-    case "$KIB_OS-$(uname -m)" in
-        linux-x86_64) arch=linux_amd64 sum=7735286c778cc438418209f24d03a64f3a0151c8065ef0fe079cfaf093af6f8f ;;
-        linux-aarch64) arch=linux_arm64 sum=bcba735aebf8cbc11da9b3742118a665599ac697fa06bc5751cac8dcd540db8a ;;
-        darwin-x86_64) arch=darwin_amd64 sum=7d06f7d8fcfe90bc7e55cc834a2f2f20c2e0af9ea9bc35911fc4341ad56a9bbf ;;
-        darwin-arm64) arch=darwin_arm64 sum=6f810416d9e5fc4fd5e18431146f8b3c5a2056ba5a24f76c1e66da86eb3257e2 ;;
-        *) die "no Mutagen build for $KIB_OS-$(uname -m). Turn VM mode off: vm = off in $KIB_CONFIG" ;;
+# Pinned, not read off a release: a SHA256SUMS beside the tarball vouches for nothing. Docker
+# publishes none for its static CLI; those were hashed at the pin.
+_tool() { # <command> → "<sha256> <url> <dir under ~> [tar members…]"; nothing if no build
+    local lima="https://github.com/lima-vm/lima/releases/download/v$LIMA_VERSION/lima-$LIMA_VERSION"
+    local mg="https://github.com/mutagen-io/mutagen/releases/download/$MUTAGEN_VERSION/mutagen"
+    local dk="https://download.docker.com" m=".local/bin mutagen mutagen-agents.tar.gz"
+    case "$1 $KIB_OS-$(uname -m)" in
+        "limactl linux-x86_64") echo "b391ac7fcac2b2a5a1628107756463188ded4d18d3104a40a66a8bb6fec01bcb $lima-Linux-x86_64.tar.gz .local" ;;
+        "limactl linux-aarch64") echo "fbcf4d127936666aa2cf6013b663c250431f2a59394757b404070f8d6a160e10 $lima-Linux-aarch64.tar.gz .local" ;;
+        "limactl darwin-x86_64") echo "6b776e4bc41f358e6ee01fefcc78e2eb26f11635a0fcff632234af77a566c6c4 $lima-Darwin-x86_64.tar.gz .local" ;;
+        "limactl darwin-arm64") echo "9e9eacce88f37e185c346bad73aa6136f738d8cdf8c3bb23cd42b071824bc66e $lima-Darwin-arm64.tar.gz .local" ;;
+        "mutagen linux-x86_64") echo "7735286c778cc438418209f24d03a64f3a0151c8065ef0fe079cfaf093af6f8f ${mg}_linux_amd64_$MUTAGEN_VERSION.tar.gz $m" ;;
+        "mutagen linux-aarch64") echo "bcba735aebf8cbc11da9b3742118a665599ac697fa06bc5751cac8dcd540db8a ${mg}_linux_arm64_$MUTAGEN_VERSION.tar.gz $m" ;;
+        "mutagen darwin-x86_64") echo "7d06f7d8fcfe90bc7e55cc834a2f2f20c2e0af9ea9bc35911fc4341ad56a9bbf ${mg}_darwin_amd64_$MUTAGEN_VERSION.tar.gz $m" ;;
+        "mutagen darwin-arm64") echo "6f810416d9e5fc4fd5e18431146f8b3c5a2056ba5a24f76c1e66da86eb3257e2 ${mg}_darwin_arm64_$MUTAGEN_VERSION.tar.gz $m" ;;
+        "docker linux-x86_64") echo "3fb5d1f13014c18cc54945bc177c58a9056a482dada031e17d12cf2e6922c973 $dk/linux/static/stable/x86_64/docker-$DOCKER_VERSION.tgz .local docker/docker" ;;
+        "docker linux-aarch64") echo "1b27fd739378ef938401e81ce5afb73b7ad7432d4f598814a9ff5f826bb464d2 $dk/linux/static/stable/aarch64/docker-$DOCKER_VERSION.tgz .local docker/docker" ;;
+        "docker darwin-x86_64") echo "f7d8f835391cd0a8c676d9a8d2547f909da6a2d029595943b0ce8d5f169abe47 $dk/mac/static/stable/x86_64/docker-$DOCKER_VERSION.tgz .local docker/docker" ;;
+        "docker darwin-arm64") echo "79145e169bca0b9571d02de8e1cd311a36e0e8fdb4599b6661a87b1bb3afbe13 $dk/mac/static/stable/aarch64/docker-$DOCKER_VERSION.tgz .local docker/docker" ;;
     esac
-    _install "https://github.com/mutagen-io/mutagen/releases/download/$MUTAGEN_VERSION/mutagen_${arch}_$MUTAGEN_VERSION.tar.gz" \
-        "$sum" "$bin" mutagen mutagen-agents.tar.gz
-    MUTAGEN_BIN="$bin/mutagen"
 }
 
-_lima_install() { # 1 = not installed: declined, or this host cannot run it
-    local a sum os
-    case "$KIB_OS-$(uname -m)" in
-        linux-x86_64) os=Linux-x86_64 sum=b391ac7fcac2b2a5a1628107756463188ded4d18d3104a40a66a8bb6fec01bcb ;;
-        linux-aarch64) os=Linux-aarch64 sum=fbcf4d127936666aa2cf6013b663c250431f2a59394757b404070f8d6a160e10 ;;
-        darwin-x86_64) os=Darwin-x86_64 sum=6b776e4bc41f358e6ee01fefcc78e2eb26f11635a0fcff632234af77a566c6c4 ;;
-        darwin-arm64) os=Darwin-arm64 sum=9e9eacce88f37e185c346bad73aa6136f738d8cdf8c3bb23cd42b071824bc66e ;;
-        *) return 1 ;;
-    esac
-    lima_host_ready || return 1
-    printf '🛡️  kib: VM mode runs boxes in a Lima VM (Apache-2.0): a kernel exploit stays in it.\n' >&2
-    printf '   Install Lima %s into ~/.local? [Y/n/never] ' "$LIMA_VERSION" >&2
+# What VM mode lacks, installed after one prompt. 1 = still missing: declined, or not possible.
+_vm_tools() {
+    local t miss=""
+    for t in limactl mutagen docker; do
+        command -v "$t" >/dev/null 2>&1 || miss="$miss $t"
+    done
+    [ -z "$miss" ] || { [ -t 0 ] && lima_host_ready && _vm_install "$miss"; }
+}
+
+_vm_install() { # <commands>
+    local t a
+    for t in $1; do [ -n "$(_tool "$t")" ] || return 1; done
+    printf '🛡️  kib: VM mode runs every box in a Lima VM, so a kernel exploit stays in it.\n' >&2
+    printf '   Install%s into ~/.local? [Y/n/never] ' "$1" >&2
     read -r a || true
     case "$a" in
         [nN]ever)
+            is_macos && return 1 # no other engine to turn to
             mkdir -p "${KIB_CONFIG%/*}" && echo "vm = off" >>"$KIB_CONFIG" && KIB_CFG_VM=off
             echo "   OK: 'vm = off' is now in $KIB_CONFIG." >&2
             return 1
             ;;
         [nN]*) return 1 ;;
     esac
-    _install "https://github.com/lima-vm/lima/releases/download/v$LIMA_VERSION/lima-$LIMA_VERSION-$os.tar.gz" \
-        "$sum" "$HOME/.local"
+    # shellcheck disable=SC2046 # _tool's fields
+    for t in $1; do _install $(_tool "$t"); done
 }
 
-# Pinned, not read off the release: a SHA256SUMS beside the tarball vouches for nothing.
-_install() { # <url> <sha256> <dir> [tar members…]
+_install() { # <sha256> <url> <dir under ~> [tar members…]
     local tmp
     tmp="$(mktemp -d)"
-    curl -fsSL -o "$tmp/t.tgz" "$1" || die "could not download $1 (curl, above)."
-    [ "$(sha256_file "$tmp/t.tgz")" = "$2" ] || die "$1 failed its checksum."
+    curl -fsSL -o "$tmp/t.tgz" "$2" || die "could not download $2 (curl, above)."
+    [ "$(sha256_file "$tmp/t.tgz")" = "$1" ] || die "$2 failed its checksum."
     # Via tmp, and cp not tar into place: a tarball's ./ would rewrite the target dir's mode.
     {
-        mkdir -p "$tmp/x" "$3" && tar -xzf "$tmp/t.tgz" -C "$tmp/x" "${@:4}" \
-            && cp -R "$tmp/x/." "$3/"
-    } || die "could not install into $3."
+        mkdir -p "$tmp/x" "$HOME/$3" && tar -xzf "$tmp/t.tgz" -C "$tmp/x" "${@:4}" \
+            && cp -R "$tmp/x/." "$HOME/$3/"
+    } || die "could not install into ~/$3."
     rm -rf "$tmp"
 }
 
@@ -277,18 +282,16 @@ vm_use() { # <verb>
         esac
         return 0
     fi
-    PATH="$PATH:$HOME/.local/bin" # where kib installs Lima and Mutagen
-    if ! command -v limactl >/dev/null 2>&1; then
+    PATH="$PATH:$HOME/.local/bin:$HOME/.local/docker" # where _vm_tools installs
+    if ! _vm_tools; then
+        is_macos && die "kib on macOS runs every box in a Lima VM." \
+            "Run kib in a terminal and answer Y to install it (no sudo, nothing else changes)."
         case "$1" in claude | exec) ;; *) return 0 ;; esac
-        if ! { [ -t 0 ] && _lima_install; }; then
-            is_macos && return 0  # Docker Desktop is already a VM
-            vm_wanted || return 0 # answered never
-            warn "this box shares your kernel: a kernel exploit inside it owns this machine." \
-                "Install Lima once and every box runs in a VM: $KIB_ROOT/docs/vm.md" \
-                "(hide this note: 'vm = off' in $KIB_CONFIG)"
-            return 0
-        fi
+        vm_wanted || return 0 # answered never
+        warn "this box shares your kernel: a kernel exploit inside it owns this machine." \
+            "Install Lima once and every box runs in a VM: $KIB_ROOT/docs/vm.md" \
+            "(hide this note: 'vm = off' in $KIB_CONFIG)"
+        return 0
     fi
-    _mutagen_ensure
     vm_up
 }
