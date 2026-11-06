@@ -41,9 +41,11 @@ If `/dev/kvm` is missing, turn on virtualization (VT-x / AMD-V) in your BIOS. If
   and Python's `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`. The VM's stop
   deletes them; package downloads stay in its own cache volume (`kib-<project>-<hash>-cache`,
   the box's `~/.cache`), so a reinstall after reopening copies instead of downloading. The first sync shows the
-  file it is copying, so a big folder stands out: add it to `vm_skip` (below).
-- **Closing a project deletes its volume.** If the last sync fails, kib keeps it, and the next
-  launch carries the edits back.
+  file it is copying. One over 20 s names the folders it spent its time on, with a `vm_skip`
+  line (below) to paste.
+- **A closed project syncs on until the VM stops**, so a reopen copies only what changed. The
+  VM's stop deletes its volume. If the last sync fails, kib keeps it, and the next launch
+  carries the edits back.
 - **The VM sees only this**, at the same paths:
 
   | Path | VM access |

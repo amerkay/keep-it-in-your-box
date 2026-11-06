@@ -223,13 +223,35 @@ vm_sync_start() {
     } || die "could not stage the redacted and protected files' stand-ins in $shadow."
     echo "🔄 kib: syncing $PWD into the VM…" >&2
     local t0=$SECONDS
+    : >"$shadow.paths"
     {
         _vm_session "$CNAME-host" ${new:+"$cfg" "$PWD" "$shadow"} \
             && _vm_session "$CNAME" ${new:+"$cfg.vm" "$shadow" "docker://$SYNC_CNAME/src"}
     } || die "could not sync $PWD into the VM." "$(_mutagen sync list "$CNAME-host" "$CNAME" 2>&1)"
-    [ $((SECONDS - t0)) -lt 30 ] || note "ℹ️  kib: the first sync took $((SECONDS - t0)) s. To skip folders the box can rebuild,
-   put their names in this line, then paste it:
-   echo 'vm_skip = dist, .yarn' >> $KIB_CONFIG"
+    [ $((SECONDS - t0)) -lt 20 ] || note "$(_vm_slow_hint $((SECONDS - t0)) "$shadow.paths")"
+}
+
+# Where a slow sync spent its time: the file it was copying, sampled every 0.2 s, counted by
+# folder. A dot-folder is the likely package cache, so it is what the paste line names.
+_vm_slow_hint() { # <seconds> <sampled paths>
+    local top names
+    top="$(awk '{
+        n = split($0, p, "/"); k = n > 1 ? p[1] : "."; d = ""
+        for (i = 1; i < n; i++) {
+            if (i > 1) k = k "/" p[i]
+            if (p[i] ~ /^[.]/ && p[i] != ".git") { d = p[i]; break }
+        }
+        if (d == "" && n > 2) k = p[1] "/" p[2]
+        c[k]++; dot[k] = d; t++
+    }
+    END { for (k in c) if (c[k] * 10 >= t) printf "%d %s %s\n", c[k] * 100 / t, k, dot[k] }' "$2" \
+        | sort -rn | head -3)"
+    names="$(awk 'NF == 3 { printf "%s%s", s, $3; s = ", " }' <<<"$top")"
+    echo "ℹ️  kib: the first sync took $1 s.${top:+ Most of it copied:}"
+    [ -z "$top" ] || awk '{ printf "     %3d%%  %s\n", $1, $2 }' <<<"$top"
+    echo "   To skip folders the box can rebuild (package caches, build output), edit the names"
+    echo "   in this line, then paste it:"
+    echo "   echo 'vm_skip = ${names:-dist, .yarn}' >> $KIB_CONFIG"
 }
 
 # A fresh sync container on the new ignores. Left-over sessions (a failed close's, or the old
@@ -272,15 +294,16 @@ vm_sync_restage() {
 }
 
 _vm_session() { # <name> [<config> <alpha> <beta>] — create it if given, then wait for a full sync
-    local pid cols
+    local pid cols line
     [ $# = 1 ] || _mutagen sync create --name "$1" --label kib=1 --sync-mode two-way-resolved \
         --symlink-mode posix-raw --no-ignore-vcs -c "$2" "$3" "$4" >/dev/null || return 1
     _mutagen sync flush "$1" >/dev/null 200>&- 201>&- 205>&- 206>&- &
     pid=$!
     cols="$(tput cols 2>/dev/null || echo 80)"
     while [ -t 2 ] && kill -0 "$pid" 2>/dev/null; do # one line: status, and the file it is on
-        printf '\r\033[K   %s' "$(_mutagen sync list "$1" --template "$VM_SYNC_STATUS" 2>/dev/null \
-            | sed 's/ on beta//' | cut -c "1-$((cols - 4))")" >&2
+        line="$(_mutagen sync list "$1" --template "$VM_SYNC_STATUS" 2>/dev/null)"
+        case "$line" in *": "*) printf '%s\n' "${line#*: }" >>"$VM_SHADOW/$CNAME.paths" ;; esac
+        printf '\r\033[K   %s' "$(sed 's/ on beta//' <<<"$line" | cut -c "1-$((cols - 4))")" >&2
         sleep 0.2 # a resumed sync is done in well under a second
     done
     [ ! -t 2 ] || printf '\r\033[K' >&2

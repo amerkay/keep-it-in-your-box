@@ -287,5 +287,12 @@ is "launch notices are kept for the replay after the session" "⚠️  kib: one
    two
 three" "$(_vm_run "$PATH" _vm_t_notes 3>&1 >/dev/null)"
 
+_vm_t_hint() { printf '%s\n' a/.cache/x a/.cache/y b/c/d e.txt >"$_vm_dir/p" && _vm_slow_hint 40 "$_vm_dir/p"; }
+_vm_out="$(_vm_run "$PATH" _vm_t_hint)"
+case "$_vm_out" in
+    *"50%  a/.cache"*"25%  b/c"*"vm_skip = .cache'"*) pass "a slow sync names where its time went, and the dot-folder to skip" ;;
+    *) fail "the slow-sync hint misread its samples" "$_vm_out" ;;
+esac
+
 rm -rf "$_vm_dir"
 unset _vm_dir _vm_m _vm_out _vm_c _c
