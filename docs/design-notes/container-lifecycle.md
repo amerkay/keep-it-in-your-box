@@ -90,3 +90,5 @@ Two terminals on the **same** project must work. Claude's own `[concurrentSessio
 - **Package caches outlive the container**: `<cname>-cache` at the box's `~/.cache`, per
   project, never shared (a box could plant a package another project's box installs), never
   deleted by kib.
+
+- **Build and install folders are volumes too**: `<cname>-local-<hash8 of the path>` at each `node_modules`, `.venv`, `target`, … the project has (any depth, `local_dirs` in host/redaction.sh), plus a root `node_modules`/`.venv` its manifest implies. Off FUSE, installs ran ×5 faster (`TMP_PLAN_GVISOR.md`); off the host, they are built for Linux. Found in the raw source and kept only where the redacted view has the parent, because a mountpoint inside a redacted folder fails the whole `docker run`. Python caches are moved by env (`PYTHONPYCACHEPREFIX`, …) instead: they sit in every package folder, and a mount each would be dozens.

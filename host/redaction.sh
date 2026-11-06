@@ -254,6 +254,31 @@ prepare_redaction() {
     disown 2>/dev/null || true
 }
 
+# Build and install folders (host/lifecycle.sh mounts each on a volume), relative to the project,
+# one per line: found in the raw source, fast, then kept only if the VIEW has it too, so none is
+# ever inside a redacted folder (that mountpoint would fail the launch). Never descends into
+# one. A root node_modules or .venv the manifest implies counts before the first install.
+LOCAL_DIR_NAMES="node_modules .pnpm-store .next .nuxt .turbo target .terraform .venv venv"
+local_dirs() {
+    # shellcheck disable=SC2086 # one argument per name
+    docker exec "$FUSE_CNAME" sh -c '
+        view="$1"
+        shift
+        cd /src || exit 0
+        names=""
+        for n; do names="$names -o -name $n"; done
+        {
+            find . -mindepth 1 -maxdepth 6 -name .git -prune -o -type d \( ${names# -o } \) \
+                -print -prune
+            [ ! -f package.json ] || [ -e node_modules ] || echo ./node_modules
+            if [ -f pyproject.toml ] || [ -f requirements.txt ]; then
+                [ -e .venv ] || echo ./.venv
+            fi
+        } | while IFS= read -r d; do
+            [ -d "$view/${d%/*}" ] && printf "%s\n" "${d#./}"
+        done' _ "$FUSE_ROOT/mnt" $LOCAL_DIR_NAMES 2>/dev/null
+}
+
 sidecar_running() { [ -n "$(docker ps -q -f "name=^${FUSE_CNAME}$" 2>/dev/null)" ]; }
 
 # Is there a fuse fs at <path>, as <container> sees it? One probe, two callers: readiness

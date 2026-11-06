@@ -337,6 +337,19 @@ start_container() {
     # Both store names: pnpm ≤ 11 reads npm_config_, 12 reads pnpm_config_ (a repo pins either).
     ARGS+=(-e pnpm_config_store_dir="$c/pnpm-store" -e npm_config_store_dir="$c/pnpm-store")
     ARGS+=(-e npm_config_cache="$c/npm")
+    # Python's caches would sit in every package folder: moved into the cache, not mounted.
+    ARGS+=(-e PYTHONPYCACHEPREFIX="$c/pycache" -e MYPY_CACHE_DIR="$c/mypy"
+        -e RUFF_CACHE_DIR="$c/ruff" -e PYTEST_ADDOPTS="-o cache_dir=$c/pytest")
+    # Build and install folders live on volumes: off FUSE (installs are ×5 faster) and off the
+    # host, built for Linux. Kept like the cache; one made mid-session is on FUSE until the next
+    # container. The entrypoint gives each root to the user.
+    local d dirs=""
+    while IFS= read -r d; do
+        ARGS+=(-v "$CNAME-local-$(hash8 "$d"):$PWD/$d")
+        dirs="$dirs$PWD/$d
+"
+    done < <(local_dirs)
+    ARGS+=(-e KIB_LOCAL_DIRS="$dirs")
     # For security-test.sh's "Engine VM": a box in the VM must not run on this kernel.
     ! engine_lima || ARGS+=(-e KIB_HOST_KERNEL="$(uname -r)")
 

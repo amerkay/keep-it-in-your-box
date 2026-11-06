@@ -325,6 +325,10 @@ chown "$HOST_UID:$HOST_GID" "/tmp/claude" "/tmp/claude-$HOST_UID" 2>/dev/null ||
 mkdir -p "$USER_HOME/.cache" "$USER_HOME/.config" "$USER_HOME/.local" "$USER_HOME/.local/bin" "$USER_HOME/.local/share" 2>/dev/null || true
 # .cache is kib's package-cache volume: owning its root is enough, a -R would walk it every start.
 chown "$HOST_UID:$HOST_GID" "$USER_HOME/.cache" 2>/dev/null || true
+# So are the build-folder volumes (KIB_LOCAL_DIRS, host/lifecycle.sh), one path per line.
+printf '%s\n' "${KIB_LOCAL_DIRS:-}" | while IFS= read -r d; do
+    [ -z "$d" ] || chown "$HOST_UID:$HOST_GID" "$d" 2>/dev/null || true
+done
 chown -R "$HOST_UID:$HOST_GID" "$USER_HOME/.config" "$USER_HOME/.local" 2>/dev/null || true
 ensure_user_local_claude "$USER_HOME"
 ensure_user_nvm "$USER_HOME"

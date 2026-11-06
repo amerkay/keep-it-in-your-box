@@ -385,3 +385,31 @@ else
         "runc cannot create a mountpoint on a :ro bind — an absent socket aborts every launch"
 fi
 unset vl_body vl_all vl_var
+
+# Build folders go on volumes (host/lifecycle.sh). local_dirs runs in the sidecar, so here a fake
+# `docker exec` runs its script on a scratch tree: /src is the raw project, the view hides one dir.
+ld_t="$(mktemp -d)"
+mkdir -p "$ld_t/src/a/node_modules/x/node_modules" "$ld_t/src/.git/node_modules" \
+    "$ld_t/src/b/c/.venv" "$ld_t/src/hidden/node_modules" "$ld_t/view/a" "$ld_t/view/b/c"
+: >"$ld_t/src/package.json"
+ld_got="$(
+    # shellcheck disable=SC2317 # called by local_dirs
+    docker() { # exec <container> sh -c <script> _ <view> <names…>
+        local script="${5//cd \/src/cd $ld_t/src}"
+        shift 5
+        sh -c "$script" "$@"
+    }
+    # shellcheck source=/dev/null
+    . "$KIB_ROOT/host/redaction.sh"
+    # shellcheck disable=SC2034 # read by local_dirs
+    FUSE_ROOT="$ld_t" FUSE_CNAME=x
+    ln -s view "$ld_t/mnt"
+    local_dirs | sort | tr '\n' ' '
+)"
+if [ "$ld_got" = "a/node_modules b/c/.venv node_modules " ]; then
+    pass "build folders are found at any depth, never in .git, a match, or a redacted folder"
+else
+    fail "local_dirs found the wrong build folders" "got: $ld_got"
+fi
+rm -rf "$ld_t"
+unset ld_t ld_got
