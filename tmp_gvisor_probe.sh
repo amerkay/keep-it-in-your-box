@@ -40,7 +40,7 @@ vm sh -c 'set -e; u=https://storage.googleapis.com/gvisor/releases/release/lates
     curl -fsSLO "$u/gvisor.tar.bz2"
     curl -fsSLO "$u/gvisor.tar.bz2.sha512"
     sha512sum -c gvisor.tar.bz2.sha512
-    tar -xjf gvisor.tar.bz2
+    python3 -c "import tarfile; tarfile.open(\"gvisor.tar.bz2\").extractall()" # no bzip2 in the VM
     ./runsc install
     systemctl reload docker' >/dev/null || { echo "runsc install failed (above)"; exit 1; }
 sleep 2
