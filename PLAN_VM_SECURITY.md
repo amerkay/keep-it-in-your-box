@@ -74,9 +74,13 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
       Done 2026-11-05: `rules.sync_ignores`, proven against a real Mutagen sync on 9 rule shapes
       (`test_real_mutagen_syncs_exactly_what_verdict_passes`). Passed as a `-c` config file:
       `--ignore` splits on commas
-- ⬜ **S3** macOS Docker Desktop: where the file-sharing list lives (`settings-store.json`,
+- ✅ **S3** macOS Docker Desktop: where the file-sharing list lives (`settings-store.json`,
       `FilesharingDirectories`); whether an edit plus restart applies it; whether an org admin lock
-      blocks it
+      blocks it.
+      Done 2026-11-06 (Docker Desktop 4.78, macOS 26.7): `settings-store.json`; the key is absent
+      until written (defaults `/Users /Volumes /private /tmp /var/folders`). Edit while stopped,
+      then start: applied, and a path off the list is refused. `docker desktop stop|start` (CLI
+      v0.3.0): 7 s and 2–4 s. No `admin-settings.json`. **Every share is read-write**: no `:ro`
 - ✅ **S4** FUSE root at `/mnt/kib` in the Lima VM passes Ubuntu's `fusermount3` AppArmor profile.
       Done 2026-11-05: `/mnt/kib` mounts; `/run/kib` is `DENIED … profile="fusermount3"`
 - ✅ **S5** Protected paths (`.git/config`, `.git/hooks`, `.vscode`, …) synced **host→VM only**,
@@ -97,8 +101,11 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
 - ⬜ **S6** Sync lag on live channels: the clipboard spool and sleep markers.
       2026-11-05, Linux over 9p: clipboard text, screenshot and box→host write all work. Lag and
       sleep markers not measured; both stay on 9p (`vm-rw`)
-- ⬜ **S7** macOS Lima (vz + virtiofs): the kib image builds and runs; `host.lima.internal`
-      reaches the Mac
+- ✅ **S7** macOS Lima (vz + virtiofs): the kib image builds and runs; `host.lima.internal`
+      reaches the Mac.
+      Done 2026-11-06 (`tmp_macos_test.sh`): Phase 4 prompts installed Lima and Mutagen; only
+      kib's 9 mounts; `vm-ro` read-only; `.env` redacted; a Mac server reached via
+      `host.docker.internal`; sync both ways; VM stopped after the last session
 
 ### Phase 1: VM base (rework the uncommitted VM code)
 - ✅ Delete project mounts: `_vm_pick_root`, `vm-roots`, the per-project restart
@@ -236,7 +243,7 @@ limactl shell kib-vm -- touch "$HOME/.local/state/keep-it-in-your-box/vm-ro/x" 2
 ls "$HOME/.local/state/keep-it-in-your-box/vm-rw"   # one dir per OPEN project, plus .state
 limactl shell kib-vm -- test -e "$HOME/.ssh" && echo "❌ ~/.ssh visible in the VM" || echo "✅ ~/.ssh not in the VM"
 DOCKER_HOST="unix://$HOME/.lima/kib-vm/sock/docker.sock" docker volume ls -q --filter label=kib-src
-for v in $(DOCKER_HOST="unix://$HOME/.lima/kib-vm/sock/docker.sock" docker volume ls -q --filter label=kib-src); do DOCKER_HOST="unix://$HOME/.lima/kib-vm/sock/docker.sock" docker run --rm -v "$v:/s:ro" alpine sh -c 'find /s -name ".env*" ! -name ".env.example" ! -name ".env.sample" ! -name ".env.template" | grep -q . && echo "❌ secrets synced in '"$v"'" || echo "✅ no .env in '"$v"'"'; done
+for v in $(DOCKER_HOST="unix://$HOME/.lima/kib-vm/sock/docker.sock" docker volume ls -q --filter label=kib-src); do DOCKER_HOST="unix://$HOME/.lima/kib-vm/sock/docker.sock" docker run --rm -v "$v:/s:ro" alpine sh -c 'find /s -name ".env*" -type f -exec cat {} + | grep -E "^[A-Za-z_][A-Za-z0-9_]*=" | grep -vq "=<redacted>$" && echo "❌ a .env value reached '"$v"'" || echo "✅ only redacted .env renders in '"$v"'"'; done
 ```
 
 The volume list must show one `kib-<project>-<hash>-src` per **open** project and nothing else.

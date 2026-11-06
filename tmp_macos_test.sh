@@ -104,7 +104,7 @@ EOF
     python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("   after start:", [v for k,v in d.items() if k.lower()=="filesharingdirectories"])' "$F"
     check "the probe dir is shared" dd run --rm -v "$P:/p:ro" alpine test -e /p/seen
     check "a folder outside the list is refused now" not dd run --rm -v "$O:/o:ro" alpine test -e /o/seen
-    dd run --rm -v "$O:/o:ro" alpine test -e /o/seen 2>&1 | tail -1 | sed 's/^/   docker says: /'
+    dd run --rm -v "$O:/o:ro" alpine test -e /o/seen 2>&1 | head -1 | sed 's/^/   docker says: /'
     dd_stop
     cp "$F.kib-bak" "$F" && rm -f "$F.kib-bak" && rm -rf "$P"
     dd_start
@@ -133,7 +133,8 @@ if ask "Run one kib box in Lima? kib may prompt to install Lima and Mutagen; the
         check "[host] vm-ro read-only in the VM" not limactl shell kib-vm -- touch "$HOME/.local/state/keep-it-in-your-box/vm-ro/x"
         echo "[host] volumes: $(DOCKER_HOST="unix://$L" docker volume ls -q --filter label=kib-src | tr '\n' ' ')"
         for v in $(DOCKER_HOST="unix://$L" docker volume ls -q --filter label=kib-src); do
-            check "[host] no .env in $v" not env DOCKER_HOST="unix://$L" docker run --rm -v "$v:/s:ro" alpine test -e /s/.env
+            check "[host] the .env value is not in $v" not env DOCKER_HOST="unix://$L" \
+                docker run --rm -v "$v:/s:ro" alpine grep -rqs fake-not-a-secret /s
         done
         echo ok >host-done
     ) &
@@ -148,7 +149,7 @@ if ask "Run one kib box in Lima? kib may prompt to install Lima and Mutagen; the
         n=0; while [ ! -e host-done ] && [ $n -lt 300 ]; do sleep 1; n=$((n+1)); done
         echo "[box] host-edit.txt: $(cat host-edit.txt 2>&1)"'
     echo "kib exited: $?"
-    kill "$WWW" "$HOSTSIDE" 2>/dev/null
+    { kill "$WWW" "$HOSTSIDE" && wait; } 2>/dev/null
     echo "host kernel: $(uname -r)"
     check "box.txt is on the host" test -e box.txt
     check "the VM stopped after the last session" test "$(limactl list --format '{{.Status}}' kib-vm 2>/dev/null)" = Stopped
