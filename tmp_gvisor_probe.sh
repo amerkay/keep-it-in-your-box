@@ -1,24 +1,21 @@
 #!/usr/bin/env bash
 # TMP (delete when decided): does gVisor (design C) work for kib, and how fast is it?
-#   tmp_gvisor_probe.sh <project>          Linux: in kib-vm. macOS: a throwaway VM with ~ mounted
-#   tmp_gvisor_probe.sh --host <project>   Linux: on this machine's Docker (sudo once), + KVM mode
+#   tmp_gvisor_probe.sh <project>           Linux: in kib-vm, the project on a VM volume
+#   tmp_gvisor_probe.sh --mount <project>   a throwaway VM with ~ mounted (design C; always on macOS)
+# No sudo: everything runs in Lima VMs.
 # Works on a copy of the project; gVisor, the copy and every probe container are removed after.
 set -u
-HOST=""
-if [ "${1:-}" = --host ]; then HOST=1 && shift; fi
-PROJ="$(cd "${1:?usage: $0 [--host] <project dir>}" && pwd)" || exit 1
+MOUNT=""
+if [ "${1:-}" = --mount ] || [ "$(uname -s)" = Darwin ]; then MOUNT=1; fi
+[ "${1:-}" != --mount ] || shift
+PROJ="$(cd "${1:?usage: $0 [--mount] <project dir>}" && pwd)" || exit 1
 KR="$(cd "$(dirname "$0")" && pwd)" # kib's checkout: every VM here mounts it at this same path
 export PATH="$PATH:$HOME/.local/bin:$HOME/.local/docker" DOCKER_CONFIG="$HOME/.local/docker"
 IMG=keep-it-in-your-box P=kibprobe U="$(id -u):$(id -g)" GV=/opt/kibprobe-gvisor
-VM=kib-vm MAC="" SRC=$P-src
-if [ "$(uname -s)" = Darwin ]; then VM=$P MAC=1 SRC="$HOME/.$P-proj"; fi
-[ -z "$HOST" ] || SRC="$HOME/.$P-proj"
+VM=kib-vm SRC=$P-src
+if [ -n "$MOUNT" ]; then VM=$P SRC="$HOME/.$P-proj"; fi
 now() { perl -MTime::HiRes=time -e 'printf "%.3f", time'; }
-vm() { # root where the containers run
-    if [ -n "$HOST" ]; then sudo -n -- "$@" </dev/null; else
-        limactl shell --workdir / "$VM" sudo -n -- "$@" </dev/null
-    fi
-}
+vm() { limactl shell --workdir / "$VM" sudo -n -- "$@" </dev/null; }
 ok() { printf '  ✔ %s\n' "$1"; }
 bad() { printf '  ✘ %s\n' "$1"; }
 info() { printf '  ℹ %s\n' "$1"; }
@@ -37,33 +34,6 @@ up() { # <vm> [create args…]
         sleep 1
     done
 }
-if [ -n "$HOST" ]; then
-    unset DOCKER_HOST
-    echo "🔑 sudo, once: gVisor is registered with this machine's Docker for the run"
-    sudo -v || exit 1
-    # Kept fresh: the run outlasts sudo's 15 min, and cleanup must still restore daemon.json.
-    while sleep 60; do sudo -n -v; done 2>/dev/null &
-    KEEP=$!
-else
-    up kib-vm
-    if [ -n "$MAC" ]; then
-        echo "⏳ a throwaway VM with ~ mounted, and kib's image copied in (a few minutes)…"
-        limactl start --tty=false --name $P --vm-type=vz --mount-type=virtiofs \
-            --mount-only "$HOME:w" template:docker-rootful >/dev/null 2>&1 || {
-            echo "cannot create the probe VM"
-            exit 1
-        }
-        up $P
-        DOCKER_HOST="$(sock kib-vm)" docker save "$IMG" | DOCKER_HOST="$(sock $P)" docker load >/dev/null
-    fi
-    DOCKER_HOST="$(sock "$VM")"
-    export DOCKER_HOST
-fi
-docker image inspect "$IMG" >/dev/null || {
-    echo "no $IMG image here (error above)"
-    exit 1
-}
-
 # shellcheck disable=SC2046 # ids
 cleanup() {
     docker rm -f $(docker ps -aq --filter name=^$P) >/dev/null 2>&1
@@ -76,13 +46,43 @@ cleanup() {
         if [ -f $GV/daemon.json.orig ]; then cp -a $GV/daemon.json.orig /etc/docker/daemon.json
         elif [ -f $GV/daemon.json.none ]; then rm -f /etc/docker/daemon.json; fi
         rm -rf $GV; systemctl reload docker"
-    rm -f "$TAR" "$TAR.log"
-    [ -z "$MAC" ] || limactl delete -f $P >/dev/null 2>&1
+    rm -f "$TAR" "$TAR.log" "$TAR.vm.log"
+    [ -z "$MOUNT" ] || limactl delete -f $P >/dev/null 2>&1
     [ "$SRC" = $P-src ] || rm -rf "$SRC"
-    [ -z "${KEEP:-}" ] || kill "$KEEP" 2>/dev/null
 }
 TAR="$(mktemp)"
 trap cleanup EXIT
+
+up kib-vm
+if [ -n "$MOUNT" ]; then
+    echo "⏳ a throwaway VM with ~ mounted, and kib's image copied in (a few minutes)…"
+    limactl delete -f $P >/dev/null 2>&1 # a failed run's leftover
+    # virtiofs if this host can (macOS always; Linux needs virtiofsd), else 9p as kib mounts it.
+    mk() { limactl start --tty=false --name $P --mount-only "$HOME:w" "$@" template:docker-rootful \
+        >"$TAR.vm.log" 2>&1; }
+    if [ "$(uname -s)" = Darwin ]; then
+        mk --vm-type=vz --mount-type=virtiofs && MT=virtiofs
+    elif mk --vm-type=qemu --mount-type=virtiofs; then
+        MT=virtiofs
+    else
+        limactl delete -f $P >/dev/null 2>&1
+        mk --vm-type=qemu --mount-type=9p --set='.mounts[]."9p".cache = "none"' && MT=9p
+    fi
+    [ -n "${MT:-}" ] || {
+        echo "cannot create the probe VM:"
+        tail -n 5 "$TAR.vm.log"
+        exit 1
+    }
+    echo "  ~ is mounted over $MT"
+    up $P
+    DOCKER_HOST="$(sock kib-vm)" docker save "$IMG" | DOCKER_HOST="$(sock $P)" docker load >/dev/null
+fi
+DOCKER_HOST="$(sock "$VM")"
+export DOCKER_HOST
+docker image inspect "$IMG" >/dev/null || {
+    echo "no $IMG image here (error above)"
+    exit 1
+}
 
 echo "⏳ installing gVisor…"
 # The release archive (runsc + gvisor-bin/) in its own dir: cleanup is one rm. No && chains, so
