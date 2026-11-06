@@ -29,7 +29,8 @@ holding the agent and the FUSE sidecar together. Three choices carry it:
 - **Docker Desktop was not narrowed instead**: its file sharing has no read-only mode, so kib's
   checkout and `vm-ro` would stay VM-writable.
 
-A shared lock on fd 205 counts sessions; the last one out stops the VM. The FUSE root is
+A shared lock on fd 205 counts sessions. The last one out starts a 10-minute timer; it stops the
+VM only if no session holds fd 205 by then and no later close has replaced it. The FUSE root is
 `/mnt/kib` (Ubuntu's `fusermount3` AppArmor profile denies `/run`). 9p mounts run `cache=none`:
 the default write-back cache truncated `.claude.json` at 4096 bytes.
 

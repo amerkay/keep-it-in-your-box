@@ -25,7 +25,7 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
 - Built into `kib` / `cc`
 - No setup again: same `~/.claude`, login, `--resume` history, broker
 - Works with and without the VM, switchable
-- VM starts with the first session and stops when the last closes
+- VM starts with the first session and stops 10 minutes after the last closes
 
 **Platforms**
 - Linux: Lima VM; native fallback when Lima is absent
@@ -160,8 +160,8 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
       and Claude in the box once read one too (`Unexpected EOF`). Lima's 9p `mmap` cache writes
       back late and takes the size from the host. Fix: every 9p mount `cache=none`. Verified
       2026-11-05; it took effect one boot after the edit (fstab is rewritten after mounting)
-- ✅ Boot is ~14–27 s. Decided 2026-11-05: no linger, the VM still stops when the last session
-      closes
+- ✅ Boot is ~14–27 s. Decided 2026-11-06: the VM lingers 10 min after the last session closes
+      (a detached timer; only the newest close's timer stops it, and only with no session open)
 
 ### Phase 3: hybrid host data
 - ✅ Two fixed shares replace `$KIB_STATE_ROOT`, `~/.claude/projects` and

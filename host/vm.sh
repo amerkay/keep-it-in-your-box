@@ -290,17 +290,32 @@ vm_state() { # in | out
     fi
 }
 
-# Last kib out stops the VM. A kib starting meanwhile waits on its shared acquire, then restarts it.
+# Last kib out leaves the VM up for VM_LINGER, so a quick reopen skips the boot. Only the newest
+# close's timer may stop it, and only while no session holds fd 205. A kib starting meanwhile
+# waits on its shared acquire, then restarts it.
+VM_LINGER=600
+
 vm_down() {
     engine_lima || return 0
     exec 205>&-
     exec 205>"$VM_LOCK"
     if lock_fd -n -x 205; then
-        echo "🛡️  kib: last session closed — stopping the VM." >&2
-        limactl stop "$KIB_VM_NAME" >/dev/null 2>&1 || true
-        _mutagen daemon stop >/dev/null 2>&1 || true
+        # shellcheck disable=SC2016 # the detached shell's own $1, $2
+        detach_pgrp bash -c '. "$1/host/core.sh" && . "$1/host/portable.sh" && . "$1/host/vm.sh" \
+            && sleep "$2" && _vm_linger_end' _ "$KIB_ROOT" "$VM_LINGER" \
+            >/dev/null 2>&1 200>&- 201>&- 202>&- 205>&- 206>&-
+        echo "$!" >"$VM_LOCK.linger" # the timer's own pid: unique, and the newest wins
+        echo "🛡️  kib: last session closed — the VM stops in $((VM_LINGER / 60)) min unless one opens." >&2
     fi
     exec 205>&-
+}
+
+_vm_linger_end() {
+    [ "$(cat "$VM_LOCK.linger" 2>/dev/null)" = "$$" ] || return 0 # a later close took over
+    exec 205>"$VM_LOCK"
+    lock_fd -n -x 205 || return 0
+    limactl stop "$KIB_VM_NAME" >/dev/null 2>&1 || true
+    _mutagen daemon stop >/dev/null 2>&1 || true
 }
 
 vm_use() { # <verb>

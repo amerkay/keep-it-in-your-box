@@ -28,8 +28,8 @@ If `/dev/kvm` is missing, turn on virtualization (VT-x / AMD-V) in your BIOS. If
 
 - **kib stays on your machine; only Docker moves into the VM.** Same `~/.claude`, login,
   `--resume` history and broker routes, with or without the VM.
-- **One VM, `kib-vm`.** It starts with your first session and stops when the last one closes.
-  Opening and closing projects never restarts it.
+- **One VM, `kib-vm`.** It starts with your first session and stops 10 minutes after the last
+  one closes, so a quick reopen skips the boot. Opening and closing projects never restarts it.
 - **Your project is synced, never mounted.** Mutagen copies it into a VM volume through a
   host-local copy that drops every redacted and protected file, so `.env` values never reach the
   VM and the VM cannot write `.git/hooks`. Edits flow both ways within about a second.
@@ -76,6 +76,6 @@ Lima: Apache-2.0. Mutagen: MIT, with SSPL parts in its release build (fine for l
 | Skip more folders | `vm_skip = dist, .yarn` in that file: names at any depth, or `a/b` from the project root |
 | Resize | `limactl stop kib-vm && limactl edit kib-vm --cpus 4 --memory 8` |
 | Start from scratch | `limactl delete -f kib-vm` — the next `kib` creates it again |
-| Stop it now | `limactl stop kib-vm` (kib does this when your last session closes) |
+| Stop it now | `limactl stop kib-vm` (kib does this 10 minutes after your last session) |
 
 CPU and memory are limits, not reservations. The VM uses what it needs, up to those limits.

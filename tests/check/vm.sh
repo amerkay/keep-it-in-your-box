@@ -34,7 +34,7 @@ _vm_t_mounts() { _vm_mounts && printf '%s\n' "${VM_MOUNTS[@]}"; }
 _vm_t_up() { vm_use claude && printf '%s %s %s\n' "$DOCKER_HOST" "$(engine_lima && echo vm)" \
     "$KIB_HOST_GATEWAY"; }
 _vm_edits() { if [ -f "$_vm_dir/edits" ]; then wc -l <"$_vm_dir/edits" | tr -d ' '; else echo 0; fi; }
-_vm_t_last() { vm_up && vm_down; }
+_vm_t_last() { VM_LINGER=1 && vm_up && vm_down; }
 _vm_stops() { if [ -f "$_vm_dir/stops" ]; then wc -l <"$_vm_dir/stops" | tr -d ' '; else echo 0; fi; }
 _vm_t_engine() { if engine_lima; then echo vm; else echo native; fi; }
 _vm_t_returns() {
@@ -140,7 +140,10 @@ rm -f "$_vm_dir/stops"
 _vm_run "$_vm_dir/bin:$PATH" _vm_t_shared >/dev/null
 is "the VM stays up while another kib holds it" "0" "$(_vm_stops)"
 _vm_run "$_vm_dir/bin:$PATH" _vm_t_last >/dev/null
-is "the last kib out stops the VM" "1" "$(_vm_stops)"
+is "the last kib out leaves the VM up (it lingers)" "0" "$(_vm_stops)"
+_vm_run "$_vm_dir/bin:$PATH" _vm_t_last >/dev/null # a second close within the linger
+sleep 3
+is "after the linger, only the newest close's timer stops the VM" "1" "$(_vm_stops)"
 
 rm -f "$_vm_dir/calls"
 printf 'K=v\n' >"$_vm_dir/home/devel/proj/.secret"
