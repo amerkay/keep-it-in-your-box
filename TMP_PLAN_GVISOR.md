@@ -1,6 +1,6 @@
 # TMP plan: Lima + gVisor on both OSes, mounts instead of sync (delete when done)
 
-Replaces the VM sync (`PLAN_VM_SECURITY.md`). Decided 2026-11-06 from `tmp_gvisor_probe.sh` and
+Replaces the VM sync (`PLAN_VM_SECURITY.md`). Comes after `TMP_PLAN_GO_FUSE.md`. Decided 2026-11-06 from `tmp_gvisor_probe.sh` and
 `tmp_nm_probe.sh` runs on Linux and macOS.
 
 ## Target
@@ -9,7 +9,7 @@ Replaces the VM sync (`PLAN_VM_SECURITY.md`). Decided 2026-11-06 from `tmp_gviso
 |---|---|
 | Engine | Lima VM `kib-vm` (rootful Docker inside; the host's own Docker is untouched, rootless or not) |
 | Project | `~` mounted into the VM once (virtiofs); the box binds the project through the FUSE view |
-| `node_modules` | A per-project VM volume at `<project>/node_modules`: never on the host, never through FUSE |
+| VM-local folders | `node_modules`, `.venv`, … on a VM volume (`TMP_PLAN_GO_FUSE.md` Phase 3) |
 | Agent box | `--runtime=runsc` (gVisor), mandatory |
 | Sidecars (FUSE, broker, clipboard) | runc, as today |
 | A kernel exploit needs | a gVisor bug + a VM kernel bug; then VM root sees `~` |
@@ -42,14 +42,13 @@ One route. No sync, no copies, no skip lists. Linux needs `virtiofsd` (one `sudo
 
 - [ ] VM mounts `~` writable (virtiofs) instead of the fixed set; projects outside `~` refused
 - [ ] Linux: no `virtiofsd` → print `sudo apt install virtiofsd`, refuse (9p is too slow)
-- [ ] `<cname>-nm` volume at `$PWD/node_modules`, kept like the cache volume
 - [ ] FUSE sidecar serves `$PWD` (the mount), not a volume
 
 ## Phase 3: delete
 
 - [ ] Mutagen and its install; `vm_sync_*`, `_vm_session`, `_vm_slow_hint`, sync cleanup in
       `_vm_linger_end`
-- [ ] `kib/host/vmseed.py`, `rules.py` sync configs, `VM_LOCAL`, `vm_skip`
+- [ ] `kib/host/vmseed.py`, what is left of `rules.py`/`render.py` (the sync's), `VM_LOCAL`, `vm_skip`
 - [ ] `vm_state`, `vm-rw`/`vm-ro`, the `-vm` Node cache split (all under `~` now)
 - [ ] The `vm` setting and the non-VM path (gVisor is mandatory, and only the VM has it)
 - [ ] Their tests (`tests/check/vm.sh` sync parts, `test_vmseed.py`), `tests/vm-check.sh`
