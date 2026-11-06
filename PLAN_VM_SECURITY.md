@@ -158,6 +158,9 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
 - ✅ Found doing it: the shadow is VM-writable through its hop, so the seed's `tar -x` could
       follow a planted symlink onto any host file. Seeding and re-rendering now write through
       `O_NOFOLLOW` directory fds (`kib/host/vmseed.py`), and fail closed on a link
+- ✅ Same class on `vm-rw`: VM root could swap the project's state dir, its transcripts or
+      `.state` for a link, and the close would aim canonical `projects/<slug>` at its target
+      (bound rw into the next native box). `vm_state` refuses a link both ways
 
 ### Phase 2b: found in the first Linux runs (2026-11-05)
 - ✅ Progress: Lima's boot is one line with a dot a second; its log prints only on failure

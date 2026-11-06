@@ -63,6 +63,17 @@ _vm_t_state() { # in, then out: where a project's state sits each time
     vm_state out && ls -A "$VM_RW" && echo : && ls "$KIB_STATE_ROOT/-p" "$CLAUDE_HOME/projects/-p"
     [ -L "$CLAUDE_HOME/projects/-p" ] || echo real
 }
+_vm_t_planted() { # vm-rw/<slug> swapped for a link, as VM root could
+    SLUG=-q CLAUDE_HOME="$HOME/.claude" VM_RW="$_vm_dir/vm-rw"
+    mkdir -p "$VM_RW" "$_vm_dir/elsewhere" "$CLAUDE_HOME/projects"
+    rm -rf "${VM_RW:?}/-q" && ln -s "$_vm_dir/elsewhere" "$VM_RW/-q"
+    ln -sfn "$VM_RW/-q/transcripts" "$CLAUDE_HOME/projects/-q" # canonical, as while open
+    (vm_state in) 2>/dev/null || echo "in refused"
+    vm_state out 2>/dev/null || echo "out refused"
+    [ -e "$KIB_STATE_ROOT/-q" ] || echo "not moved"
+    [ -L "$CLAUDE_HOME/projects/-q" ] || echo "canonical unlinked"
+    rm -f "$VM_RW/-q"
+}
 _vm_t_paths() { # every per-project path a VM launch names, one per line
     . "$KIB_ROOT/host/config.sh" && . "$KIB_ROOT/host/lifecycle.sh" && _KIB_ENGINE_VM=1
     kib_resolve_paths && kib_identity
@@ -119,6 +130,8 @@ esac
 _vm_out="$(_vm_run "$PATH" _vm_t_paths)"
 is "the box's files are on vm-rw; pidfiles, witness, rules and tokens on vm-ro" "6 5" \
     "$(grep -c "^rw $_vm_dir/state/vm-rw/" <<<"$_vm_out") $(grep -c "^ro $_vm_dir/state/vm-ro/" <<<"$_vm_out")"
+is "a link planted on vm-rw: never followed, in or out" \
+    "in refused out refused not moved canonical unlinked" "$(_vm_run "$PATH" _vm_t_planted | tr '\n' ' ' | sed 's/ $//')"
 _vm_out="$(_vm_run "$PATH" _vm_t_state | tr '\n' ' ')"
 is "open: session + transcripts onto vm-rw; close: back, and canonical a real dir again" \
     "session transcripts t : $_vm_dir/home/.claude/projects/-p: t.jsonl  $_vm_dir/state/-p: session real " \

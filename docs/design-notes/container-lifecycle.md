@@ -75,7 +75,9 @@ Two terminals on the **same** project must work. Claude's own `[concurrentSessio
   and fd 205 is free. A mount-set change needs a restart and is refused while any session runs.
 - **A project's state moves onto `vm-rw` while open** (`vm_state in`, under fd 200) and back
   at the last close (`vm_state out`, under fd 202, last in teardown). Canonical keeps a symlink
-  to the transcripts meanwhile. A native launch tidies what a crashed VM run left.
+  to the transcripts meanwhile. A native launch tidies what a crashed VM run left. VM root can
+  swap any `vm-rw` dir for a link, so both directions refuse one: a launch stops, teardown warns
+  and goes on, and canonical is never left aimed at the link's target.
 - **`vm-ro` holds every file the host later trusts** — pidfiles, the credential witness, the
   sync config, the clipboard bridge's `.priv`. On `vm-rw` the VM could plant a pidfile (teardown
   kills its group), a witness, or a symlink the host writes through.

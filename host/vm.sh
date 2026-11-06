@@ -289,8 +289,16 @@ vm_sync_stop() {
 
 # A project's session dir and transcripts sit on VM_RW only while it is open: `in` at launch, `out`
 # at the last exit. Canonical keeps a link, so a host claude still finds its transcripts.
+# VM root can swap any vm-rw dir for a link; the host must never write or move through one.
 vm_state() { # in | out
     local home="$KIB_STATE_ROOT/$SLUG" vm="$VM_RW/$SLUG" tr="$CLAUDE_HOME/projects/$SLUG"
+    if [ -L "$vm" ] || [ -L "$vm/transcripts" ] || [ -L "$VM_RW/.state" ]; then
+        [ ! -L "$tr" ] || rm -f "$tr"
+        warn "$vm, its transcripts or $VM_RW/.state is a symlink, which kib never makes:" \
+            "something in the VM planted it. Delete it (rm, not rm -r) and relaunch."
+        [ "$1" = out ] && return 1 # teardown must go on
+        exit 1
+    fi
     if [ "$1" = in ]; then
         [ -e "$vm" ] || mv "$home" "$vm" 2>/dev/null || mkdir -p "$vm"
         mkdir -p "$tr" 2>/dev/null || true
