@@ -25,17 +25,24 @@ cleanup() {
     docker volume rm $(docker volume ls -q --filter name=^$P) >/dev/null 2>&1
     docker network rm $P-net >/dev/null 2>&1
     vm sh -c "umount -l /mnt/$P 2>/dev/null; rm -rf /mnt/$P /var/tmp/$P-w; \
-        runsc uninstall >/dev/null 2>&1; rm -f /usr/local/bin/runsc; systemctl reload docker"
+        /opt/kib-probe-gvisor/runsc uninstall >/dev/null 2>&1; rm -rf /opt/kib-probe-gvisor; \
+        systemctl reload docker"
     rm -f "$TAR"
 }
 TAR="$(mktemp)"
 trap cleanup EXIT
 
 echo "⏳ installing gVisor in the VM…"
-vm sh -c 'set -e; a=$(uname -m); u=https://storage.googleapis.com/gvisor/releases/release/latest/$a
-    cd /tmp && curl -fsSLO "$u/runsc" && curl -fsSLO "$u/runsc.sha512" && sha512sum -c runsc.sha512
-    install -m 755 runsc /usr/local/bin/runsc && rm runsc runsc.sha512
-    runsc install && systemctl reload docker' >/dev/null || { echo "runsc install failed (above)"; exit 1; }
+# The release archive (runsc + gvisor-bin/) in its own dir: cleanup is one rm. No && chains, so
+# set -e stops at the first failure.
+vm sh -c 'set -e; u=https://storage.googleapis.com/gvisor/releases/release/latest/$(uname -m)
+    rm -rf /opt/kib-probe-gvisor; mkdir -p /opt/kib-probe-gvisor; cd /opt/kib-probe-gvisor
+    curl -fsSLO "$u/gvisor.tar.bz2"
+    curl -fsSLO "$u/gvisor.tar.bz2.sha512"
+    sha512sum -c gvisor.tar.bz2.sha512
+    tar -xjf gvisor.tar.bz2
+    ./runsc install
+    systemctl reload docker' >/dev/null || { echo "runsc install failed (above)"; exit 1; }
 sleep 2
 G=(--runtime=runsc)
 
