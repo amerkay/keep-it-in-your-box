@@ -807,11 +807,11 @@ allow "the box's ~/.cache is the project's own package-cache volume" \
 if [ -z "${KIB_HOST_KERNEL:-}" ]; then
     skip "the box runs on another kernel than the host" "native engine: no VM (KIB_HOST_KERNEL unset)"
 else
-    _kern="$(uname -r)"
+    _kern="$(cat /proc/sys/kernel/random/boot_id)"
     if [ "$_kern" != "$KIB_HOST_KERNEL" ]; then
         pass "the box runs on another kernel than the host ($_kern ≠ $KIB_HOST_KERNEL)"
     else
-        fail "the box shares the host's kernel ($_kern) in VM mode"
+        fail "the box runs on the host's kernel (boot $_kern) in VM mode"
     fi
     unset _kern
     allow "host.docker.internal resolves (the host, through the VM)" getent hosts host.docker.internal

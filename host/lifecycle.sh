@@ -350,8 +350,11 @@ start_container() {
 "
     done < <(local_dirs)
     ARGS+=(-e KIB_LOCAL_DIRS="$dirs")
-    # For security-test.sh's "Engine VM": a box in the VM must not run on this kernel.
-    ! engine_lima || ARGS+=(-e KIB_HOST_KERNEL="$(uname -r)")
+    # security-test.sh: a box in the VM must not run on this kernel. The VM's Ubuntu can share its
+    # release with the host's, so Linux names the boot; macOS has no boot_id and differs anyway.
+    local kern
+    kern="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || uname -r)"
+    ! engine_lima || ARGS+=(-e KIB_HOST_KERNEL="$kern")
 
     local git_name git_email
     git_name="$(git config --global user.name 2>/dev/null || true)"
