@@ -164,7 +164,7 @@ fi
 
 # Unpack in place and an interrupted fetch leaves a half-tree that resolves onto PATH.
 # shellcheck disable=SC2016  # literal source patterns
-if grep -q 'mktemp -d' "$_nv_fs" && grep -q '^mv "\$TREE"' "$_nv_fs"; then
+if grep -q 'mktemp -d' "$_nv_fs" && grep -q '^mv "\$TMP/tree"' "$_nv_fs"; then
     pass "the version is renamed in, never unpacked in place"
 else
     fail "node-fetch.sh does not install atomically" \
