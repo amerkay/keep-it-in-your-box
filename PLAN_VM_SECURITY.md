@@ -142,7 +142,8 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
       can't un-ignore a guarded file)
 - ✅ Package caches outlive a close: one volume per project (`<cname>-cache`, never shared: a box
       could plant a package another project installs) at the box's `~/.cache`, with
-      `XDG_CACHE_HOME`, `pnpm_config_store_dir` (pnpm 12 ignores `npm_config_`; env beats a repo's
+      `XDG_CACHE_HOME`, `pnpm_config_store_dir` + `npm_config_store_dir` (pnpm 12 reads only the
+      first, a repo-pinned pnpm 9 only the second; env beats a repo's
       `storeDir`) and `npm_config_cache`. The entrypoint no longer `chown -R`s it
 - ✅ Last session: `mutagen sync flush`; the sync runs on, so a reopen carries only the
       difference (2026-11-06: a full copy was 30–50 s a launch). The VM's stop terminates every

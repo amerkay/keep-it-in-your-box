@@ -334,7 +334,9 @@ start_container() {
     # package another project's box installs. XDG tools (uv, pip, yarn, …) land here unasked.
     local c=/home/hostuser/.cache
     ARGS+=(-v "$PKG_CACHE:$c" -e XDG_CACHE_HOME="$c")
-    ARGS+=(-e pnpm_config_store_dir="$c/pnpm-store" -e npm_config_cache="$c/npm")
+    # Both store names: pnpm ≤ 11 reads npm_config_, 12 reads pnpm_config_ (a repo pins either).
+    ARGS+=(-e pnpm_config_store_dir="$c/pnpm-store" -e npm_config_store_dir="$c/pnpm-store")
+    ARGS+=(-e npm_config_cache="$c/npm")
     # For security-test.sh's "Engine VM": a box in the VM must not run on this kernel.
     ! engine_lima || ARGS+=(-e KIB_HOST_KERNEL="$(uname -r)")
 
