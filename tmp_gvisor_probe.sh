@@ -4,7 +4,7 @@
 # volume copy. macOS: a throwaway VM with ~ mounted (design C), on a copy under ~. gVisor and
 # everything else is removed after. Usage: tmp_gvisor_probe.sh <project>
 set -u
-PROJ="$(cd "${1:?usage: $0 <project dir>}" && pwd)"
+PROJ="$(cd "${1:?usage: $0 <project dir>}" && pwd)" || exit 1
 KR="$(cd "$(dirname "$0")" && pwd)" # kib's checkout: the VM mounts it at this same path
 export PATH="$PATH:$HOME/.local/bin:$HOME/.local/docker" DOCKER_CONFIG="$HOME/.local/docker"
 IMG=keep-it-in-your-box P=kib-probe U="$(id -u):$(id -g)" GV=/opt/kib-probe-gvisor
