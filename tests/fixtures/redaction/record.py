@@ -225,7 +225,7 @@ _RAW: dict[str, str | bytes] = {
     "yaml-int-keys": "1: s3cr3t\n2: s3cr3t\n",
     "yaml-null-value": "a:\nb: ~\n",
     "pem": "-----BEGIN RSA PRIVATE KEY-----\nMIIs3cr3t\n-----END RSA PRIVATE KEY-----\n",
-    "oversize": "K=v\n" * (render.RENDER_MAX // 4 + 1),
+    "oversize": "K=" + "v" * render.RENDER_MAX + "\n",
     "at-limit": "K=" + "s" * (render.RENDER_MAX - 3) + "\n",
     "undecodable": b"\xff\xfeA=s3cr3t\n",
 }
