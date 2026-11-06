@@ -41,54 +41,48 @@ Comes before `TMP_PLAN_GVISOR.md`.
   - A `@close` refusal (a short mirror) may not reach `close()` on a real mount; Go's mount
     tests check the tree after instead
 
-## Phase 1: the Go daemon (`guest/fuse/`)
+## Phase 1: the Go daemon (`guest/fuse/`) — ✅ code done, awaiting your test
 
-- [ ] go-fuse loopback plus kib's overrides: classify (redact / protect / pass), stubs 0444/0555,
-      renders, write refusals, the byte-identical mirror rule, the git config content check,
-      `link()` and `rename()` checks on both ends
-- [ ] `default_permissions`, `allow_other`, 1 s attr/entry timeouts, keep the page cache only
-      while mtime and size are unchanged (today's `auto_cache`)
-- [ ] Rules: memoise the rule verdict only (the existence check stays live); SIGHUP applies a
-      stricter rule set live
-- [ ] Renderers in today's order (dotenv → JSON → YAML), each vouching for the whole file; a YAML
-      alias found by the parser → stub; the cheap bails kept off the hot path
-- [ ] Log the open-file limit at startup (Go raises it itself)
-- [ ] Subcommands for the host: `optouts`, `tightens`, `match` (paths on stdin)
-- [ ] `go test`: fixtures and unit tests run in the Dockerfile's Go stage (a failing test fails
-      `kib build`); real-mount tests ported from `test_fuse.py` run in CI (needs `/dev/fuse`)
-- [ ] Image: `/usr/local/bin/fuse` is the Go binary; drop `python3-fusepy` and `libfuse2t64`
+- [x] `view.go`: classify (redact / protect / pass), stubs 0444/0555, renders, write refusals,
+      the byte-identical mirror rule (refused at close, removed if short), the git config
+      check on rename, `link()` source and target, `rename()` both ends, exchange refused
+- [x] `default_permissions`, `allow_other`, 1 s timeouts, page cache kept only while mtime+size
+      and the rules are unchanged; SIGHUP reloads and drops every cached page and name
+- [x] Inode numbers per path (as libfuse's were); opens via `openat2`, no symlink on the way
+- [x] `rules.go` (case folded), `render.go`, `gitini.go`; subcommands `optouts`, `tightens`
+- [x] `go test`: fixtures (rules, renders, git config) in the Dockerfile's Go stage; `fs.json`
+      on a real mount in CI (`KIB_FUSE_TESTS=1`) and `tmp_go_mount_test.sh` in kib-vm
+- [x] Image: `/usr/local/bin/fuse` is the Go binary; `python3-fusepy`, `libfuse2t64` dropped
 
-## Phase 2: the host uses Go
+## Phase 2: the host uses Go — ✅ code done, awaiting your test
 
-- [ ] `host/redaction.sh` (opt-outs, tightens), `host/rules-watch.sh`, `kib/host/gitaudit.py`
-      (tracked files a rule hides) call the Go binary: `docker exec` into the redaction
-      container, else a `docker run --rm`
-- [ ] Delete `fuse.py`, `test_fuse.py`, and of `rules.py`/`render.py` all but what the sync still
-      needs (the rest goes with the sync, `TMP_PLAN_GVISOR.md` Phase 3)
-- [ ] `security-test.sh` passes in a sandbox, Linux and Mac
-- [ ] Docs: `redaction-config-guard.md` (Go, and which Python lessons still apply), the
-      `CLAUDE.md` dead ends (passthrough and writeback measured: no)
+- [x] `host/redaction.sh` + `host/rules-watch.sh`: opt-outs and tightens via `_rules` (the
+      sidecar's binary, `docker exec`; a throwaway container for the cold-start opt-out list)
+- [x] Deleted `kib/guest/fuse.py`, `test_fuse.py`, `record.py`, `rules.py`'s opt-out/tightens;
+      `tests/shared/test_redaction_fixtures.py` holds the remaining Python copies to the spec
+- [ ] `security-test.sh` passes in a sandbox, Linux and Mac (yours to run)
+- [x] Docs: `redaction-config-guard.md`, `CLAUDE.md`, `CONVENTIONS.md`, `architecture.md`
+- Moved to `TMP_PLAN_GVISOR.md` Phase 3: `gitaudit`'s tracked-file match (still `rules.py`,
+  which the sync needs until then)
 
-## Phase 3: VM-local folders off FUSE
+## Phase 3: VM-local folders off FUSE — ✅ code done, awaiting your test
 
-- [ ] At container create, find `node_modules`, `.pnpm-store`, `.next`, `.nuxt`, `.turbo`,
-      `target`, `.terraform`, `.venv`, `venv` at any depth (stop at a match, skip `.git`)
-- [ ] One `<cname>-local` volume, kept like the cache volume; one `volume-subpath` mount per
-      folder found
-- [ ] Caches by env into `~/.cache`: `PYTHONPYCACHEPREFIX`, `MYPY_CACHE_DIR`, `RUFF_CACHE_DIR`,
+- [x] `local_dirs` (host/redaction.sh): the names at any depth (depth ≤ 6, not inside `.git` or a
+      match), kept only where the redacted view has the parent; plus a root `node_modules` /
+      `.venv` that `package.json` / `pyproject.toml` / `requirements.txt` implies
+- [x] One volume per folder, `<cname>-local-<hash8>`, kept like the cache; the entrypoint
+      chowns each root (`KIB_LOCAL_DIRS`). Every engine, VM or not
+- [x] Caches by env into `~/.cache`: `PYTHONPYCACHEPREFIX`, `MYPY_CACHE_DIR`, `RUFF_CACHE_DIR`,
       `PYTEST_ADDOPTS=-o cache_dir=…`
-- [ ] `etc-CLAUDE.md`: these folders are box-only; one made mid-session is on FUSE until the next
-      container
-
-## Check early
-
-- The VM's Docker supports `volume-subpath` (Docker 26+), with runc now and gVisor later
-- Go's YAML library on keys PyYAML reads differently (`on`, `yes`): a key may print differently,
-  but no value may ever appear
+- [x] `etc-CLAUDE.md`, `container-lifecycle.md`
 
 ## Accepted costs
 
 - The VM-local folders are box-only; the host keeps its own (`pnpm install` with nvm, `uv sync`)
-- A VM-local folder made mid-session goes through FUSE until the next container
-- The host's rule checks need the VM (always up while kib runs), about 0.3 s each
+- A VM-local folder made mid-session goes through FUSE until the next container; the first
+  container after this change starts each with an empty volume (one reinstall)
+- The host's rule checks `docker exec` into the sidecar (~0.1 s), or start a container for the
+  cold-start opt-out list
 - A redacted file may read in a slightly different format than today
+- Rules match case-insensitively: on Linux `README.md` also covers `readme.md`
+- `kib build` pulls `golang:1.27-trixie` once; FUSE view edits need a rebuild now

@@ -52,6 +52,8 @@ One route. No sync, no copies, no skip lists. Linux needs `virtiofsd` (one `sudo
 - [ ] `vm_state`, `vm-rw`/`vm-ro`, the `-vm` Node cache split (all under `~` now)
 - [ ] The `vm` setting and the non-VM path (gVisor is mandatory, and only the VM has it)
 - [ ] Their tests (`tests/check/vm.sh` sync parts, `test_vmseed.py`), `tests/vm-check.sh`
+- [ ] `gitaudit`'s tracked-file match → a `fuse match` subcommand; then delete `rules.py`,
+      `render.py`, `test_rules.py` and the rules/render parts of `test_redaction_fixtures.py`
 - [ ] Keep: Lima install pins, linger, `engine_ns_exec` over `limactl shell`, note replay,
       the package cache volume
 

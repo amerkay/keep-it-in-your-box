@@ -4,13 +4,11 @@
 //	fuse --src DIR --mnt DIR --patterns-file F --guard-file F [--uid N --gid N]
 //	fuse optouts GUARD RULES       project '!' rules that un-redact, one per line
 //	fuse tightens OLD NEW          exit 0 if NEW can only withhold more, else 5
-//	fuse match RULES               NUL-separated paths on stdin; prints those a rule hides
 //
 // A file argument of "-" reads stdin.
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"io"
@@ -59,9 +57,9 @@ func main() {
 }
 
 func subcommand(cmd string, args []string) int {
-	need := map[string]int{"optouts": 2, "tightens": 2, "match": 1}[cmd]
+	need := map[string]int{"optouts": 2, "tightens": 2}[cmd]
 	if need == 0 || len(args) != need {
-		die(exitUsage, "usage: fuse optouts GUARD RULES | tightens OLD NEW | match RULES")
+		die(exitUsage, "usage: fuse optouts GUARD RULES | tightens OLD NEW")
 	}
 	switch cmd {
 	case "optouts":
@@ -72,28 +70,6 @@ func subcommand(cmd string, args []string) int {
 		if !Tightens(load(args[0], false), load(args[1], false)) {
 			return exitRefused
 		}
-	case "match":
-		rules := load(args[0], false)
-		out := bufio.NewWriter(os.Stdout)
-		in := bufio.NewScanner(os.Stdin)
-		in.Buffer(nil, 1<<20)
-		in.Split(func(data []byte, eof bool) (int, []byte, error) {
-			for i, b := range data {
-				if b == 0 {
-					return i + 1, data[:i], nil
-				}
-			}
-			if eof && len(data) > 0 {
-				return len(data), data, nil
-			}
-			return 0, nil, nil
-		})
-		for in.Scan() {
-			if p := in.Text(); p != "" && Verdict(rules, p) != "" {
-				out.WriteString(p + "\x00")
-			}
-		}
-		out.Flush()
 	}
 	return 0
 }
