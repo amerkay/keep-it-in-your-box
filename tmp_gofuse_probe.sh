@@ -39,9 +39,9 @@ docker run --rm -v $P-bin:/out golang:latest sh -c 'git clone -q --depth 1 \
 # The whole repo, as a project may be a subfolder of one (pnpm runs in the subfolder).
 TOP="$(git -C "$D" rev-parse --show-toplevel)" || exit 1
 (cd "$TOP" && {
-    echo .git
-    git ls-files
-} | tar -cf - -T - 2>/dev/null) | docker run --rm -i -v $P-src:/w -v $P-cache:/c \
+    printf '.git\0'
+    git ls-files -z
+} | tar --null -cf - -T - 2>/dev/null) | docker run --rm -i -v $P-src:/w -v $P-cache:/c \
     --entrypoint sh "$IMG" -c "tar -xf - -C /w && chown -R $U /w /c"
 
 FUSE=(--cap-drop=ALL --cap-add=SYS_ADMIN --device /dev/fuse --security-opt apparmor=unconfined
@@ -53,8 +53,8 @@ ENV=(-v "$P-src:/src" -v "$P-cache:/c" -v "$P-bin:/b" -e XDG_CACHE_HOME=/c -e pn
 WAIT='for i in $(seq 50); do grep -q " /tmp/m fuse" /proc/mounts && break; sleep 0.1; done
     grep -q " /tmp/m fuse" /proc/mounts || { tail -n 3 /tmp/d >&2; exit 1; }; cd /tmp/m'
 # Runs $W in the view, as the user; prints its seconds (a failure's tail goes to stderr).
-TIMED='export HOME=/tmp; s=$(date +%s.%N); sh -c "$W" >/tmp/log 2>&1 || tail -n 4 /tmp/log >&2
-    awk -v s=$s -v e=$(date +%s.%N) "BEGIN { printf \"%.1f\", e - s }"'
+TIMED='export HOME=/tmp; s=$(date +%s.%N); sh -ec "$W" >/tmp/log 2>&1 || tail -n 4 /tmp/log >&2
+    awk -v s=$s -v e=$(date +%s.%N) "BEGIN { printf \"%.2f\", e - s }"'
 NAMES=("no FUSE" "kib Python" "Go" "Go as root")
 run() { # <column index> <sh command>: seconds
     local -a as=(--user "$U")
@@ -66,7 +66,9 @@ run() { # <column index> <sh command>: seconds
         2) pre="mkdir /tmp/m && /b/loopback -q /tmp/m /src 2>/tmp/d & $WAIT" ;;
         3)
             pre="mkdir /tmp/m && /b/loopback -q -allow-other /tmp/m /src 2>/tmp/d & $WAIT"
-            as=(--user 0:0 --cap-add SETUID --cap-add SETGID)
+            # As a real root daemon would: new files chowned to the caller, the user's folders writable.
+            as=(--user 0:0 --cap-add SETUID --cap-add SETGID --cap-add CHOWN --cap-add DAC_OVERRIDE
+                --cap-add FOWNER)
             run="exec gosu $U $run"
             ;;
     esac
@@ -79,7 +81,7 @@ bench() { # <label> <sh command>
     for i in 0 1 2 3; do
         t="$(run $i "$2")" || t=fail
         base="${base:-$t}"
-        line="$line $(printf '%s %6ss' "${NAMES[$i]}" "$t")"
+        line="$line $(printf '%s %7ss' "${NAMES[$i]}" "$t")"
         [ $i = 0 ] || [ "$t" = fail ] || line="$line$(awk -v a="$base" -v b="$t" 'BEGIN { printf " (×%.1f)", (a > 0 ? b / a : 0) }')"
     done
     echo "$line"
