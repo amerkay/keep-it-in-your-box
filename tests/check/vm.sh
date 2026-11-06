@@ -47,8 +47,14 @@ _vm_t_sync() { # [stop] — the sync of a project named "proj", with the state a
     KIB_GUARD_FILE_HOST="$KIB_ROOT/guest/policy/global.kibignore"
     printf '.secret\n' >"$PATTERNS_STATE"
     exec 200>"$_vm_dir/l200" 205>"$_vm_dir/l205" # held by a real launch
-    if [ -n "${1:-}" ]; then vm_sync_stop; else vm_sync_start; fi
+    case "${1:-}" in
+        stop) vm_sync_stop ;;
+        restage) vm_sync_restage ;;
+        *) vm_sync_start ;;
+    esac
 }
+# shellcheck disable=SC2317 # the stub is called by vm_sync_restage
+_vm_t_restage_broken() { kib_py() { return 1; } && _vm_t_sync restage; }
 _vm_t_state() { # in, then out: where a project's state sits each time
     SLUG=-p CLAUDE_HOME="$HOME/.claude" VM_RW="$_vm_dir/vm-rw"
     mkdir -p "$KIB_STATE_ROOT/-p/session" "$CLAUDE_HOME/projects/-p" "$VM_RW"
@@ -205,6 +211,19 @@ case "$(DK_START=1 MG_LIST=1 MG_FLUSH_HOST=1 _vm_run "$_vm_dir/bin:$PATH" _vm_t_
     *"did not sync back"*) fail "a cold start with nothing left over warns of lost edits" ;;
     *) pass "a cold start with nothing left over cleans up silently" ;;
 esac
+rm -f "$_vm_dir/calls"
+_vm_run "$_vm_dir/bin:$PATH" _vm_t_sync restage >/dev/null
+case "$(grep -o "sync terminate kib-proj-1-host\|sync create --name kib-proj-1-host" "$_vm_dir/calls" | tr '\n' ,)" in
+    "sync terminate kib-proj-1-host,sync create --name kib-proj-1-host,")
+        pass "a reloaded .kibignore recreates the host hop on the new ignores"
+        ;;
+    *) fail "the host hop was not recreated on a reload" "$(cat "$_vm_dir/calls")" ;;
+esac
+: >"$_vm_dir/calls"
+_vm_run "$_vm_dir/bin:$PATH" _vm_t_restage_broken >/dev/null
+is "a restage whose config cannot be built leaves the running sync alone" "0" \
+    "$(grep -c "sync terminate" "$_vm_dir/calls" 2>/dev/null || true)"
+
 _vm_t_mac() { KIB_OS=darwin && KIB_VM='' && vm_use claude && echo returned; }
 case "$(_vm_run /usr/bin:/bin _vm_t_mac)" in
     *"runs every box in a Lima VM"*) pass "macOS without Lima: refused, never a non-VM engine" ;;

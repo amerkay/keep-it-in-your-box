@@ -223,8 +223,8 @@ vm_sync_start() {
     # ponytail: seeded once per container; a host edit to one shows at the next cold start.
     {
         (umask 077 && mkdir -p "$shadow") \
-            && kib_py host.vmseed seed "$KIB_GUARD_FILE_HOST" "$PATTERNS_STATE" "$PWD" "$KIB_CFG_VM_SKIP" \
-            | tar -xf - -C "$shadow"
+            && kib_py host.vmseed seed "$KIB_GUARD_FILE_HOST" "$PATTERNS_STATE" "$PWD" "$shadow" \
+                "$KIB_CFG_VM_SKIP"
     } || die "could not stage the redacted and protected files' stand-ins in $shadow."
     echo "🔄 kib: syncing $PWD into the VM…" >&2
     local t0=$SECONDS
@@ -234,6 +234,19 @@ vm_sync_start() {
     } || die "could not sync $PWD into the VM." "$(_mutagen sync list "$CNAME-host" "$CNAME" 2>&1)"
     [ $((SECONDS - t0)) -lt 30 ] || note "ℹ️  kib: the first sync took $((SECONDS - t0)) s. To skip folders the box can rebuild:
    vm_skip = dist, .yarn   in $KIB_CONFIG"
+}
+
+# A reloaded .kibignore re-filters the host hop: recreate it on the new ignores, and swap every
+# file it now redacts in the shadow for its render. The VM hop carries both into the volume.
+vm_sync_restage() {
+    local cfg="$PATTERNS_STATE.sync.yml" shadow="$VM_SHADOW/$CNAME"
+    # Built first: until the new session exists, no box edit reaches the project.
+    kib_py shared.rules sync-config "$KIB_GUARD_FILE_HOST" "$PATTERNS_STATE" "$KIB_CFG_VM_SKIP" \
+        >"$cfg.new" || return 1
+    _mutagen sync terminate "$CNAME-host" >/dev/null 2>&1 || true
+    kib_py host.vmseed redact "$KIB_GUARD_FILE_HOST" "$PATTERNS_STATE" "$PWD" "$shadow" \
+        "$KIB_CFG_VM_SKIP" || warn "could not re-render the newly redacted files in $shadow."
+    mv "$cfg.new" "$cfg" && _vm_session "$CNAME-host" "$cfg" "$PWD" "$shadow"
 }
 
 _vm_session() { # <name> <config> <alpha> <beta> — create, then wait for the first sync

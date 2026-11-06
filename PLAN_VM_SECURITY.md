@@ -151,8 +151,13 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
       so nothing seeded flows back. The renderers moved to `kib/shared/render.py` for this
 - ⬜ The seed is taken once per container: a host edit to a redacted or protected file shows in
       the box at the next cold start. A box edit to `.git/config` stays in the VM
-- ⬜ A `.kibignore` rule added mid-session redacts live (FUSE) but the file stays in the volume
-      until the project closes. Fix: on a tightening, delete newly ignored paths from the volume
+- ✅ A `.kibignore` reload (a tightening, or a loosening the user confirms) recreates the host
+      hop on the new ignores and swaps each newly redacted file in the shadow for its render; the
+      VM hop carries both into the volume (`vm_sync_restage`). The new config is built before the
+      old session stops, so a failure leaves the sync running
+- ✅ Found doing it: the shadow is VM-writable through its hop, so the seed's `tar -x` could
+      follow a planted symlink onto any host file. Seeding and re-rendering now write through
+      `O_NOFOLLOW` directory fds (`kib/host/vmseed.py`), and fail closed on a link
 
 ### Phase 2b: found in the first Linux runs (2026-11-05)
 - ✅ Progress: Lima's boot is one line with a dot a second; its log prints only on failure

@@ -106,8 +106,12 @@ _reload_rules() { # <staged> <why>
         rm -f "$staged.prev"
     fi
     exec 204>&-
-    [ "$rc" = 0 ] && echo "🛡️  $KIB_RULE_FILE reloaded into the live redaction view — $2." >&2
-    return "$rc"
+    [ "$rc" = 0 ] || return 1
+    echo "🛡️  $KIB_RULE_FILE reloaded into the live redaction view — $2." >&2
+    # In the VM the sync must drop the newly redacted files too, or the volume keeps their values.
+    ! engine_lima || vm_sync_restage || warn "the VM sync could not take the new $KIB_RULE_FILE." \
+        "Newly redacted files stay in the VM until this project's last session closes."
+    return 0
 }
 
 # The one way the LOOSENING direction reaches a running view. `[ -t 0 ]`: a headless launch has
@@ -228,7 +232,9 @@ prepare_redaction() {
     # pidfile is in $STATE_DIR, NOT bind-mounted into the box: teardown kills whatever group it
     # names. The path stays a LITERAL — tests/check/wiring.sh finds exec'd scripts by grepping
     # this call shape, and a variable hides them from it.
-    detach_pgrp "$KIB_ROOT/host/rules-watch.sh" "$PATTERNS_STATE" "$FUSE_CNAME" 200>&- 201>&- 205>&-
+    local vm=""
+    ! engine_lima || vm=vm
+    detach_pgrp "$KIB_ROOT/host/rules-watch.sh" "$PATTERNS_STATE" "$FUSE_CNAME" $vm 200>&- 201>&- 205>&-
     echo $! >"$PATTERNS_STATE.watch.pid"
     disown 2>/dev/null || true
 }

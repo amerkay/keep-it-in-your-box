@@ -6,8 +6,9 @@
 # would let the box un-redact a file by writing its own `!.env`; those wait for the next attach,
 # which prompts. (docs/design-notes/redaction-config-guard.md)
 #
-# Usage: rules-watch.sh <patterns-state> <fuse-container>, cwd = the PROJECT — inherited through
-# detach_pgrp, and where _reload_rules reads the rule file from.
+# Usage: rules-watch.sh <patterns-state> <fuse-container> [vm], cwd = the PROJECT — inherited
+# through detach_pgrp, and where _reload_rules reads the rule file from. `vm`: kib's VM, where a
+# reload also re-filters the sync (vm_sync_restage).
 
 PATTERNS_STATE="${1:?Usage: rules-watch.sh <patterns-state> <fuse-container>, cwd = project}"
 FUSE_CNAME="${2:?Usage: rules-watch.sh <patterns-state> <fuse-container>, cwd = project}"
@@ -26,6 +27,11 @@ KIB_ROOT="$(cd "$HOST_DIR/.." && pwd)" || exit 1
 . "$HOST_DIR/portable.sh" || exit 1
 # shellcheck source=SCRIPTDIR/redaction.sh
 . "$HOST_DIR/redaction.sh" || exit 1
+if [ "${3:-}" = vm ]; then
+    # shellcheck source=SCRIPTDIR/vm.sh
+    . "$HOST_DIR/vm.sh" || exit 1
+    _KIB_ENGINE_VM=1 CNAME="${FUSE_CNAME%-fuse}"
+fi
 
 RULE_PATH="$PWD/$KIB_RULE_FILE"
 

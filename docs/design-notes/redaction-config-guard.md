@@ -61,7 +61,13 @@ Build dirs, caches and the user's `vm_skip` names come first, so a later guard r
 - **Guarded files are seeded, one way** (`kib/host/vmseed.py`): redacted ones as their render,
   protected ones as real bytes, because the box must read them. The sync ignores them, so a box
   edit to one never flows back. Seeded once per container: a host edit shows at the next cold
-  start.
+  start. **Never through a path:** the shadow is VM-writable (its hop syncs back), so a planted
+  symlink would carry a `tar -x` or `open()` onto any host file; `vmseed` writes through
+  `O_NOFOLLOW` directory fds and fails closed.
+- **A reloaded `.kibignore` re-filters the sync** (`vm_sync_restage`, from `_reload_rules`, so
+  the watcher and an attach share it): the host hop is recreated on the new ignores, and every
+  newly redacted file in the shadow becomes its render, which the VM hop carries into the volume.
+  Without it the FUSE view redacted the file while the volume kept its value.
 - **Mutagen config goes as a `-c` file**: `--ignore` splits on commas. Proven against a real
   Mutagen on every rule shape (`test_real_mutagen_syncs_exactly_what_verdict_passes`).
 
