@@ -11,7 +11,7 @@ ends.
 ```
 bin/kib     host entry: verb dispatch and nothing else
 host/       runs as YOU, on the host. One file per subsystem, loaded by host/_load.sh
-guest/      crosses into a container: baked entrypoints, 3-line shims, policy files
+guest/      crosses into a container: baked entrypoints, 3-line shims, the Go FUSE view, policy
 kib/        the one importable package — shared/ (both sides) host/ guest/ broker/
 tools/      build-image.sh
 tests/      lib.sh + check.sh runner + check/*.sh sections + the pytest suites
@@ -34,8 +34,8 @@ A file's directory says which side of the trust boundary it is on. `kib/shared/`
 - **Edits take effect on the next *container*, not the next terminal.** One long-lived container
   serves every terminal on the project; it is recreated only after the *last* session exits. The
   bind-mounted `kib/` package and `guest/bin/resolv-sync.sh` keep running their old code until
-  then, and `guest/entrypoint/*` plus the three `guest/bin/` shims are **baked into the image** —
-  they need a rebuild, not a relaunch. Before believing a "no change" result, check the
+  then, and `guest/entrypoint/*`, the two `guest/bin/` shims and the FUSE view (`guest/fuse`, Go)
+  are **baked into the image** — they need a rebuild, not a relaunch. Before believing a "no change" result, check the
   container's birth time: `ps -o lstart= -p 1` inside it.
 - **Editing a host script while a session is LIVE corrupts that running session.** `bash` reads a
   script incrementally by byte offset, so shortening `bin/kib` or a `host/*.sh` under a running
@@ -175,16 +175,16 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   translating per field instead was tried and thrown away. (`redaction-config-guard.md`)
 - **No `tput reset`** (regression-guarded); keep `|| true` on `tput cols`/`lines` and `read`.
   (`terminal-and-security.md`)
-- **FUSE passthrough I/O is `os.pread`/`os.pwrite`, never `lseek`+`read`** — the shared fd offset
-  truncates reads at a chunk boundary, and it surfaces as unexplained lint/test flakiness rather
-  than an I/O error. Regression-guarded. (`redaction-config-guard.md`)
-- **The FUSE view's speed rests on three things — don't undo one:** `auto_cache` (never
-  `kernel_cache`: the host edits this tree), the memoised `_verdict` (the RULE verdict only —
-  `_classify`'s `lexists` must stay live), and a `flush()` that does not `fsync`. Regression-guarded.
-  `FUSE_PASSTHROUGH` is not the next step: needs kernel 6.9+ and libfuse 3.17 low-level, and fusepy
-  is ctypes over libfuse **2**. (`redaction-config-guard.md`)
-- **The sidecar raises its own `RLIMIT_NOFILE` at startup — don't delete it, and don't add
-  `--ulimit` alongside it.** Its fd table is the container-global ceiling on concurrently-open
+- **The FUSE view (`guest/fuse`, Go) is specced by `tests/fixtures/redaction`** — change a
+  behaviour there first; `go test` runs in `kib build` (no Go in the image; `./dev.sh` runs it
+  where `go` is on PATH). I/O is `pread`/`pwrite` (a shared fd offset truncates reads), the page
+  cache is kept only while mtime+size hold (never `kernel_cache`: the host edits this tree), only
+  the RULE verdict is memoised (existence stays live), and `Flush` never fsyncs.
+  Regression-guarded. (`redaction-config-guard.md`)
+- **No FUSE passthrough, no writeback cache — both measured.** Passthrough needs a root daemon and
+  speeds reads only; writeback never showed the box a host edit that changed a file's size.
+- **The sidecar's `RLIMIT_NOFILE` soft limit is raised at startup (the Go runtime does it) — don't
+  add `--ulimit` alongside it.** Its fd table is the container-global ceiling on concurrently-open
   project files, and containerd's 1024 soft default killed parallel JS builds with `EMFILE` naming
   project paths. In-box `ulimit -n` hides this — Node raises its own soft limit, so every shell
   reads 524288; `/proc/1/limits` is the honest one. (`redaction-config-guard.md`)

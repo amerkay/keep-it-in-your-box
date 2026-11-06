@@ -168,7 +168,7 @@ is "no unredacted copy of the project in this container" "absent" \
 
 # …and no FUSE server beside the agent to pivot into. Asserted STRUCTURALLY, on the device: a
 # FUSE server cannot run without /dev/fuse, so its absence proves the property outright. A
-# `pgrep -f kib.guest.fuse` cannot — it matches the command line of any process that merely
+# `pgrep -f fuse` cannot — it matches the command line of any process that merely
 # mentions the string, this suite's own shell included, and reads as a leak that is not there.
 is "no /dev/fuse, so no FUSE server can run in this container" "absent" \
     "$([ -e /dev/fuse ] && echo present || echo absent)"
