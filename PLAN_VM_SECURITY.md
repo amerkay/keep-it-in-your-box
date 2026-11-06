@@ -166,9 +166,12 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
       empty after close
 
 ### Phase 4: prompts that survive Claude's full-screen UI
-- ⬜ Every decision is a blocking prompt before Claude starts: install Lima `[Y/n/never]`,
-      install Mutagen `[Y/n]`, narrow Docker Desktop sharing `[Y/n]`
-- ⬜ Repeat key notices after exit: VM off and why, teardown findings
+- ✅ Every decision is a blocking prompt before Claude starts: install Lima `[Y/n/never]`
+      (pinned v2.2.1 into `~/.local`, `never` writes `vm = off`; Linux offers it only with QEMU
+      and KVM, which need root), install Mutagen `[Y/n]`. Docker Desktop narrowing: Phase 5
+- ✅ Every launch `warn`/`note` (VM off and why, `.kibignore` opt-outs, inline MCP secrets) is
+      printed again after Claude exits. Teardown findings already print after it
+- ✅ Verified on Linux 2026-11-06: the Lima prompt (y, n, never) and the replay after exit
 
 ### Phase 5: macOS Docker Desktop fallback
 - ⬜ Detect `/Users` (or any parent of a kib path) in the sharing list → refuse
