@@ -29,6 +29,12 @@ One code path: only where `dockerd` lives differs. No sync, no copies, no skip l
   : Linux 112 s → 227 s (×2.0), Mac 109 s → 243 s (×2.2).** The 112 s is mostly the Python FUSE view, which every
   design pays
 
+**Blocker for native Linux (2026-11-06): the user's Docker is rootless, and gVisor does not
+support rootless Docker** (google/gvisor#12575: the workarounds are `--TESTONLY-unsafe-nonroot`
+or `--network=host`, both unacceptable). Candidate: Lima on Linux too, as on macOS (rootful
+Docker + gVisor inside the VM, `~` mounted; one route, no sudo). Open: `~` mount speed on
+Linux (virtiofs needs `virtiofsd`; 9p was slow). Probe: `tmp_gvisor_probe.sh --mount`.
+
 ## Phase 0: last probes (user)
 
 - [x] `pnpm install` timing (Linux): ×2.0
