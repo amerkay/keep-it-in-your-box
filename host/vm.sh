@@ -248,6 +248,8 @@ vm_sync_restage() {
     # Built first: until the new session exists, no box edit reaches the project.
     kib_py shared.rules sync-config "$KIB_GUARD_FILE_HOST" "$PATTERNS_STATE" "$KIB_CFG_VM_SKIP" \
         >"$cfg.new" || return 1
+    # Flushed first: a fresh session lets the host win every difference it finds.
+    _mutagen sync flush "$CNAME-host" >/dev/null 2>&1 || true
     _mutagen sync terminate "$CNAME-host" >/dev/null 2>&1 || true
     kib_py host.vmseed redact "$KIB_GUARD_FILE_HOST" "$PATTERNS_STATE" "$PWD" "$shadow" \
         "$KIB_CFG_VM_SKIP" || warn "could not re-render the newly redacted files in $shadow."

@@ -232,8 +232,8 @@ case "$(DK_START=1 MG_LIST=1 MG_FLUSH_HOST=1 _vm_run "$_vm_dir/bin:$PATH" _vm_t_
 esac
 rm -f "$_vm_dir/calls"
 _vm_run "$_vm_dir/bin:$PATH" _vm_t_sync restage >/dev/null
-case "$(grep -o "sync terminate kib-proj-1-host\|sync create --name kib-proj-1-host" "$_vm_dir/calls" | tr '\n' ,)" in
-    "sync terminate kib-proj-1-host,sync create --name kib-proj-1-host,")
+case "$(grep -o "sync flush kib-proj-1-host\|sync terminate kib-proj-1-host\|sync create --name kib-proj-1-host" "$_vm_dir/calls" | tr '\n' ,)" in
+    "sync flush kib-proj-1-host,sync terminate kib-proj-1-host,sync create --name kib-proj-1-host,"*)
         pass "a reloaded .kibignore recreates the host hop on the new ignores"
         ;;
     *) fail "the host hop was not recreated on a reload" "$(cat "$_vm_dir/calls")" ;;
