@@ -1,89 +1,75 @@
-# TMP plan: gVisor for the box, mounts instead of sync (delete when done)
+# TMP plan: Lima + gVisor on both OSes, mounts instead of sync (delete when done)
 
-Replaces the VM sync (`PLAN_VM_SECURITY.md`). Decided 2026-11-06 after `tmp_gvisor_probe.sh`.
+Replaces the VM sync (`PLAN_VM_SECURITY.md`). Decided 2026-11-06 from `tmp_gvisor_probe.sh` and
+`tmp_nm_probe.sh` runs on Linux and macOS.
 
 ## Target
 
-| | Linux | macOS |
-|---|---|---|
-| Engine | Native Docker | Lima VM (kib installs it, no sudo) |
-| Project | Bind mount through the FUSE view | Same; the VM mounts `~` once (virtiofs) |
-| Agent box | `--runtime=runsc` (gVisor) | Same, gVisor provisioned in the VM |
-| Sidecars (FUSE, broker, clipboard) | runc, as today | runc, as today |
-| A kernel exploit needs | a gVisor bug + a host kernel bug | a gVisor bug + a VM kernel bug |
+| | Linux and macOS alike |
+|---|---|
+| Engine | Lima VM `kib-vm` (rootful Docker inside; the host's own Docker is untouched, rootless or not) |
+| Project | `~` mounted into the VM once (virtiofs); the box binds the project through the FUSE view |
+| `node_modules` | A per-project VM volume at `<project>/node_modules`: never on the host, never through FUSE |
+| Agent box | `--runtime=runsc` (gVisor), mandatory |
+| Sidecars (FUSE, broker, clipboard) | runc, as today |
+| A kernel exploit needs | a gVisor bug + a VM kernel bug; then VM root sees `~` |
 
-One code path: only where `dockerd` lives differs. No sync, no copies, no skip lists.
+One route. No sync, no copies, no skip lists. Linux needs `virtiofsd` (one `sudo apt install`).
 
-## Probe results (2026-11-06, in kib-vm)
+## Why (measured)
 
-- ✔ kib's flags + `gosu`; `--init`; `docker exec`
-- ✔ FUSE view: `.env` redacted, `.git/hooks` refused, writes land
-- ✔ Broker net when connected **before** start; `kib-broker` via `--add-host`; internet via
-  our own `resolv.conf`. ✘ Docker's DNS (127.0.0.11): gVisor can't reach it, by design
-- ✔ Unix-socket sidecar only with `--host-uds=open`
-- ✘ `docker top` sees no processes → readiness needs another signal
-- ℹ Host edits wake no watcher in the box → dev servers need polling
-- Same results on macOS (2026-11-06, a Lima VM with `~` on virtiofs + gVisor)
-- Speed vs runc, through the FUSE view (Linux / Mac): `git status` ×0.8 / ×0.8, `find`
-  ×1.5 / ×1.3, 3000-file write ×1.7 / ×2.0. **`pnpm install`, warm cache, `sn-frontend`
-  : Linux 112 s → 227 s (×2.0), Mac 109 s → 243 s (×2.2).** The 112 s is mostly the Python FUSE view, which every
-  design pays
+- gVisor does not support rootless Docker (google/gvisor#12575), so native Linux is out
+- 9p is ~6× slower than a VM disk for writes; virtiofs ~1.5×
+- Through FUSE over virtiofs, `pnpm install` (`sn-frontend`): plain 130 s, gVisor 280 s. With
+  `node_modules` on a VM volume (no scripts): plain 6 s, gVisor 13 s. FUSE was the cost
+- gVisor: `git status` ×0.8, `find` ×1.2–1.5, small-file writes ×1.6–2.0
+- All security checks pass on both OSes: `.env` redacted, `.git/hooks` refused, broker, internet,
+  sockets, FUSE view read and write
+- Dead: KVM mode (no gain), pnpm's virtual store outside the project (breaks resolution)
 
-**Blocker for native Linux (2026-11-06): the user's Docker is rootless, and gVisor does not
-support rootless Docker** (google/gvisor#12575: the workarounds are `--TESTONLY-unsafe-nonroot`
-or `--network=host`, both unacceptable). Candidate: Lima on Linux too, as on macOS (rootful
-Docker + gVisor inside the VM, `~` mounted; one route, no sudo). Open: `~` mount speed on
-Linux (virtiofs needs `virtiofsd`; 9p was slow). Probe: `tmp_gvisor_probe.sh --mount`.
+## Phase 1: the box on gVisor (in the VM)
 
-## Phase 0: last probes (user)
-
-- [x] `pnpm install` timing (Linux): ×2.0
-- [x] Mac: the probe in a Lima VM with `~` on virtiofs: all checks pass
-- [x] Mac `pnpm install` timing: ×2.2
-- [ ] Decide: C (kib runs Lima + gVisor on Mac) or D (kib runs no VM; gVisor whenever the
-      user's Docker engine has it: Linux, Colima. Docker Desktop/OrbStack get none)
-
-## Phase 1: gVisor box on native Linux
-
-- [ ] Detect runsc: `docker info --format '{{json .Runtimes}}'`. Missing → print the one-time
-      install (gVisor apt repo, `runsc install -- --host-uds=open`, `systemctl reload docker`)
-      and run on runc with a warning, like today's no-Lima note
+- [ ] Provision a pinned runsc (sha512) at VM creation: `runsc install -- --host-uds=open`
 - [ ] `start_container`: `docker create` → `connect_broker_network` → `docker start`
-- [ ] `--add-host kib-broker:<ip>` and one per MCP sidecar alias (`docker inspect` the IP)
-- [ ] Our own `resolv.conf` bind (the host's resolvers; reuse `resolv-sync`'s source)
-- [ ] Readiness: entrypoint touches `/run/kib/ready` before `exec sleep infinity`; kib polls
+- [ ] `--add-host kib-broker:<ip>` and one per MCP sidecar alias (Docker's DNS is unreachable)
+- [ ] Own `resolv.conf` bind (the VM's resolvers)
+- [ ] Readiness: entrypoint touches a marker before `exec sleep infinity`; kib polls
       `docker exec test -e`. Drop `docker top` (rebuild)
 - [ ] Polling env: `CHOKIDAR_USEPOLLING=1 WATCHPACK_POLLING=true`; one line in etc-CLAUDE.md
-- [ ] `security-test.sh`: the box runs on gVisor (`dmesg` says gVisor)
-- [ ] Rootless Docker: runsc is experimental there → runc + warning
+- [ ] `security-test.sh`: the box runs on gVisor
 
-## Phase 2: macOS on Lima with `~` mounted
+## Phase 2: mounts instead of sync
 
-- [ ] VM mounts `~` (virtiofs, writable) instead of the fixed set; projects outside `~` refused
-- [ ] Provision a pinned runsc (sha512) at VM creation, registered with `--host-uds=open`
-- [ ] Keep: Lima install pins, linger, `engine_ns_exec` over `limactl shell`, note replay
+- [ ] VM mounts `~` writable (virtiofs) instead of the fixed set; projects outside `~` refused
+- [ ] Linux: no `virtiofsd` → print `sudo apt install virtiofsd`, refuse (9p is too slow)
+- [ ] `<cname>-nm` volume at `$PWD/node_modules`, kept like the cache volume
+- [ ] FUSE sidecar serves `$PWD` (the mount), not a volume
 
 ## Phase 3: delete
 
-- [ ] Linux VM mode (`vm` key, `KIB_VM`), Mutagen and its install
-- [ ] `vm_sync_*`, `_vm_session`, `_vm_slow_hint`, sync cleanup in `_vm_linger_end`
+- [ ] Mutagen and its install; `vm_sync_*`, `_vm_session`, `_vm_slow_hint`, sync cleanup in
+      `_vm_linger_end`
 - [ ] `kib/host/vmseed.py`, `rules.py` sync configs, `VM_LOCAL`, `vm_skip`
-- [ ] `vm_state`, `vm-rw`/`vm-ro`, the `-vm` Node cache split (all visible under `~` anyway)
+- [ ] `vm_state`, `vm-rw`/`vm-ro`, the `-vm` Node cache split (all under `~` now)
+- [ ] The `vm` setting and the non-VM path (gVisor is mandatory, and only the VM has it)
 - [ ] Their tests (`tests/check/vm.sh` sync parts, `test_vmseed.py`), `tests/vm-check.sh`
-- [ ] Keep the per-project package cache volume (fast reinstalls, never shared)
+- [ ] Keep: Lima install pins, linger, `engine_ns_exec` over `limactl shell`, note replay,
+      the package cache volume
 
 ## Phase 4: docs
 
-- [ ] `microvm.md`: gVisor adopted; why its old rejection no longer holds (DNS → host entries,
-      NICs → create/connect/start, inotify → polling)
-- [ ] `CLAUDE.md` dead ends: drop the sync one; add "never rely on Docker's DNS in the box"
-- [ ] `docs/vm.md` → macOS only; `README.md`, `platform-matrix.md`, `etc-CLAUDE.md`
+- [ ] `microvm.md`: gVisor adopted; the old rejection's answers (DNS → host entries, NICs →
+      create/connect/start, inotify → polling); rootless blocks native gVisor
+- [ ] `CLAUDE.md` dead ends: drop the sync one; add "no Docker DNS in the box", "9p too slow",
+      "node_modules through FUSE is the install cost"
+- [ ] `docs/vm.md`, `README.md`, `platform-matrix.md`, `etc-CLAUDE.md` (node_modules is
+      box-only; host edits need polling)
 - [ ] Mark `PLAN_VM_SECURITY.md` superseded
 
 ## Accepted costs
 
-- Writes ~2× slower in the box: `pnpm install` 112 s → 227 s on `sn-frontend`; reads unchanged
+- Small-file writes ~1.6–2× slower in the box (installs are fast again via the volume)
 - Dev servers poll for host edits
-- Mac: the box's Linux `node_modules` land in the real folder
-- Mac: VM root (behind gVisor) could read all of `~`
-- Linux: one `sudo` to install gVisor
+- VM root (behind gVisor) can read all of `~`
+- The box's `node_modules` is its own: one install per project, from the cache
+- VM boot (~13 s) on a cold start; Linux needs `virtiofsd`
