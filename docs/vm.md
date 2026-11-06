@@ -1,18 +1,20 @@
-# Run kib in a VM (Linux)
+# Run kib in a VM
 
-On Linux the box shares your kernel. kib's hardening stops everything except a kernel bug, and a
-kernel exploit inside the box owns your machine. Inside a VM it owns only the VM. macOS and
-Docker Desktop already work this way.
+Without a VM the box shares your kernel. kib's hardening stops everything except a kernel bug, and
+a kernel exploit inside the box owns your machine. Inside a VM it owns only the VM.
 
-Install [Lima](https://lima-vm.io) once. From then on `kib` and `cc` run every box in a VM, with
-nothing to configure.
+- **macOS:** always on. kib runs every box in its own [Lima](https://lima-vm.io) VM. Docker
+  Desktop is not needed and not used.
+- **Linux:** opt-in for now: `vm = on` in `~/.keep-it-in-your-box/config` (or `KIB_VM=on kib`
+  once).
 
-> **Opt-in for now.** Until [`PLAN_VM_SECURITY.md`](../PLAN_VM_SECURITY.md) is done, turn it on with
-> `vm = on` in `~/.keep-it-in-your-box/config` (or `KIB_VM=on kib` once).
+## Set up
 
-## Set up (once, about 5 minutes)
+The first `kib` asks once to install what is missing into `~/.local`, no sudo: Lima, Mutagen
+and the `docker` command. Each download is checked against a checksum pinned in kib. Then it
+creates the VM and builds the image in it, which takes a few minutes.
 
-Check that your machine can run a VM:
+Linux also needs QEMU and KVM, once, with sudo:
 
 ```
 ls -l /dev/kvm
@@ -22,59 +24,52 @@ command -v qemu-system-x86_64 || sudo apt-get install -y qemu-system-x86 qemu-ut
 If `/dev/kvm` is missing, turn on virtualization (VT-x / AMD-V) in your BIOS. If it shows
 `root kvm` and you are not in the `kvm` group, run `sudo usermod -aG kvm "$USER"` and log in again.
 
-Install Lima into `~/.local` (no sudo):
-
-```
-mkdir -p ~/.local
-VERSION=$(curl -fsSL https://api.github.com/repos/lima-vm/lima/releases/latest | jq -r .tag_name)
-curl -fsSL "https://github.com/lima-vm/lima/releases/download/${VERSION}/lima-${VERSION:1}-$(uname -s)-$(uname -m).tar.gz" | tar Cxzvm ~/.local
-curl -fsSL "https://github.com/lima-vm/lima/releases/download/${VERSION}/lima-additional-guestagents-${VERSION:1}-$(uname -s)-$(uname -m).tar.gz" | tar Cxzvm ~/.local
-grep -q '.local/bin' ~/.bashrc || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-```
-
-Open a new terminal and run `kib`. The first launch creates the VM and builds the image in it,
-which takes a few minutes. After that, the VM starts in seconds with your first session.
-
 ## What kib does
 
-- **kib stays on your machine; only Docker moves into the VM.** That means the same `~/.claude`,
-  the same login, the same `--resume` history and the same broker routes, with or without the VM.
-  Turning it off changes nothing else.
-- **One VM, `kib-vm`.** It starts with your first kib session and stops when the last one closes.
-- **The VM sees only what the box needs**, at the same paths:
+- **kib stays on your machine; only Docker moves into the VM.** Same `~/.claude`, login,
+  `--resume` history and broker routes, with or without the VM.
+- **One VM, `kib-vm`.** It starts with your first session and stops when the last one closes.
+  Opening and closing projects never restarts it.
+- **Your project is synced, never mounted.** Mutagen copies it into a VM volume through a
+  host-local copy that drops every redacted and protected file, so `.env` values never reach the
+  VM and the VM cannot write `.git/hooks`. Edits flow both ways within about a second.
+- **The host wins a conflict.** If you and the box change the same file at once, your version is
+  kept. The box is told to re-read before editing.
+- **Build folders stay in the VM:** `node_modules`, `.venv`, `target`, `.next`, `.nuxt`, `.turbo`
+  are built there, for Linux, and never sync.
+- **Closing a project deletes its volume.** If the last sync fails, kib keeps it, and the next
+  launch carries the edits back.
+- **The VM sees only this**, at the same paths:
 
   | Path | VM access |
   |---|---|
-  | your project folders | read-write |
-  | `~/.claude/{plugins,skills,agents,commands,hooks,projects}` | read-write |
-  | kib's state and Node cache under `~/.local` and `~/.cache` | read-write |
-  | `~/.keep-it-in-your-box`, kib's own checkout | read-only |
+  | kib's own checkout | read-only |
+  | `~/.claude/{plugins,skills,agents,commands,hooks}` | read-write |
+  | the VM's Node cache, `~/.cache/keep-it-in-your-box/node-vm` | read-write |
+  | `…/keep-it-in-your-box/vm-rw`: open projects' sessions and transcripts | read-write |
+  | `…/keep-it-in-your-box/vm-ro`: rules, and broker tokens of routes in use | read-only |
 
-  Never your home folder, `~/.ssh`, or `~/.claude`'s credential, `settings.json` or `CLAUDE.md`.
-- **It asks once per new folder.** The first time you run kib in a project, it asks whether the VM
-  may see the whole parent folder, e.g. `~/devel`. Answer yes and every project in that folder
-  works with no VM restart. Answer no to mount only this project. It never offers `$HOME`,
-  `~/Desktop`, `~/Documents` or `~/Downloads`.
-- **The VM restarts when it needs a new mount.** A project outside every mounted folder needs one.
-  kib refuses while other sessions are still using the VM.
+  Never your home folder, a project folder, `~/.ssh`, `~/.keep-it-in-your-box`, or `~/.claude`'s
+  credential, `settings.json` or `CLAUDE.md`.
 
-## What changes in the VM
+## Limits
 
-- **No image paste from your clipboard.** The VM can't reach your desktop's Wayland socket.
-- **`host.docker.internal`** reaches the VM, not your machine.
-- **Don't run the same project with and without the VM at the same time.** That gives two
-  containers sharing one session folder.
-- **The VM's limit:** a kernel exploit inside it can write to every read-write folder above,
-  including `.git/hooks` and `~/.claude/hooks`, without going through kib's in-box guards. kib
-  still reports these writes at teardown. Mount as narrowly as you can.
+- **A kernel exploit in the VM** can write the shared `~/.claude` trees above, which load in every
+  project. kib reports such writes at teardown.
+- **Don't run the same project with and without the VM at the same time.**
+- **A kib update that changes the VM's mounts** restarts it once, and waits until no session is
+  open.
+
+## Licenses
+
+Lima: Apache-2.0. Mutagen: MIT, with SSPL parts in its release build (fine for local use). The
+`docker` command: Apache-2.0.
 
 ## Manage it
 
 | To | Run |
 |---|---|
-| Turn it on / off | `vm = on` / `vm = off` in `~/.keep-it-in-your-box/config` (or `KIB_VM=on kib` once) |
-| See mounted folders | `cat ~/.local/state/keep-it-in-your-box/vm-roots` |
-| Remove a mount | delete its line from that file, then `limactl delete -f kib-vm` |
+| Turn it on / off (Linux) | `vm = on` / `vm = off` in `~/.keep-it-in-your-box/config` |
 | Resize | `limactl stop kib-vm && limactl edit kib-vm --cpus 4 --memory 8` |
 | Start from scratch | `limactl delete -f kib-vm` — the next `kib` creates it again |
 | Stop it now | `limactl stop kib-vm` (kib does this when your last session closes) |

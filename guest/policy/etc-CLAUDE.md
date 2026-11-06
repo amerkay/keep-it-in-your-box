@@ -7,8 +7,12 @@
   unprivileged host account — no host privilege, and every guard below still holds.
   Nothing installed outside the project tree or `$CLAUDE_CONFIG_DIR` survives — the container is
   recreated once the last session for this project exits.
-- `HOME` is `/home/hostuser`, but the project is bind-mounted at its **host** path, outside
-  `$HOME`. Writes there land on the host for real.
+- `HOME` is `/home/hostuser`, but the project is at its **host** path, outside `$HOME`. Writes
+  there land on the host for real: directly, or within about a second when kib runs a VM (always
+  on macOS), where the project is a synced copy. There **the host wins a conflict**: a file the
+  user edits while you do keeps their version. Re-read before editing, and redo a lost edit
+  yourself. `node_modules`, `.venv`, `target`, `.next`, `.nuxt`, `.turbo` never sync: they stay
+  in the VM, built for Linux.
 - Host-side work (docker, `kib`, systemd, package installs) is the user's to run in a **host
   terminal**. `!` runs in *this container* and never reaches the host. Hand them a fenced block
   they can paste whole: no `!`, no `$` prompts, real paths, each command short and on its own

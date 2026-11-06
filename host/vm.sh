@@ -19,6 +19,7 @@ LIMA_HOST_IP=192.168.5.2
 LIMA_VERSION=2.2.1
 MUTAGEN_VERSION=v0.18.1
 DOCKER_VERSION=29.9.3
+BUILDX_VERSION=v0.38.2
 # Open projects' state, and the VM's only view of kib's: what the box writes in VM_RW, what the
 # host writes for the VM (and its own per-container files) in VM_RO, read-only there.
 VM_RW="$KIB_STATE_ROOT/vm-rw"
@@ -101,9 +102,7 @@ vm_up() {
     exec 206>&-
     unset DOCKER_CONTEXT
     DOCKER_HOST="unix://$(limactl list --format '{{.Dir}}' "$KIB_VM_NAME")/sock/docker.sock"
-    # Not ~/.docker: Docker Desktop leaves `credsStore: desktop` there, which fails once it is gone.
-    DOCKER_CONFIG="$KIB_STATE_ROOT/docker"
-    export DOCKER_HOST DOCKER_CONFIG
+    export DOCKER_HOST
     _KIB_ENGINE_VM=1
     KIB_HOST_GATEWAY="$LIMA_HOST_IP"
     # The engine-VM paths nsenter through a privileged container: only ever into a rootful VM.
@@ -123,6 +122,8 @@ _tool() { # <command> → "<sha256> <url> <dir under ~> [tar members…]"; nothi
     local lima="https://github.com/lima-vm/lima/releases/download/v$LIMA_VERSION/lima-$LIMA_VERSION"
     local mg="https://github.com/mutagen-io/mutagen/releases/download/$MUTAGEN_VERSION/mutagen"
     local dk="https://download.docker.com" m=".local/bin mutagen mutagen-agents.tar.gz"
+    local bx="https://github.com/docker/buildx/releases/download/$BUILDX_VERSION/buildx-$BUILDX_VERSION"
+    local p=".local/docker/cli-plugins docker-buildx"
     case "$1 $KIB_OS-$(uname -m)" in
         "limactl linux-x86_64") echo "b391ac7fcac2b2a5a1628107756463188ded4d18d3104a40a66a8bb6fec01bcb $lima-Linux-x86_64.tar.gz .local" ;;
         "limactl linux-aarch64") echo "fbcf4d127936666aa2cf6013b663c250431f2a59394757b404070f8d6a160e10 $lima-Linux-aarch64.tar.gz .local" ;;
@@ -136,6 +137,10 @@ _tool() { # <command> → "<sha256> <url> <dir under ~> [tar members…]"; nothi
         "docker linux-aarch64") echo "1b27fd739378ef938401e81ce5afb73b7ad7432d4f598814a9ff5f826bb464d2 $dk/linux/static/stable/aarch64/docker-$DOCKER_VERSION.tgz .local docker/docker" ;;
         "docker darwin-x86_64") echo "f7d8f835391cd0a8c676d9a8d2547f909da6a2d029595943b0ce8d5f169abe47 $dk/mac/static/stable/x86_64/docker-$DOCKER_VERSION.tgz .local docker/docker" ;;
         "docker darwin-arm64") echo "79145e169bca0b9571d02de8e1cd311a36e0e8fdb4599b6661a87b1bb3afbe13 $dk/mac/static/stable/aarch64/docker-$DOCKER_VERSION.tgz .local docker/docker" ;;
+        "buildx linux-x86_64") echo "7992ec09413b80ff57ba4e081f56fc833d7bac1d5e71143c6c809e7e6065f6d6 $bx.linux-amd64 $p" ;;
+        "buildx linux-aarch64") echo "46c0f334772de3cb0b341cc415caf7339fb5cfc8b8438ebcb5a10e7f23800d36 $bx.linux-arm64 $p" ;;
+        "buildx darwin-x86_64") echo "ad2418546e6d168a3e3b59fdf2a24997bc84263abeb4a5d9d0422cfe782743fc $bx.darwin-amd64 $p" ;;
+        "buildx darwin-arm64") echo "81702e18713cfd495bfe594943fa57f470eda16c0653ae3de15cd411df273c41 $bx.darwin-arm64 $p" ;;
     esac
 }
 
@@ -145,6 +150,8 @@ _vm_tools() {
     for t in limactl mutagen docker; do
         command -v "$t" >/dev/null 2>&1 || miss="$miss $t"
     done
+    # Without buildx, docker falls back to its legacy builder: every line, and no BuildKit cache.
+    docker buildx version >/dev/null 2>&1 || miss="$miss buildx"
     [ -z "$miss" ] || { [ -t 0 ] && lima_host_ready && _vm_install "$miss"; }
 }
 
@@ -152,7 +159,11 @@ _vm_install() { # <commands>
     local t a list=""
     for t in $1; do
         [ -n "$(_tool "$t")" ] || return 1
-        case "$t" in limactl) t=Lima ;; docker) t="the docker command (not Docker Desktop)" ;; esac
+        case "$t" in
+            limactl) t=Lima ;;
+            docker) t="the docker command (not Docker Desktop)" ;;
+            buildx) t="docker buildx" ;;
+        esac
         list="$list${list:+, }$t"
     done
     printf '🛡️  kib: VM mode runs every box in a Lima VM, so a kernel exploit stays in it.\n' >&2
@@ -171,15 +182,17 @@ _vm_install() { # <commands>
     for t in $1; do _install $(_tool "$t"); done
 }
 
-_install() { # <sha256> <url> <dir under ~> [tar members…]
+_install() { # <sha256> <url> <dir under ~> [tar members…, or the name of a bare binary]
     local tmp
     tmp="$(mktemp -d)"
     curl -fsSL -o "$tmp/t.tgz" "$2" || die "could not download $2 (curl, above)."
     [ "$(sha256_file "$tmp/t.tgz")" = "$1" ] || die "$2 failed its checksum."
     # Via tmp, and cp not tar into place: a tarball's ./ would rewrite the target dir's mode.
     {
-        mkdir -p "$tmp/x" "$HOME/$3" && tar -xzf "$tmp/t.tgz" -C "$tmp/x" "${@:4}" \
-            && cp -R "$tmp/x/." "$HOME/$3/"
+        mkdir -p "$tmp/x" "$HOME/$3" && case "$2" in
+            *gz) tar -xzf "$tmp/t.tgz" -C "$tmp/x" "${@:4}" ;;
+            *) mv "$tmp/t.tgz" "$tmp/x/$4" && chmod +x "$tmp/x/$4" ;;
+        esac && cp -R "$tmp/x/." "$HOME/$3/"
     } || die "could not install into ~/$3."
     rm -rf "$tmp"
 }
@@ -287,6 +300,9 @@ vm_use() { # <verb>
         return 0
     fi
     PATH="$PATH:$HOME/.local/bin:$HOME/.local/docker" # where _vm_tools installs
+    # kib's docker config, plugins beside it. Not ~/.docker: Docker Desktop's `credsStore: desktop`
+    # there fails every pull once it is gone.
+    export DOCKER_CONFIG="$HOME/.local/docker"
     if ! _vm_tools; then
         is_macos && die "kib on macOS runs every box in a Lima VM." \
             "Run kib in a terminal and answer Y to install it (no sudo, nothing else changes)."

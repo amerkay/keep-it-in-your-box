@@ -13,15 +13,25 @@ agent). And the field's VM adopters bought a kernel boundary and nothing above i
 SporeVM has no networking at all on Linux/AMD64, `matchlock` is open NAT passthrough, and
 `microsandbox` allows the public internet by default.
 
-**Changed 2026-11-05: on Linux the Docker engine runs in one Lima VM, while kib stays on the
-host** ([`../vm.md`](../vm.md), `host/vm.sh`). That is exactly the engine-in-a-VM shape macOS gets
-from Docker Desktop. `vm.sh` points `DOCKER_HOST` at a rootful `template:docker-rootful` VM and
-sets `engine_in_vm`, so the existing macOS paths run unchanged: the FUSE root, the privileged
-`nsenter`, and no host DNS sync. The CAP gate rules out a VM *per container*, not one VM holding
-the agent and the FUSE sidecar together. The VM mounts only bind sources, at their own paths:
-project roots and parts of `~/.claude` read-write, the broker dir and kib's checkout read-only. A
-shared lock on fd 205 counts kib sessions, the same scheme as the project lock, and the last one
-out stops the VM.
+**Changed 2026-11: the Docker engine runs in one kib-managed Lima VM, `kib-vm`, while kib stays
+on the host** ([`../vm.md`](../vm.md), `host/vm.sh`, `PLAN_VM_SECURITY.md`). Always on macOS
+(Docker Desktop dropped), opt-in on Linux. The CAP gate rules out a VM *per container*, not one VM
+holding the agent and the FUSE sidecar together. Three choices carry it:
+
+- **Projects are synced, never mounted.** Mutagen, in two hops: project ⇄ a host-local shadow
+  (guard ignores applied, both ends on the host) ⇄ a VM volume. Mutagen's host side trusts the
+  VM agent's snapshot and serves any path it asks for, so one hop would let VM root read and write
+  every guarded file. Per-project mounts restarted the VM; a parent-folder mount exposed siblings.
+- **Fixed mounts only**: kib's checkout read-only, the five shared `~/.claude` trees, a VM-only
+  Node cache, and kib's state as `vm-rw` (what the box writes) and `vm-ro` (read-only: rules,
+  in-use broker tokens, and every file the host trusts — pidfiles, witness, sync config). Never
+  put a host-trusted file beside a VM-writable one.
+- **Docker Desktop was not narrowed instead**: its file sharing has no read-only mode, so kib's
+  checkout and `vm-ro` would stay VM-writable.
+
+A shared lock on fd 205 counts sessions; the last one out stops the VM. The FUSE root is
+`/mnt/kib` (Ubuntu's `fusermount3` AppArmor profile denies `/run`). 9p mounts run `cache=none`:
+the default write-back cache truncated `.claude.json` at 4096 bytes.
 
 **Running all of kib inside the VM was tried first and abandoned the same day.** The guest's own
 `$HOME` left it with no `~/.claude`, no login and no broker. `~/.claude.json` is a file directly in
@@ -59,7 +69,7 @@ Four gates. A substrate that violates one is **DISQUALIFIED**, not low-rated:
 | Option | Added dep | CAP | OS | Verdict |
 |---|---|---|---|---|
 | **Docker Sandboxes** (`docker sbx`) | none | unverified | ✅ | A competing whole, not a substrate: adopting it deletes the broker, the egress design, the lifecycle manager and the clipboard proxies |
-| **Lima / Colima** under Docker | 1, macOS only | ✅ | ❌ | Rejected outright. The VM sits under *Docker*, not under the agent — host-kernel isolation, not per-session — and it is a second engine to support for no risk kib ranks |
+| **Lima** under Docker | Lima, Mutagen | ✅ | ✅ | **Adopted 2026-11** (above): one VM under Docker on both OSes, projects synced in |
 | **Kata Containers** | KVM + containerd cfg | unverified | ❌ Linux | Per-container VM boundary, but heavy and not minimal |
 | **Apple `container`** / libkrun | macOS 15+ | unverified | ❌ macOS | First-party and young; partial Docker API, and kib drives `docker` in ~40 places |
 | **gVisor** (`runsc`, agent container only) | runsc + root `daemon.json` | unverified | ❌ Linux | Closest fit, still not worth it — see [gVisor](#gvisor) |
@@ -105,9 +115,6 @@ docker network rm kib-probe
 ```
 
 ## If this is ever revisited
-
-Swapping the macOS engine is **not** the way in. It was considered and rejected: a second engine
-to support, for a threat kib does not rank. macOS stays on Docker Desktop.
 
 Before any of the four options above, one cheap measurement decides it — kib without its redaction
 layer is not kib:

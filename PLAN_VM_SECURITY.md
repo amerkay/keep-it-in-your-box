@@ -186,8 +186,9 @@ checkout and `vm-ro`. Dropped instead: no Docker Desktop code or dependency left
 - ✅ macOS always runs VM mode. Declining the install refuses to launch, never another engine
 - ✅ One prompt installs what is missing: Lima, Mutagen, the Docker CLI (static, pinned) into
       `~/.local`. `never` writes `vm = off` (Linux only)
-- ✅ kib's docker calls use their own `DOCKER_CONFIG`: Docker Desktop's `credsStore: desktop`
-      breaks pulls once it is gone. The image needs no BuildKit, so no buildx
+- ✅ kib's docker calls use their own `DOCKER_CONFIG` (`~/.local/docker`): Docker Desktop's
+      `credsStore: desktop` breaks pulls once it is gone. buildx is pinned and installed there
+      too: without it the legacy builder printed every line and lost the BuildKit cache
 - ✅ Removed: Docker Desktop start/probe/preflight, `engine_in_vm` (now `engine_lima`), the
       `desktop-linux` context check
 - ✅ Verified on the Mac 2026-11-06, Docker Desktop quit and its CLI off `PATH`: kib installed
