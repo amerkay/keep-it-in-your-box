@@ -134,7 +134,7 @@ docker run -d --name $P-fuse --cap-drop=ALL --cap-add=SYS_ADMIN --device /dev/fu
     --patterns-file /kib-patterns --guard-file /usr/local/share/global.kibignore >/dev/null
 for _ in $(seq 50); do vm grep -q " $F/mnt fuse" /proc/mounts && break; sleep 0.2; done
 BOX=(-v "$F/mnt:/w:rslave" --user "$U" -w /w -v "$P-cache:/c" -e HOME=/tmp
-    -e pnpm_config_store_dir=/c/store --entrypoint sh "$IMG" -c)
+    -e XDG_CACHE_HOME=/c -e pnpm_config_store_dir=/c/store --entrypoint sh "$IMG" -c) # as kib
 if vm grep -q " $F/mnt fuse" /proc/mounts; then
     out="$(docker run --rm "${G[@]}" "${BOX[@]}" 'cat .env' 2>&1)"
     case "$out" in
@@ -173,7 +173,7 @@ is "an edit inside the box wakes a watcher in the box" event \
 echo "Speed through the redaction view, today's kib (plain) vs gVisor:"
 secs() { # the failure's last lines go to stderr, above the timing line
     local s log="$TAR.log"; s=$(now)
-    "$@" >"$log" 2>&1 || { printf '    failed: %s\n' "$(tail -n 4 "$log")" >&2; printf 'FAIL '; }
+    "$@" >"$log" 2>&1 || printf '    failed: %s\n' "$(tail -n 4 "$log")" >&2
     awk -v s="$s" -v e="$(now)" 'BEGIN { printf "%.1f", e - s }'; }
 GITOK=(-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e "GIT_CONFIG_VALUE_0=*")
 bench() { # <label> <sh command, run in the project>
