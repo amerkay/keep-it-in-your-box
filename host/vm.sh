@@ -106,7 +106,7 @@ vm_up() {
     export DOCKER_HOST
     _KIB_ENGINE_VM=1
     KIB_HOST_GATEWAY="$LIMA_HOST_IP"
-    # The engine-VM paths nsenter through a privileged container: only ever into a rootful VM.
+    # kib's VM paths (box ids, the FUSE root) assume rootful Docker.
     ! is_rootless || die "the Lima VM '$KIB_VM_NAME' runs rootless Docker, which kib cannot use." \
         "Delete it once and kib recreates it: limactl delete -f $KIB_VM_NAME"
 }
@@ -202,30 +202,20 @@ _install() { # <sha256> <url> <dir under ~> [tar members…, or the name of a ba
 # path dropped: both ends scanned here, so the guard holds whatever the VM's Mutagen agent claims
 # (PLAN_VM_SECURITY.md S5). Then the shadow ⇄ a VM volume. The host wins conflicts on both.
 vm_sync_start() {
-    local uid gid cfg="$PATTERNS_STATE.sync.yml" shadow="$VM_SHADOW/$CNAME"
-    uid="$(box_uid)" gid="$(box_gid)"
-    kib_py shared.rules sync-config "$KIB_GUARD_FILE_HOST" "$PATTERNS_STATE" "$KIB_CFG_VM_SKIP" >"$cfg"
-    kib_py shared.rules vm-sync-config "$KIB_CFG_VM_SKIP" >"$cfg.vm"
-    # A failed close kept its sessions: flush them first, while they still hold their history,
-    # so the box's last edits reach the project. A new session would see every difference as a
-    # conflict, and the host's copy would win.
-    if docker start "$SYNC_CNAME" >/dev/null 2>&1; then
-        _mutagen sync flush "$CNAME" >/dev/null 2>&1 && _mutagen sync flush "$CNAME-host" >/dev/null 2>&1
+    local uid gid new="" cfg="$PATTERNS_STATE.sync.yml" shadow="$VM_SHADOW/$CNAME"
+    kib_py shared.rules sync-config "$KIB_GUARD_FILE_HOST" "$PATTERNS_STATE" "$KIB_CFG_VM_SKIP" \
+        >"$cfg.new"
+    kib_py shared.rules vm-sync-config "$KIB_CFG_VM_SKIP" >"$cfg.vm.new"
+    # A close leaves the sync running until the VM stops: on the same ignores, a reopen carries
+    # only what changed since.
+    if ! cmp -s "$cfg.new" "$cfg" || ! cmp -s "$cfg.vm.new" "$cfg.vm" \
+        || ! docker start "$SYNC_CNAME" >/dev/null 2>&1 \
+        || ! _mutagen sync resume "$CNAME-host" "$CNAME" >/dev/null 2>&1; then
+        new=1
+        _vm_sync_new
     fi
-    _mutagen sync terminate "$CNAME" "$CNAME-host" >/dev/null 2>&1 || true
-    docker rm -f "$SYNC_CNAME" >/dev/null 2>&1 || true
-    docker volume create --label kib-src=1 "$CNAME-src" >/dev/null
-    # CHOWN: Mutagen chowns the agent it injects. The passwd entry: it looks up its own user. No
-    # host binds: `docker start` at the next cold start would make a missing source a directory.
-    {
-        docker run -d --name "$SYNC_CNAME" --network none --cap-drop=ALL --cap-add=CHOWN \
-            --security-opt no-new-privileges --user "$uid:$gid" -e HOME=/tmp \
-            -v "$CNAME-src:/src" --entrypoint sleep "$IMAGE_NAME" infinity >/dev/null \
-            && docker exec -u 0 "$SYNC_CNAME" sh -c "chown $uid:$gid /src &&
-                echo kib:x:$uid:$gid::/tmp:/bin/sh >>/etc/passwd && echo kib:x:$gid: >>/etc/group"
-    } || die "could not start the project's sync container ($SYNC_CNAME)."
     # What the host-local hop drops, one way: redacted files as their keys, protected ones as is.
-    # ponytail: seeded once per container; a host edit to one shows at the next cold start.
+    # ponytail: seeded per launch; a host edit to one mid-session shows at the next.
     {
         (umask 077 && mkdir -p "$shadow") \
             && kib_py host.vmseed seed "$KIB_GUARD_FILE_HOST" "$PATTERNS_STATE" "$PWD" "$shadow" \
@@ -234,12 +224,36 @@ vm_sync_start() {
     echo "🔄 kib: syncing $PWD into the VM…" >&2
     local t0=$SECONDS
     {
-        _vm_session "$CNAME-host" "$cfg" "$PWD" "$shadow" \
-            && _vm_session "$CNAME" "$cfg.vm" "$shadow" "docker://$SYNC_CNAME/src"
+        _vm_session "$CNAME-host" ${new:+"$cfg" "$PWD" "$shadow"} \
+            && _vm_session "$CNAME" ${new:+"$cfg.vm" "$shadow" "docker://$SYNC_CNAME/src"}
     } || die "could not sync $PWD into the VM." "$(_mutagen sync list "$CNAME-host" "$CNAME" 2>&1)"
     [ $((SECONDS - t0)) -lt 30 ] || note "ℹ️  kib: the first sync took $((SECONDS - t0)) s. To skip folders the box can rebuild,
    put their names in this line, then paste it:
    echo 'vm_skip = dist, .yarn' >> $KIB_CONFIG"
+}
+
+# A fresh sync container on the new ignores. Left-over sessions (a failed close's, or the old
+# ignores') are flushed first, while they hold their history: a new session would see every
+# difference as a conflict, and the host's copy would win.
+_vm_sync_new() {
+    local cfg="$PATTERNS_STATE.sync.yml" uid gid
+    uid="$(box_uid)" gid="$(box_gid)"
+    if docker start "$SYNC_CNAME" >/dev/null 2>&1; then
+        _mutagen sync flush "$CNAME" >/dev/null 2>&1 && _mutagen sync flush "$CNAME-host" >/dev/null 2>&1
+    fi
+    _mutagen sync terminate "$CNAME" "$CNAME-host" >/dev/null 2>&1 || true
+    mv "$cfg.new" "$cfg" && mv "$cfg.vm.new" "$cfg.vm"
+    docker rm -f "$SYNC_CNAME" >/dev/null 2>&1 || true
+    docker volume create --label kib-src=1 "$CNAME-src" >/dev/null
+    # CHOWN: Mutagen chowns the agent it injects. The passwd entry: it looks up its own user. No
+    # host binds: `docker start` at the next cold start would make a missing source a directory.
+    {
+        docker run -d --name "$SYNC_CNAME" --network none --cap-drop=ALL --cap-add=CHOWN \
+            --security-opt no-new-privileges --label kib-src=1 --user "$uid:$gid" -e HOME=/tmp \
+            -v "$CNAME-src:/src" --entrypoint sleep "$IMAGE_NAME" infinity >/dev/null \
+            && docker exec -u 0 "$SYNC_CNAME" sh -c "chown $uid:$gid /src &&
+                echo kib:x:$uid:$gid::/tmp:/bin/sh >>/etc/passwd && echo kib:x:$gid: >>/etc/group"
+    } || die "could not start the project's sync container ($SYNC_CNAME)."
 }
 
 # A reloaded .kibignore re-filters the host hop: recreate it on the new ignores, and swap every
@@ -257,9 +271,9 @@ vm_sync_restage() {
     mv "$cfg.new" "$cfg" && _vm_session "$CNAME-host" "$cfg" "$PWD" "$shadow"
 }
 
-_vm_session() { # <name> <config> <alpha> <beta> — create, then wait for the first sync
+_vm_session() { # <name> [<config> <alpha> <beta>] — create it if given, then wait for a full sync
     local pid cols
-    _mutagen sync create --name "$1" --label kib=1 --sync-mode two-way-resolved \
+    [ $# = 1 ] || _mutagen sync create --name "$1" --label kib=1 --sync-mode two-way-resolved \
         --symlink-mode posix-raw --no-ignore-vcs -c "$2" "$3" "$4" >/dev/null || return 1
     _mutagen sync flush "$1" >/dev/null 200>&- 201>&- 205>&- 206>&- &
     pid=$!
@@ -273,26 +287,14 @@ _vm_session() { # <name> <config> <alpha> <beta> — create, then wait for the f
     wait "$pid"
 }
 
-# Flush VM → shadow → project, then drop it all. A failed flush keeps everything, so no box edit
-# is ever lost.
+# Flush VM → shadow → project. The sync runs on until the VM stops (_vm_linger_end).
 vm_sync_stop() {
     engine_lima || return 0
-    if docker start "$SYNC_CNAME" >/dev/null 2>&1 \
-        && ! _mutagen sync flush "$CNAME" >/dev/null 2>&1; then
-        warn "the box's last edits did not sync back. They stay in the VM volume $CNAME-src," \
+    docker start "$SYNC_CNAME" >/dev/null 2>&1 \
+        && _mutagen sync resume "$CNAME" "$CNAME-host" >/dev/null 2>&1 || return 0
+    { _mutagen sync flush "$CNAME" && _mutagen sync flush "$CNAME-host"; } >/dev/null 2>&1 \
+        || warn "the box's last edits have not synced back yet. They stay in the VM," \
             "and the next kib in $PWD carries them over first."
-        return 0
-    fi
-    if _mutagen sync list "$CNAME-host" >/dev/null 2>&1 \
-        && ! _mutagen sync flush "$CNAME-host" >/dev/null 2>&1; then
-        warn "the box's last edits did not sync back. They stay in $VM_SHADOW/$CNAME," \
-            "and the next kib in $PWD carries them over first."
-        return 0
-    fi
-    _mutagen sync terminate "$CNAME" "$CNAME-host" >/dev/null 2>&1 || true
-    docker rm -f "$SYNC_CNAME" >/dev/null 2>&1 || true
-    docker volume rm "$CNAME-src" >/dev/null 2>&1 || true
-    rm -rf "${VM_SHADOW:?}/${CNAME:?}"
 }
 
 # A project's session dir and transcripts sit on VM_RW only while it is open: `in` at launch, `out`
@@ -343,6 +345,15 @@ _vm_linger_end() {
     [ "$(cat "$VM_LOCK.linger" 2>/dev/null)" = "$$" ] || return 0 # a later close took over
     exec 205>"$VM_LOCK"
     lock_fd -n -x 205 || return 0
+    # Closed projects' copies go with the VM, unless a sync cannot flush: then all stay for later.
+    if _mutagen sync flush --label-selector kib=1 >/dev/null 2>&1; then
+        _mutagen sync terminate --label-selector kib=1 >/dev/null 2>&1 || true
+        # shellcheck disable=SC2046 # ids
+        docker rm -f $(docker ps -aq --filter label=kib-src=1) >/dev/null 2>&1 || true
+        # shellcheck disable=SC2046
+        docker volume rm $(docker volume ls -q --filter label=kib-src=1) >/dev/null 2>&1 || true
+        rm -rf "${VM_SHADOW:?}"
+    fi
     limactl stop "$KIB_VM_NAME" >/dev/null 2>&1 || true
     _mutagen daemon stop >/dev/null 2>&1 || true
 }

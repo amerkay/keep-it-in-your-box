@@ -29,7 +29,8 @@ If `/dev/kvm` is missing, turn on virtualization (VT-x / AMD-V) in your BIOS. If
 - **kib stays on your machine; only Docker moves into the VM.** Same `~/.claude`, login,
   `--resume` history and broker routes, with or without the VM.
 - **One VM, `kib-vm`.** It starts with your first session and stops 10 minutes after the last
-  one closes, so a quick reopen skips the boot. Opening and closing projects never restarts it.
+  one closes, so a quick reopen skips the boot and the copy. Opening and closing projects never
+  restarts it.
 - **Your project is synced, never mounted.** Mutagen copies it into a VM volume through a
   host-local copy that drops every redacted and protected file, so `.env` values never reach the
   VM and the VM cannot write `.git/hooks`. Edits flow both ways within about a second.

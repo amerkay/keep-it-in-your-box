@@ -81,9 +81,12 @@ Two terminals on the **same** project must work. Claude's own `[concurrentSessio
 - **`vm-ro` holds every file the host later trusts** — pidfiles, the credential witness, the
   sync config, the clipboard bridge's `.priv`. On `vm-rw` the VM could plant a pidfile (teardown
   kills its group), a witness, or a symlink the host writes through.
-- **The sync stops before the volume goes** (`vm_sync_stop`): flush VM → shadow → project,
-  then terminate, remove the volume and the shadow. A failed flush keeps both; the next launch
-  reuses them, so the box's last edits are never dropped.
+- **A close only flushes; the sync goes with the VM** (`vm_sync_stop`, `_vm_linger_end`). A
+  close flushes VM → shadow → project and leaves both hops running, so a reopen on the same
+  ignores resumes them and carries only what changed (a full copy took 30–50 s). When the VM
+  stops, every project's sessions, sync container, volume and shadow go. A failed flush keeps
+  all of it for the next launch, so the box's last edits are never dropped. The cost: a closed
+  project stays in the VM until it stops, 10 minutes after the last close.
 - **Package caches outlive the container**: `<cname>-cache` at the box's `~/.cache`, per
   project, never shared (a box could plant a package another project's box installs), never
-  deleted by kib. The project volume `<cname>-src` is deleted at close.
+  deleted by kib.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Host-side: what kib's VM can see. Run with at least one kib session open; run it again after
-# closing a project (its volume must be gone). Every line must pass. (PLAN_VM_SECURITY.md)
+# Host-side: what kib's VM can see. Run with at least one kib session open. Every line must pass.
+# A closed project's volume stays until the VM stops. (PLAN_VM_SECURITY.md)
 set -u
 KIB_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=SCRIPTDIR/lib.sh
@@ -31,18 +31,19 @@ deny "the VM has no ~/.ssh" vm test -e "$HOME/.ssh"
 deny "the VM has no ~/.keep-it-in-your-box (tokens)" vm test -e "$HOME/.keep-it-in-your-box"
 deny "the VM has no ~/.claude.json" vm test -e "$HOME/.claude.json"
 
-section "Open projects only, without their secrets"
+section "Projects still syncing only, without their secrets"
 _vols="$(docker volume ls -q --filter label=kib-src=1)"
 for v in $_vols; do
-    is "$v belongs to an open project" "${v%-src}" \
-        "$(docker ps --format '{{.Names}}' --filter "name=^${v%-src}\$")"
+    is "$v is still syncing (open, or closed since the VM started)" "${v%-src}-sync" \
+        "$(docker ps --format '{{.Names}}' --filter "name=^${v%-src}-sync\$")"
     # Every .env assignment in the volume is kib's render, never a value. `ok` last: a probe
     # that never ran must not read as a clean volume.
     is "no .env value in $v" "ok" "$(docker run --rm --network none -v "$v:/s:ro" --entrypoint sh \
         "$IMAGE_NAME" -c 'find /s -name ".env*" -type f ! -name .env.example ! -name .env.sample \
         ! -name .env.template -exec grep -H "=" {} + | grep -v "=<redacted>\$"; echo ok' 2>&1)"
 done
-is "vm-rw holds one dir per open project (and .state)" "$(printf '%s\n' "$_vols" | grep -c .)" \
+is "vm-rw holds one dir per open project (and .state)" \
+    "$(docker ps --format '{{.Names}}' | grep -cE '^kib-.+-[0-9a-f]{8}$')" \
     "$(find "$VM_RW" -mindepth 1 -maxdepth 1 ! -name .state | grep -c .)"
 
 report

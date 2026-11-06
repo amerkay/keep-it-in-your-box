@@ -46,7 +46,7 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
 | Project files | Mutagen sync into a per-project Docker volume in the VM. No project mounts |
 | Mutagen build | Official release (MIT core plus SSPL speed-ups; local use is fine) |
 | Conflicts | **Host wins** (`two-way-resolved`, host = alpha). Claude is told in `etc-CLAUDE.md` that fixing lost edits is its job. No overwritten-files list: Mutagen doesn't report host-wins conflicts (S1) |
-| Closed project | Flush the sync, terminate it, delete the volume |
+| Closed project | Flush the sync; it runs on until the VM stops, then its volume is deleted |
 | Build output | `node_modules`, `target`, `.venv`, `dist`, … stay in the VM, not synced |
 | Other host data | **Hybrid**: mount what is global anyway (kib checkout read-only; `~/.claude/{skills,plugins,agents,commands,hooks}` read-write). Sync the open project's slices (transcripts, state). Copy in only the broker tokens of routes in use |
 | Lima missing | Linux: run natively after the install prompt. macOS: Docker Desktop fallback |
@@ -144,9 +144,11 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
       could plant a package another project installs) at the box's `~/.cache`, with
       `XDG_CACHE_HOME`, `pnpm_config_store_dir` (pnpm 12 ignores `npm_config_`; env beats a repo's
       `storeDir`) and `npm_config_cache`. The entrypoint no longer `chown -R`s it
-- ✅ Last session: `mutagen sync flush` → terminate → remove the volume and sync container. A
-      failed flush keeps all of it, sessions included; the next launch flushes those first, while
-      they hold their history (a new session would let the host win every difference)
+- ✅ Last session: `mutagen sync flush`; the sync runs on, so a reopen carries only the
+      difference (2026-11-06: a full copy was 30–50 s a launch). The VM's stop terminates every
+      sync and removes the volumes, sync containers and shadows, unless one fails to flush.
+      Sessions rebuilt on new ignores are flushed first, while they hold their history (a new
+      session would let the host win every difference)
 - ✅ Seed after the first sync (`kib/host/vmseed.py`): redacted files as their key-only render,
       protected files (`.git/config`, hooks, `.vscode`, …) as real bytes. The sync ignores them,
       so nothing seeded flows back. The renderers moved to `kib/shared/render.py` for this
@@ -238,9 +240,9 @@ checkout and `vm-ro`. Dropped instead: no Docker Desktop code or dependency left
       host-wins; `~/.cache` is the package-cache volume
 - ✅ `tests/vm-check.sh` (host, a session open): the paste blocks below, automated — mounts equal
       kib's own `_vm_mounts`, no reverse-sshfs, `vm-ro` and the checkout read-only, no `~/.ssh`,
-      tokens or `~/.claude.json`, one volume per open project, no `.env` value in any, `vm-rw`
-      one dir per open project. Lifecycle (volume gone after close, VM stopped after the
-      linger) is the user's checklist
+      tokens or `~/.claude.json`, one volume per syncing project, no `.env` value in any, `vm-rw`
+      one dir per open project. Lifecycle (volumes gone and VM stopped after the linger) is the
+      user's checklist
 - ✅ `./dev.sh check` green, including bash-3.2 portability
 - ✅ `tmp_macos_test.sh` deleted: `tests/vm-check.sh` and the checklist replace it
 
@@ -260,7 +262,7 @@ Expected results (✅ = must hold). Docker Desktop is no longer a setup (Phase 5
 | 3 | 5 projects opened and closed in any order, no VM restart | ✅ | ✅ | ✅ |
 | 4 | Host edit shows in the box < 1 s; box edit shows on the host | n/a | ✅ | ✅ |
 | 5 | Same file edited on both sides → host version kept | n/a | ✅ | ✅ |
-| 6 | Close a project → its volume is gone, its cache volume kept; close all → VM stops after 10 min | n/a | ✅ | ✅ |
+| 6 | Close all → after 10 min the VM stops and the `-src` volumes are gone; cache volumes kept | n/a | ✅ | ✅ |
 | 7 | Same `--resume` history and broker in VM and native mode | ✅ | ✅ | ✅ |
 | 8 | Dev server on the host reachable via `host.docker.internal` | ✅ | ✅ | ✅ |
 | 9 | `./tests/security-test.sh` inside the box | ✅ | ✅ | ✅ |
@@ -277,7 +279,7 @@ With at least one kib session open, in a host terminal, from the kib checkout:
 ./tests/vm-check.sh
 ```
 
-Every line must pass. Close a project and run it again: its volume must be gone.
+Every line must pass.
 
 ### Linux, no Lima (native: no VM boundary)
 

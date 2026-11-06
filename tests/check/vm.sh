@@ -25,7 +25,7 @@ for _c in docker mutagen; do
     printf '#!/usr/bin/env bash\necho "%s $*" >>"%s/calls"\n' "$_c" "$_vm_dir" >"$_vm_dir/bin/$_c"
 done
 echo 'ls /proc/$$/fd >>"'"$_vm_dir"'/mg-fds"' >>"$_vm_dir/bin/mutagen"
-echo 'case "$*" in *"sync flush"*-host) exit "${MG_FLUSH_HOST:-0}" ;; *"sync flush"*) exit "${MG_FLUSH:-0}" ;; *"sync list"*) exit "${MG_LIST:-0}" ;; esac' >>"$_vm_dir/bin/mutagen"
+echo 'case "$*" in *"sync flush"*-host) exit "${MG_FLUSH_HOST:-0}" ;; *"sync flush"*) exit "${MG_FLUSH:-0}" ;; *"sync resume"*) exit "${MG_RESUME:-0}" ;; esac' >>"$_vm_dir/bin/mutagen"
 echo 'case "$1" in start) exit "${DK_START:-0}" ;; esac' >>"$_vm_dir/bin/docker"
 chmod +x "$_vm_dir/bin/"*
 
@@ -163,6 +163,12 @@ is "the last kib out leaves the VM up (it lingers)" "0" "$(_vm_stops)"
 _vm_run "$_vm_dir/bin:$PATH" _vm_t_last >/dev/null # a second close within the linger
 sleep 3
 is "after the linger, only the newest close's timer stops the VM" "1" "$(_vm_stops)"
+case "$(cat "$_vm_dir/calls" 2>/dev/null)" in
+    *"sync flush --label-selector kib=1"*"sync terminate --label-selector kib=1"*"docker volume rm"*)
+        pass "the VM's stop takes every closed project's copy with it"
+        ;;
+    *) fail "closed projects' copies outlived the VM" "$(cat "$_vm_dir/calls" 2>/dev/null)" ;;
+esac
 
 rm -f "$_vm_dir/calls"
 printf 'K=v\n' >"$_vm_dir/home/devel/proj/.secret"
@@ -209,26 +215,30 @@ case " $(tr '\n' ' ' <"$_vm_dir/mg-fds") " in
     *) pass "Mutagen never inherits a lock fd, so its daemon cannot pin a project or the VM" ;;
 esac
 rm -f "$_vm_dir/calls"
+_vm_run "$_vm_dir/bin:$PATH" _vm_t_sync >/dev/null # a reopen, on the same ignores
+case "$(cat "$_vm_dir/calls")" in
+    *"sync create"* | *"sync terminate"* | *"docker run"*) fail "a reopen rebuilt the sync" "$(cat "$_vm_dir/calls")" ;;
+    *"sync flush kib-proj-1-host"*"sync flush kib-proj-1") pass "a reopen on the same ignores carries only the difference" ;;
+    *) fail "a reopen did not wait for the sync" "$(cat "$_vm_dir/calls")" ;;
+esac
+rm -f "$_vm_dir/calls"
+MG_RESUME=1 _vm_run "$_vm_dir/bin:$PATH" _vm_t_sync >/dev/null
+is "a sync that cannot resume is rebuilt" "1" "$(grep -c "sync create --name kib-proj-1-host" "$_vm_dir/calls")"
+rm -f "$_vm_dir/calls"
 _vm_run "$_vm_dir/bin:$PATH" _vm_t_sync stop >/dev/null
 case "$(cat "$_vm_dir/calls")" in
-    *"sync flush kib-proj-1"$'\n'*"sync flush kib-proj-1-host"*"sync terminate"*"docker volume rm kib-proj-1-src"*)
-        pass "close: flush VM → shadow → project, then the volume is gone"
-        ;;
-    *) fail "close did not flush both hops then drop the volume" "$(cat "$_vm_dir/calls")" ;;
+    *"volume rm"* | *"sync terminate"*) fail "close dropped the sync, so a reopen copies it all" ;;
+    *"sync flush kib-proj-1"$'\n'*"sync flush kib-proj-1-host"*) pass "close: flush VM → shadow → project; the sync runs on" ;;
+    *) fail "close did not flush both hops" "$(cat "$_vm_dir/calls")" ;;
 esac
-deny "close deletes the shadow" test -e "$_vm_sh"
-rm -f "$_vm_dir/calls"
-_vm_out="$(MG_FLUSH=1 _vm_run "$_vm_dir/bin:$PATH" _vm_t_sync stop)"
-case "$(cat "$_vm_dir/calls")" in
-    *"volume rm"* | *"sync terminate"*) fail "a failed flush still dropped the box's edits" ;;
-    *) pass "a failed flush keeps the volume, so no box edit is lost" ;;
+allow "close keeps the shadow" test -d "$_vm_sh"
+case "$(MG_FLUSH=1 _vm_run "$_vm_dir/bin:$PATH" _vm_t_sync stop 2>&1)" in
+    *"have not synced back"*) pass "a failed flush says the box's edits wait in the VM" ;;
+    *) fail "a failed flush at close was silent" ;;
 esac
-mkdir -p "$_vm_sh"
-_vm_out="$(MG_FLUSH_HOST=1 _vm_run "$_vm_dir/bin:$PATH" _vm_t_sync stop 2>&1)"
-allow "a failed host-hop flush keeps the shadow" test -d "$_vm_sh"
-case "$(DK_START=1 MG_LIST=1 MG_FLUSH_HOST=1 _vm_run "$_vm_dir/bin:$PATH" _vm_t_sync stop 2>&1)" in
-    *"did not sync back"*) fail "a cold start with nothing left over warns of lost edits" ;;
-    *) pass "a cold start with nothing left over cleans up silently" ;;
+case "$(DK_START=1 _vm_run "$_vm_dir/bin:$PATH" _vm_t_sync stop 2>&1)" in
+    *"synced back"*) fail "a cold start with nothing left over warns of lost edits" ;;
+    *) pass "a cold start with nothing left over says nothing" ;;
 esac
 rm -f "$_vm_dir/calls"
 _vm_run "$_vm_dir/bin:$PATH" _vm_t_sync restage >/dev/null

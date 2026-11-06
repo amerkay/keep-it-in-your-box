@@ -81,8 +81,9 @@ kib build
       ```
 - [ ] Package cache: `pnpm install`, close, reopen, `pnpm install` again: no download.
       `kib-<project>-<hash>-cache` is still in `docker volume ls` after the close
-- [ ] Close a project: its `-src` volume is gone. Reopen within 10 min: no VM boot. 10 min
-      after the last close: `limactl list` shows `kib-vm` Stopped
+- [ ] Reopen within 10 min: no VM boot, and the sync line passes in a second or two. 10 min
+      after the last close: `limactl list` shows `kib-vm` Stopped, and the next launch copies the
+      whole project again (its old copy went with the VM)
 - [ ] Mac: `git status` works in the box; image paste (Ctrl+V) works
 - [ ] Linux: `--resume` shows the same history with and without the VM
 

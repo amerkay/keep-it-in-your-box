@@ -322,18 +322,18 @@ _rootless_daemon_pid() {
     return 1
 }
 
-# Engine VM: a throwaway `--privileged --pid=host` container nsenters the VM, the only handle kib
-# has on it. Deliberately NOT reused for a native engine, where it targets your REAL machine and
-# buying code symmetry with it would be a security regression — the rootless branch needs no
-# privilege at all, because owning that user namespace is the only permission setns asks for.
+# Engine VM: root in the VM, over Lima's own ssh. Never reused for a native engine, where it
+# would target your REAL machine — the rootless branch needs no privilege at all, because owning
+# that user namespace is the only permission setns asks for.
 #
 # One attempt, never a retry: --preserve-credentials has been in util-linux since 2.24 (2013), and
 # a `cmd_a || cmd_b` fallback cannot tell "this nsenter rejected the flag" from "the command inside
 # failed" — so it re-ran the caller's whole script, including fuse_root_create's unmount-and-bind.
 engine_ns_exec() {
     if engine_lima; then
-        docker run --rm --privileged --pid=host --entrypoint nsenter "$IMAGE_NAME" \
-            -t 1 -m -- "$@" >/dev/null 2>&1
+        # Lima's ssh master may outlive kib: no lock fd.
+        limactl shell --workdir / "$KIB_VM_NAME" sudo -n -- "$@" </dev/null >/dev/null 2>&1 \
+            200>&- 201>&- 202>&- 205>&- 206>&-
         return
     fi
     local pid
