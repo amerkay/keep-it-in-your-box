@@ -11,8 +11,8 @@
   there land on the host for real: directly, or within about a second when kib runs a VM (always
   on macOS), where the project is a synced copy. There **the host wins a conflict**: a file the
   user edits while you do keeps their version. Re-read before editing, and redo a lost edit
-  yourself. `node_modules`, `.pnpm-store`, `.venv`, `venv`, `target`, `.next`, `.nuxt`, `.turbo`
-  and Python caches never sync: they stay in the VM, built for Linux.
+  yourself. `node_modules`, `.pnpm-store`, `.venv`, `venv`, `target`, `.next`, `.nuxt`, `.turbo`,
+  `.terraform` and Python caches never sync: they stay in the VM, built for Linux.
 - `~/.cache` is this project's package cache (pnpm store, npm, uv, pip, …) and outlives the
   container, so reinstalls are fast. Never point a repo's config at a cache inside the project
   (`store-dir`, `cache-dir`): the VM never syncs it and loses it on close.

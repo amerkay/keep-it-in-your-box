@@ -37,8 +37,8 @@ If `/dev/kvm` is missing, turn on virtualization (VT-x / AMD-V) in your BIOS. If
 - **The host wins a conflict.** If you and the box change the same file at once, your version is
   kept. The box is told to re-read before editing.
 - **Build folders and caches stay in the VM**, built there for Linux, and never sync:
-  `node_modules`, `.pnpm-store`, `.venv`, `venv`, `target`, `.next`, `.nuxt`, `.turbo`, and
-  Python's `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`. Closing a project
+  `node_modules`, `.pnpm-store`, `.venv`, `venv`, `target`, `.next`, `.nuxt`, `.turbo`, `.terraform`,
+  and Python's `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`. The VM's stop
   deletes them; package downloads stay in its own cache volume (`kib-<project>-<hash>-cache`,
   the box's `~/.cache`), so a reinstall after reopening copies instead of downloading. The first sync shows the
   file it is copying, so a big folder stands out: add it to `vm_skip` (below).

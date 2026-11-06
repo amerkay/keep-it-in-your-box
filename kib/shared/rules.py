@@ -251,7 +251,7 @@ def _tightens_cmd(old_file: str, new_file: str) -> int:
 #: Never synced: the box builds its own in the VM, for Linux, whatever the host's OS. Caches too:
 #: a box's `.pnpm-store` lands in the project (pnpm's store must share its filesystem).
 VM_LOCAL = (
-    *("node_modules", ".pnpm-store", ".next", ".nuxt", ".turbo", "target"),
+    *("node_modules", ".pnpm-store", ".next", ".nuxt", ".turbo", "target", ".terraform"),
     *(".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"),
 )
 
