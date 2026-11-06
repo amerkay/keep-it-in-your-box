@@ -3,6 +3,10 @@
 Part of the Keep It in Your Box design notes (`docs/design-notes/`). One row per behaviour that
 differs by host OS, with the file that owns it.
 
+**Since 2026-11 the macOS column is kib's Lima VM** (`host/vm.sh`; Docker Desktop is dropped, see
+`microvm.md`). Linux with `vm = on` takes the same VM paths. Rows naming Docker Desktop
+(`fakeowner`, LinuxKit) are what it measured; their Lima answers are in the TODO.
+
 **This file carries no rationale.** Every "why" lives in the note named in the row — follow the
 pointer rather than restating it here. `host/portable.sh` is the only file that branches on OS;
 everything else calls its shims or tests `is_macos`.
@@ -25,18 +29,18 @@ creation. What differs is only *where the propagation root lives*, and how it is
 
 | Behaviour | Ubuntu / Linux | macOS | Owner | Proven |
 |---|---|---|---|---|
-| Propagation root | `$KIB_STATE_ROOT/fuse.<hash>` — systemd makes `/` rshared, so it propagates already | `/run/kib/fuse.<hash>` — must be VM-internal; a virtiofs share of the Mac has no mount namespace for the event. Never `/var` (a symlink to the shared `/private/var`) | `macos.md` | ✅ |
+| Propagation root | `$KIB_STATE_ROOT/fuse.<hash>` — systemd makes `/` rshared, so it propagates already | `/mnt/kib/fuse.<hash>` inside kib's VM — VM-internal, never a Lima mount; not `/run`, which Ubuntu's `fusermount3` AppArmor profile denies | `microvm.md` | ✅ |
 | Preparing / destroying that root, and unmounting | Plain `mkdir`/`rm` as you; a `/proc/self/mounts` read and `fusermount3` | A throwaway `--privileged --pid=host` container `nsenter`ing the engine VM — the Mac cannot see the path at all. Deliberately **not** used on Linux, where it would target the real machine | `macos.md` | ✅ |
 | Mode bits inside the project view | **Enforced** — the mount carries `default_permissions`, so the kernel checks owner/mode against the caller rather than the server | **Enforced the same way**, and this is the *only* place mode bits bite on macOS: outside the view `fakeowner` records a mode but ignores it in `access(2)` | `macos.md` | ✅ |
 | Ownership in the backing store | Already the agent's, so the remap is identity | `fakeowner` reports every bind as `root:root`; without the remap git refuses the whole tree as "dubious ownership" | `macos.md` | ✅ |
-| AppArmor | `docker-default` on the agent's container — its `deny mount,` costs nothing now the sidecar holds the mount | Absent — Docker Desktop's LinuxKit kernel ships no AppArmor, so the suite skips the label assertion rather than failing it | `macos.md` | ✅ |
+| AppArmor | `docker-default` on the agent's container — its `deny mount,` costs nothing now the sidecar holds the mount | Lima's Ubuntu VM has AppArmor, so `docker-default` should apply (Docker Desktop's LinuxKit had none; the suite skips the label assertion when the kernel has no AppArmor) | `macos.md` | ⏳ |
 | Sidecars per project | Up to 3 (FUSE, Wayland guard, broker) + main | Up to 2 (FUSE, broker) + main | `container-lifecycle.md` | — |
 
 ## Clipboard
 
 | Behaviour | Ubuntu / Linux | macOS | Owner | Proven |
 |---|---|---|---|---|
-| Transport | Wayland proxy sidecar holds the only real compositor socket | Host watcher (`host/clipboard-bridge.sh`) over a spool dir bind-mounted at `/kib-clip` | `clipboard-and-dns.md` | — |
+| Transport | Wayland proxy sidecar holds the only real compositor socket (in the VM: the macOS bridge, `pbpaste` → `wl-paste`) | Host watcher (`host/clipboard-bridge.sh`) over a spool dir bind-mounted at `/kib-clip` | `clipboard-and-dns.md` | — |
 | Reads | Relayed verbatim by the proxy | Answered host-side with `pbpaste` / osascript PNG extraction | `clipboard-and-dns.md`, `macos.md` | — |
 | Writes | Sanitised in flight at the `send` event — control characters stripped, non-text flavours refused (`WLGUARD-STRIP` / `WLGUARD-DENY`) | Sanitised host-side through `kib.shared.clipboard`, then `pbcopy`; non-text refused at the shim | `clipboard-and-dns.md` | ✅ |
 | Write alert (strip or refusal) | `notify-send`, one per 30 s | `notify_clip` (`terminal-notifier`, else `osascript`), one per 30 s | `clipboard-and-dns.md`, `macos.md` | — |
@@ -66,8 +70,8 @@ creation. What differs is only *where the propagation root lives*, and how it is
 
 | Behaviour | Ubuntu / Linux | macOS | Owner | Proven |
 |---|---|---|---|---|
-| `preflight_platform` | No-op | Fails fast on: no reachable Docker engine (naming Desktop / OrbStack / Colima), missing `perl`, and an engine not sharing `$PWD` | `macos.md` | 🧪 |
-| Docker engine | Any | Docker Desktop, OrbStack, or Colima | `architecture.md` | ⏳ |
+| `preflight_platform` | No-op | Fails fast on missing `perl`. The engine is `vm_use`'s: one prompt installs Lima, Mutagen, the `docker` CLI and buildx | `vm.md` | 🧪 |
+| Docker engine | Any; or kib's Lima VM with `vm = on` | kib's Lima VM only. Verified 2026-11-06 with Docker Desktop quit and its CLI off `PATH` | `microvm.md` | ✅ |
 | Host shell | bash 5, GNU userland used directly (`flock`, `setsid`, `sha256sum`) | bash 3.2 + BSD userland; `perl` shims for `lock_fd` / `detach_pgrp`, `shasum` for `hash8` | `macos.md` | 🧪 |
 | Empty-array expansion | Tolerant | Every array ever assigned `()` must expand as `${arr[@]+"${arr[@]}"}` or the launch aborts under `set -u` | `macos.md` | ✅ |
 | Host python | Modern `python3` | Stock 3.9 — `kib/host`, `kib/shared`, `kib/broker` stay 3.9-clean (enforced on **both**) | `macos.md` | ✅ |
@@ -144,6 +148,10 @@ AppArmor at all (LinuxKit).
 ## TODO — checks not yet run
 
 Tracked in `macos.md` § "Still open".
+
+- [ ] **Under Lima (vz + virtiofs):** git in the box does not report "dubious ownership"; mode
+      bits enforce in the view; `security-test.sh` passes including the AppArmor label; image
+      paste works through the bridge.
 
 - [ ] **Image paste end-to-end (Mac hardware).** Confirmed broken on the first Mac run, three
       causes fixed (dropped `xclip` args, a 2 s budget against `osascript`, and only one trigger

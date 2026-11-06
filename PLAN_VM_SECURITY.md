@@ -206,15 +206,18 @@ checkout and `vm-ro`. Dropped instead: no Docker Desktop code or dependency left
       session is live (editing it under one corrupts it)
 
 ### Phase 6: policy and docs
-- ⬜ `guest/policy/etc-CLAUDE.md`: the project is a synced copy; **the host wins conflicts**, so
-      re-read before editing and re-apply lost edits yourself; build dirs are VM-local
-- ⬜ `docs/vm.md`: rewrite for Mutagen, hybrid mounts, macOS Lima/Colima, the Docker Desktop
-      narrowing, licenses (Lima Apache-2.0, Mutagen MIT + SSPL, Docker Desktop terms)
-- ⬜ Design notes: `microvm.md` (decision, and lift the "Lima on macOS rejected" verdict),
-      `macos.md`, `container-lifecycle.md`, `redaction-config-guard.md` (sync ignores)
-- ⬜ `CLAUDE.md` dead ends: kib inside the VM (no `~/.claude.json`), `/run/kib` vs AppArmor,
-      `reverse-sshfs`, parent-folder and per-project mounts (restarts), per-project rootless users
-- ⬜ `README.md` limits section
+- ✅ `guest/policy/etc-CLAUDE.md`: the project is a synced copy; **the host wins conflicts**, so
+      re-read before editing and re-apply lost edits yourself; build dirs and caches are VM-local;
+      `~/.cache` is the project's package cache
+- ✅ `docs/vm.md`: rewritten for Mutagen, the fixed mounts, macOS Lima-only, licenses
+- ✅ Design notes: `microvm.md` (adopted, three choices), `macos.md` (Lima-only, first contact),
+      `container-lifecycle.md` (§ In the VM), `redaction-config-guard.md` (§ sync ignores),
+      `platform-matrix.md` (macOS column = Lima, TODO for Lima rechecks)
+- ✅ `CLAUDE.md` dead ends: FUSE root `/mnt/kib`; no project mount, no one-hop sync, not kib in
+      the VM, not reverse-sshfs, not Docker Desktop narrowed; nothing host-trusted on `vm-rw`;
+      per-project package caches
+- ✅ `README.md`: requirements (macOS needs no Docker engine) and the limits section
+- ⬜ `bin/kib`'s `preflight_platform` comment: edit once no Linux session is live
 
 ### Phase 7: tests
 - ⬜ `tests/check/vm.sh` (fake `limactl`, `mutagen`, `docker`): mount allowlist, sync

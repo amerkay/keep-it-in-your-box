@@ -101,7 +101,7 @@ Now `cd` into any project and run `cc`. The image builds itself on first run, an
 
 Nothing to set up and nothing to migrate: your `~/.claude` stays exactly as it is, and each project's session is assembled from it per launch and merged back on exit — so a host `claude` and a boxed `cc` share one login, one `--resume` list and one history, while no project's box can see another's.
 
-**Requirements:** Docker (on macOS: [Docker Desktop](https://www.docker.com/products/docker-desktop/) or [OrbStack](https://orbstack.dev), both a `.dmg` — no Homebrew and no Xcode tools; Colima works too but needs both. Any engine on Linux), plus `git`, `bash` and `perl` — system perl is fine, no Homebrew needed. A Wayland session on Linux is optional; without one you just lose clipboard paste.
+**Requirements:** `git`, `bash`, `python3` and `perl` (stock macOS has them all, no Homebrew). On macOS that is all: the first launch offers to install [Lima](https://lima-vm.io), Mutagen and the `docker` command into `~/.local`, no sudo and no Docker Desktop, and every box runs in a VM. On Linux, any Docker engine, or a VM the same way ([`docs/vm.md`](docs/vm.md)). A Wayland session on Linux is optional; without one you just lose clipboard paste.
 
 <h2 id="use"><img src="docs/assets/readme/section-use.svg" width="100%" alt="Everyday use"></h2>
 
@@ -157,7 +157,8 @@ This is a real boundary, but not a perfect one. What kib does **not** close:
 - **Decline the broker login and the real credential is copied in**, with a warning — rotate it if an untrusted session has run that way.
 - **`host.docker.internal` is routable** to your host network stack.
 - **Your project directory is writable**, by design: editing your code is the agent's job.
-- **Shared kernel on Linux, unless you add a VM.** A hardened container (`--cap-drop=ALL`, `no-new-privileges`, seccomp, AppArmor, empty `CapEff`, no Docker socket, no host block devices) still shares your kernel. macOS and Docker Desktop already put it in a VM. On Linux, [install Lima once](docs/vm.md) and kib does the same automatically.
+- **Shared kernel on Linux, unless you turn the VM on.** A hardened container (`--cap-drop=ALL`, `no-new-privileges`, seccomp, AppArmor, empty `CapEff`, no Docker socket, no host block devices) still shares your kernel. On macOS every box runs in kib's Lima VM; on Linux, [`vm = on`](docs/vm.md) does the same. The VM sees only open projects (synced, without their redacted files), never your home folder.
+- **In the VM, the host wins a conflict.** A file you and the agent edit at the same moment keeps your version; the agent is told to re-read and redo its edit.
 
 The full audit, including the controls that **are** closed, is in [`docs/security/audit.md`](docs/security/audit.md).
 

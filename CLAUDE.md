@@ -96,11 +96,18 @@ Bash reaches Python one way only: `kib_py <module> <args…>` (host/core.sh). Pa
 
 One line each; the full story is in the `docs/design-notes/` file in parentheses.
 
-- **Never root mount propagation at a path the engine serves as a host file share** — on macOS
-  `/tmp`, `/Users`, `/Volumes` and `/private` are virtiofs views of the Mac, and virtiofs has no
-  mount namespace for the event to land in. That, not the kernel count, is why kib's old `/tmp`
-  root failed there; both containers share the LinuxKit kernel. The root goes inside the engine
-  VM (`/run/kib/…`), never `/var` — a symlink to the shared `/private/var`. (`macos.md`)
+- **Never root mount propagation at a path the engine serves as a host file share** — a share
+  (virtiofs, 9p) has no mount namespace for the event to land in. In kib's VM the root is
+  `/mnt/kib/…`: VM-local, and not `/run`, which Ubuntu's `fusermount3` AppArmor profile denies.
+  (`macos.md`, `microvm.md`)
+- **VM: never mount a project, and never sync it in one hop** — per-project mounts restart the
+  VM, a parent-folder mount exposes siblings, and Mutagen's host side trusts the VM agent (it
+  serves and accepts any path), so guarded files go through a host-local shadow. Not kib inside
+  the VM (no `~/.claude.json`, ssh breaks the TUI), not reverse-sshfs, not Docker Desktop
+  narrowed (its shares are read-write only). (`microvm.md`, `redaction-config-guard.md`)
+- **VM: never put a file the host trusts on `vm-rw`** — pidfiles, the credential witness, the
+  sync config, the clipboard `.priv` go on `vm-ro`. Package caches are per project, never shared
+  (one box would plant a package another project's box installs). (`container-lifecycle.md`)
 - **Don't re-split `~/.claude` into a shared + per-project pair** — the destructive migration it
   needs breaks the seamless host⇄box switch (same login, `--resume`, history). Keep canonical
   stock; isolate by per-launch assembly + subtree merge-out. Unknown `~/.claude` entries stay

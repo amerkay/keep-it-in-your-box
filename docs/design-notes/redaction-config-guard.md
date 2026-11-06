@@ -46,6 +46,25 @@ that reference this.
 - **The `.kibignore` → `.gitignore` sync was removed (2026-08-03).** kib wrote a managed block into the repo's own `.gitignore` at every launch, translating the rules (bare names → match-anywhere, `/`-rules → root-anchored). It edited a tracked file the user owns for a benefit the audit gate already delivers better: the gate names **tracked** matches, which is the case `.gitignore` cannot fix anyway, while the block only covered untracked files the user could ignore in one line themselves. Removing it also deletes the emitter's whole class of edge cases — the `!.env` opt-out that must not be mirrored, the subdir-launch skip, the legacy `ccignore` marker strip. Existing blocks are left in place; they are inert and the user can delete them. **Don't reinstate it**: writing to a repo's `.gitignore` is the user's call, and the session can say which line to add.
 - **The authoring semantics are in the policy text, because the near-miss is silent.** An agent in an unrelated workspace wrote a `.kibignore` of `**/*.pem`-style rules to hide a dev MySQL data dir and its TLS keys. Every one of them was a no-op past depth 2: a `/`-bearing rule is EXACT-anchored, so `**` equalises to one segment (`_rule_matches`), and the bare name it should have written is already the match-anywhere form. Nothing reports this — `parse()` warns only on `/`-leading and `..` rules, and to the sidecar's stderr, which the box cannot read; the file looks like it worked. Hence the two sub-bullets under "Redacted" in `guest/policy/etc-CLAUDE.md`: the `**` trap, directory sealing (`dir` + `!dir/keep` cannot re-include), and that an edit does not reach the live layer for the rest of that session (the reload gate below). **Don't "fix" it by teaching the matcher a recursive glob** — gitignore-shaped is the contract the guard file depends on; the fix was telling the session what the syntax is.
 
+### In the VM: the guard is the sync's ignore list
+
+Under Lima no project is mounted; the sidecar serves `/src` from a VM volume Mutagen fills, so
+what never reaches the VM is decided by `rules.sync_ignores` — one last-match-wins list that
+rebuilds `verdict`'s tiers: `[redact]` guard rules, then the project's (a `!` there cancels a
+redact, as in the view), then `[protect]` and git's own config/hooks, out of a project's reach.
+Build dirs, caches and the user's `vm_skip` names come first, so a later guard rule always wins.
+
+- **Two hops, because Mutagen's host side trusts the VM's agent.** It never re-applies ignores to
+  the agent's snapshot and serves any path the agent asks for, so one hop lets VM root read and
+  write every guarded file. Project ⇄ a host-local shadow (both ends scanned on the host, guard
+  applied) ⇄ the volume (build dirs only): nothing guarded is ever in the shadow.
+- **Guarded files are seeded, one way** (`kib/host/vmseed.py`): redacted ones as their render,
+  protected ones as real bytes, because the box must read them. The sync ignores them, so a box
+  edit to one never flows back. Seeded once per container: a host edit shows at the next cold
+  start.
+- **Mutagen config goes as a `-c` file**: `--ignore` splits on commas. Proven against a real
+  Mutagen on every rule shape (`test_real_mutagen_syncs_exactly_what_verdict_passes`).
+
 ## Host-executed config guard
 
 The sandbox's real boundary is **what the host runs later**, not the container (the Nov 2025 Cursor/Codex/Antigravity escape shape: hook config, task config, git metadata indirection). The guard reuses the `.kibignore` machinery: one rule tuple `(neg, pattern, anchor, action, immune)`, one matcher, one `_verdict()` loop. `guest/policy/global.kibignore` has `[protect]` (read through, deny writes) and `[redact]` sections; guard rules are **tail-matched** (any depth) and tallied separately from a project's, so `[protect]` is **immune to project negation**. The guard may negate itself — `.env.*` redacts broadly, `!.env.example` lets placeholders through; enumerating exceptions is the only tractable direction (placeholder names are a closed set, secret variants open-ended). The set is deliberately **three** — `.example`, `.sample`, `.template`. Each entry is a file the agent reads in full, so it holds only spellings that are always a committed template; `.env.defaults` and `.env.dist` were carried and withdrawn (2026-07-27) because both also see real per-environment use, and the asymmetry is the whole argument: a wrong guess here leaks a secret, a wrong guess the other way costs one "ask the user".

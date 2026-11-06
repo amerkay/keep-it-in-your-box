@@ -3,7 +3,11 @@
 Part of the Keep It in Your Box design notes (`docs/design-notes/`). See `CLAUDE.md` for the rules
 that reference this.
 
-`kib` runs on any macOS Docker engine. Supporting macOS is what settled kib's redaction topology for **both** platforms — twice, and the first answer was wrong.
+**Since 2026-11, kib on macOS runs every box in its own Lima VM** (vz + virtiofs) and nothing
+else: no Docker Desktop, OrbStack or Colima (`microvm.md`, [`../vm.md`](../vm.md)). The
+sections below measured Docker Desktop; where Lima differs, the VM text in `microvm.md` wins.
+
+Supporting macOS is what settled kib's redaction topology for **both** platforms — twice, and the first answer was wrong.
 
 ## The propagation root must never be a host file share
 
@@ -23,7 +27,7 @@ Three things the probe found that shaped the implementation:
 
 ## What the Mac cannot see, only Docker can reach
 
-The FUSE root lives inside the engine VM, so the Mac cannot create, inspect or unmount it. `engine_ns_exec` (host/portable.sh) runs a throwaway `--privileged --pid=host` container that `nsenter`s into the VM's mount namespace. That *privileged* mechanism is macOS-only **by design**: on Linux the same command would target your real machine, and buying code symmetry with a privileged container there would be a security regression. The shim itself is shared with rootless Docker, whose branch is a plain unprivileged `nsenter` into RootlessKit's namespace (`platform-matrix.md`); the rootful-Linux branches need no namespace at all.
+The FUSE root lives inside the engine VM, so the Mac cannot create, inspect or unmount it. `engine_ns_exec` (host/portable.sh) runs a throwaway `--privileged --pid=host` container that `nsenter`s into the VM's mount namespace. That *privileged* mechanism is VM-only **by design** (`engine_lima`): on native Linux the same command would target your real machine, and buying code symmetry with a privileged container there would be a security regression. The shim itself is shared with rootless Docker, whose branch is a plain unprivileged `nsenter` into RootlessKit's namespace (`platform-matrix.md`); the rootful-Linux branches need no namespace at all.
 
 Five shims carry the entire divergence — `fuse_root_path`, `fuse_root_create`, `fuse_root_destroy`, `fuse_mounted`, `unmount_fuse` — and `tests/check/portability.sh` fails if a sixth appears anywhere else.
 
@@ -31,12 +35,11 @@ Five shims carry the entire divergence — `fuse_root_path`, `fuse_root_create`,
 
 ## First contact: the engine the user does not have yet
 
-`_preflight_die_no_engine` is the very first thing a new Mac user sees, so it names engines in
-install *cost* order, not alphabetical. Docker Desktop first as the **architecture-correct direct
-`.dmg`** (`_docker_desktop_dmg`, `uname -m`) — the landing page makes you pick and picking wrong is
-a multi-GB download that will not launch. OrbStack second, also a `.dmg`. Colima last and
-explicitly labelled, because `brew install` on a clean Mac bootstraps Homebrew by installing the
-Xcode command line tools: several GB nobody asked for, which is what the old message led with.
+There is no engine to choose. The first launch asks once to install what kib's VM needs into
+`~/.local`, no sudo: Lima, Mutagen, the static `docker` CLI and buildx, each pinned by checksum
+(`_tool` in `host/vm.sh`). kib's docker calls use `DOCKER_CONFIG=~/.local/docker`: Docker
+Desktop's `credsStore: desktop` in `~/.docker` breaks every pull once it is uninstalled, and
+without buildx the legacy builder prints every line and has no BuildKit cache.
 
 ## Portability contract
 
