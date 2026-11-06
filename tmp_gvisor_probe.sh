@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # TMP (delete when decided): does gVisor (design C) work for kib, and how slow is it?
-# Runs in kib's Lima VM, never on your host's Docker: no sudo, open sessions untouched.
-# Installs runsc in the VM for the run and removes it after. Usage: tmp_gvisor_probe.sh <project>
+# Never on your host's Docker: no sudo, open sessions untouched. Linux: inside kib-vm, on a
+# volume copy. macOS: a throwaway VM with ~ mounted (design C), on a copy under ~. gVisor and
+# everything else is removed after. Usage: tmp_gvisor_probe.sh <project>
 set -u
 PROJ="$(cd "${1:?usage: $0 <project dir>}" && pwd)"
 KR="$(cd "$(dirname "$0")" && pwd)" # kib's checkout: the VM mounts it at this same path
 export PATH="$PATH:$HOME/.local/bin:$HOME/.local/docker" DOCKER_CONFIG="$HOME/.local/docker"
-VM=kib-vm IMG=keep-it-in-your-box P=kib-probe U=1000:1000 GV=/opt/kib-probe-gvisor
+IMG=keep-it-in-your-box P=kib-probe U="$(id -u):$(id -g)" GV=/opt/kib-probe-gvisor
+VM=kib-vm MAC="" SRC=$P-src
+if [ "$(uname -s)" = Darwin ]; then VM=$P MAC=1 SRC="$HOME/.$P-proj"; fi
+now() { perl -MTime::HiRes=time -e 'printf "%.3f", time'; }
 vm() { limactl shell --workdir / "$VM" sudo -n -- "$@" </dev/null; }
 ok() { printf '  ✔ %s\n' "$1"; }
 bad() { printf '  ✘ %s\n' "$1"; }
@@ -14,11 +18,22 @@ info() { printf '  ℹ %s\n' "$1"; }
 check() { if "${@:2}" >/dev/null 2>&1; then ok "$1"; else bad "$1"; fi; }
 is() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (got: $3)"; fi; }
 
-[ "$(limactl list --format '{{.Status}}' "$VM" 2>/dev/null)" = Running ] \
-    || limactl start --tty=false "$VM" >/dev/null 2>&1 || { echo "cannot start $VM"; exit 1; }
-DOCKER_HOST="unix://$(limactl list --format '{{.Dir}}' "$VM")/sock/docker.sock"
+sock() { echo "unix://$(limactl list --format '{{.Dir}}' "$1")/sock/docker.sock"; }
+up() { # <vm> [create args…]
+    [ "$(limactl list --format '{{.Status}}' "$1" 2>/dev/null)" = Running ] \
+        || limactl start --tty=false "${@:2}" "$1" >/dev/null 2>&1 || { echo "cannot start $1"; exit 1; }
+    for _ in $(seq 60); do DOCKER_HOST="$(sock "$1")" docker info >/dev/null 2>&1 && break; sleep 1; done
+}
+up kib-vm
+if [ -n "$MAC" ]; then
+    echo "⏳ a throwaway VM with ~ mounted, and kib's image copied in (a few minutes)…"
+    limactl start --tty=false --name $P --vm-type=vz --mount-type=virtiofs --mount-only "$HOME:w" \
+        template:docker-rootful >/dev/null 2>&1 || { echo "cannot create the probe VM"; exit 1; }
+    up $P
+    DOCKER_HOST="$(sock kib-vm)" docker save "$IMG" | DOCKER_HOST="$(sock $P)" docker load >/dev/null
+fi
+DOCKER_HOST="$(sock "$VM")"
 export DOCKER_HOST
-for _ in $(seq 60); do docker info >/dev/null 2>&1 && break; sleep 1; done # a fresh boot
 docker image inspect "$IMG" >/dev/null || { echo "no $IMG image in the VM (error above)"; exit 1; }
 
 # shellcheck disable=SC2046 # ids
@@ -31,6 +46,7 @@ cleanup() {
         for r in runsc runsc-uds; do $GV/runsc uninstall --runtime=\$r >/dev/null 2>&1; done
         rm -rf $GV; systemctl reload docker"
     rm -f "$TAR"
+    [ -z "$MAC" ] || { limactl delete -f $P >/dev/null 2>&1; rm -rf "$SRC"; }
 }
 TAR="$(mktemp)"
 trap cleanup EXIT
@@ -95,21 +111,26 @@ fi
 
 echo "kib's real redaction view (its FUSE sidecar) on a copy of $PROJ:"
 (cd "$PROJ" && { echo .git; git ls-files; } | tar -cf "$TAR" -T - 2>/dev/null)
-docker volume create $P-src >/dev/null
 docker volume create $P-cache >/dev/null
-docker run --rm -i -v $P-src:/w -v $P-cache:/c --entrypoint sh "$IMG" -c "tar -xf - -C /w &&
-    echo SECRET=kibprobevalue >/w/.env && chown -R $U /w /c" <"$TAR"
+docker run --rm -v $P-cache:/c --entrypoint chown "$IMG" "$U" /c
+if [ -n "$MAC" ]; then # a plain folder under ~, as a real project would be
+    rm -rf "$SRC" && mkdir -p "$SRC" && tar -xf "$TAR" -C "$SRC" && echo SECRET=kibprobevalue >"$SRC/.env"
+else
+    docker volume create $P-src >/dev/null
+    docker run --rm -i -v $P-src:/w --entrypoint sh "$IMG" -c "tar -xf - -C /w &&
+        echo SECRET=kibprobevalue >/w/.env && chown -R $U /w" <"$TAR"
+fi
 F=/mnt/$P/f
 vm sh -c "mkdir -p /mnt/$P && mount --bind /mnt/$P /mnt/$P && mount --make-rshared /mnt/$P
     mkdir -p $F/mnt && chmod 755 $F $F/mnt && chown $U $F/mnt && : >/var/tmp/$P-pat
-    printf 'root:x:0:0::/root:/bin/sh\nhostuser:x:1000:1000::/tmp:/bin/sh\n' >/var/tmp/$P-passwd
-    printf 'root:x:0:\nhostuser:x:1000:\n' >/var/tmp/$P-group"
+    printf 'root:x:0:0::/root:/bin/sh\nhostuser:x:${U%:*}:${U#*:}::/tmp:/bin/sh\n' >/var/tmp/$P-passwd
+    printf 'root:x:0:\nhostuser:x:${U#*:}:\n' >/var/tmp/$P-group"
 docker run -d --name $P-fuse --cap-drop=ALL --cap-add=SYS_ADMIN --device /dev/fuse \
     --security-opt apparmor=unconfined --user "$U" --userns=host --network none \
-    -v $P-src:/src -v /var/tmp/$P-pat:/kib-patterns:ro -v /var/tmp/$P-passwd:/etc/passwd:ro \
+    -v "$SRC:/src" -v /var/tmp/$P-pat:/kib-patterns:ro -v /var/tmp/$P-passwd:/etc/passwd:ro \
     -v /var/tmp/$P-group:/etc/group:ro -v "$F:$F:rshared" -v "$KR/kib:/usr/local/lib/kib:ro" \
     -v "$KR/guest/policy/global.kibignore:/usr/local/share/global.kibignore:ro" \
-    --entrypoint /usr/local/bin/fuse "$IMG" --src /src --mnt "$F/mnt" --uid 1000 --gid 1000 \
+    --entrypoint /usr/local/bin/fuse "$IMG" --src /src --mnt "$F/mnt" --uid "${U%:*}" --gid "${U#*:}" \
     --patterns-file /kib-patterns --guard-file /usr/local/share/global.kibignore >/dev/null
 for _ in $(seq 50); do vm grep -q " $F/mnt fuse" /proc/mounts && break; sleep 0.2; done
 BOX=(-v "$F/mnt:/w:rslave" --user "$U" -w /w -v "$P-cache:/c" -e HOME=/tmp
@@ -127,7 +148,7 @@ if vm grep -q " $F/mnt fuse" /proc/mounts; then
     esac
     docker run --rm "${G[@]}" "${BOX[@]}" 'echo box >probe-write.txt' >/dev/null 2>&1
     is "gVisor box: an ordinary write lands in the project" box \
-        "$(docker run --rm -v $P-src:/w --entrypoint cat "$IMG" /w/probe-write.txt 2>&1)"
+        "$(docker run --rm -v "$SRC:/w" --entrypoint cat "$IMG" /w/probe-write.txt 2>&1)"
     VIEW=1
 else
     bad "kib's FUSE sidecar never mounted: $(docker logs $P-fuse 2>&1 | tail -3)"
@@ -150,8 +171,8 @@ is "an edit inside the box wakes a watcher in the box" event \
 
 [ "$VIEW" = 1 ] || exit 1
 echo "Speed through the redaction view, today's kib (plain) vs gVisor:"
-secs() { local s; s=$(date +%s.%N); "$@" >/dev/null 2>&1 || printf '(failed) ' >&2
-    awk -v s="$s" -v e="$(date +%s.%N)" 'BEGIN { printf "%.1f", e - s }'; }
+secs() { local s; s=$(now); "$@" >/dev/null 2>&1 || printf '(failed) ' >&2
+    awk -v s="$s" -v e="$(now)" 'BEGIN { printf "%.1f", e - s }'; }
 GITOK=(-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e "GIT_CONFIG_VALUE_0=*")
 bench() { # <label> <sh command, run in the project>
     local a b
@@ -174,4 +195,4 @@ if [ -n "$lock" ]; then
             -exec rm -rf {} + && pnpm install --offline --frozen-lockfile"
     else info "pnpm install failed in ./$d, so no pnpm timing"; fi
 else info "no pnpm-lock.yaml tracked in $PROJ: no pnpm timing"; fi
-echo "Done. gVisor and every probe container were removed from the VM."
+echo "Done. gVisor, every probe container${MAC:+, the probe VM and the copy} were removed."
