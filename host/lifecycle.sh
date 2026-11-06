@@ -335,6 +335,8 @@ start_container() {
     local c=/home/hostuser/.cache
     ARGS+=(-v "$PKG_CACHE:$c" -e XDG_CACHE_HOME="$c")
     ARGS+=(-e pnpm_config_store_dir="$c/pnpm-store" -e npm_config_cache="$c/npm")
+    # For security-test.sh's "Engine VM": a box in the VM must not run on this kernel.
+    ! engine_lima || ARGS+=(-e KIB_HOST_KERNEL="$(uname -r)")
 
     local git_name git_email
     git_name="$(git config --global user.name 2>/dev/null || true)"

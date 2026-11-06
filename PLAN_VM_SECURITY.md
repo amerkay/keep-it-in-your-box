@@ -220,72 +220,55 @@ checkout and `vm-ro`. Dropped instead: no Docker Desktop code or dependency left
 - ⬜ `bin/kib`'s `preflight_platform` comment: edit once no Linux session is live
 
 ### Phase 7: tests
-- ⬜ `tests/check/vm.sh` (fake `limactl`, `mutagen`, `docker`): mount allowlist, sync
-      start/stop, volume removal, token copy in/out, refusals, sharing-list rewrite
-- ⬜ `tests/check/` ignore translation: every `.kibignore` rule shape → Mutagen ignore
-- ⬜ `security-test.sh` new section **Engine VM** (inside the box): engine is a VM; box kernel ≠
-      host kernel (kib passes `KIB_HOST_KERNEL`); `host.docker.internal` reaches the host; the
-      policy file states host-wins
-- ⬜ New `tests/vm-check.sh` (host): the paste blocks below, automated, plus lifecycle checks:
-      closed project's volume gone, VM stopped after the last session, only in-use tokens in the VM
-- ⬜ `./dev.sh check` green, including bash-3.2 portability
+- ✅ `tests/check/vm.sh` (fake `limactl`, `mutagen`, `docker`): mount allowlist, sync
+      start/stop, volume removal, vm-rw/vm-ro placement, refusals, linger, install prompt, macOS
+      Lima-only. (Sharing-list rewrite dropped with Docker Desktop)
+- ✅ Ignore translation: `tests/shared/test_rules.py`, against a real Mutagen, plus `vm_skip` order
+- ✅ `security-test.sh` section **Engine VM** (inside the box): box kernel ≠ host kernel (kib
+      passes `KIB_HOST_KERNEL` in VM mode); `host.docker.internal` resolves; the policy states
+      host-wins; `~/.cache` is the package-cache volume
+- ✅ `tests/vm-check.sh` (host, a session open): the paste blocks below, automated — mounts equal
+      kib's own `_vm_mounts`, no reverse-sshfs, `vm-ro` and the checkout read-only, no `~/.ssh`,
+      tokens or `~/.claude.json`, one volume per open project, no `.env` value in any, `vm-rw`
+      one dir per open project. Lifecycle (volume gone after close, VM stopped after the
+      linger) is the user's checklist
+- ✅ `./dev.sh check` green, including bash-3.2 portability
+- ✅ `tmp_macos_test.sh` deleted: `tests/vm-check.sh` and the checklist replace it
 
-### Phase 8: verify, then commit (ask first)
-- ⬜ All platform tests below pass
-- ⬜ Commit in small conventional commits, only when asked
+### Phase 8: verify, then commit
+- ⬜ All platform tests below pass (the user's checklist)
+- ✅ Committed in small conventional commits on `feat/vm-security` (the user allowed it)
+- ⬜ Merge to `main` when the user says so
 
 ## Platform tests
 
-| # | Test | Linux, no Lima | Linux, Lima | macOS, Docker Desktop | macOS, Lima / Colima |
-|---|---|---|---|---|---|
-| 1 | First launch: right prompt, then a session | install prompt, runs natively | VM created; Mutagen prompt if missing | narrow-sharing prompt if `/Users` is shared | VM created |
-| 2 | `uname -r` in the box ≠ host | n/a (same kernel) | ✅ | ✅ | ✅ |
-| 3 | 5 projects opened and closed in any order, no restart | ✅ | ✅ | ✅ | ✅ |
-| 4 | Host edit shows in the box < 1s; box edit shows on the host | n/a | ✅ | ✅ | ✅ |
-| 5 | Same file edited on both sides → host version kept, file listed after exit | n/a | ✅ | ✅ | ✅ |
-| 6 | Close a project → its volume is gone; close all → VM stopped | n/a | ✅ | volume only | ✅ |
-| 7 | Same `--resume` history and broker in VM and native mode | ✅ | ✅ | ✅ | ✅ |
-| 8 | Dev server on the host reachable via `host.docker.internal` | ✅ | ✅ | ✅ | ✅ |
-| 9 | `./tests/security-test.sh` inside the box | ✅ | ✅ | ✅ | ✅ |
-| 10 | Paste block below: no user files in the VM | containers only | ✅ | ✅ | ✅ |
-| 11 | Colima installed: kib uses `kib-vm`, never `colima` | — | — | — | ✅ |
+Expected results (✅ = must hold). Docker Desktop is no longer a setup (Phase 5).
+
+| # | Test | Linux, native | Linux, `vm = on` | macOS (Lima) |
+|---|---|---|---|---|
+| 1 | First launch: right prompt, then a session | no prompt | one install prompt for what is missing, then VM created | same |
+| 2 | `uname -r` in the box ≠ host | n/a (same kernel) | ✅ | ✅ |
+| 3 | 5 projects opened and closed in any order, no VM restart | ✅ | ✅ | ✅ |
+| 4 | Host edit shows in the box < 1 s; box edit shows on the host | n/a | ✅ | ✅ |
+| 5 | Same file edited on both sides → host version kept | n/a | ✅ | ✅ |
+| 6 | Close a project → its volume is gone, its cache volume kept; close all → VM stops after 10 min | n/a | ✅ | ✅ |
+| 7 | Same `--resume` history and broker in VM and native mode | ✅ | ✅ | ✅ |
+| 8 | Dev server on the host reachable via `host.docker.internal` | ✅ | ✅ | ✅ |
+| 9 | `./tests/security-test.sh` inside the box | ✅ | ✅ | ✅ |
+| 10 | `./tests/vm-check.sh` on the host, a session open | n/a | ✅ | ✅ |
+| 11 | Reopening a project reinstalls packages from its cache, no re-download | ✅ | ✅ | ✅ |
 
 ## Paste blocks: no user files in the VM
 
-Run each in a **host terminal** with at least one kib session open. Every line must print ✅.
+### Linux or macOS, kib's VM
 
-### Linux or macOS, Lima / Colima (`kib-vm`)
-
-```
-KIB="$(cd "$(dirname "$(readlink -f "$(command -v kib)")")/.." && pwd)"
-limactl shell kib-vm -- findmnt -rn -t 9p,virtiofs,fuse.sshfs -o TARGET,FSTYPE,OPTIONS
-limactl shell kib-vm -- findmnt -rn -t 9p,virtiofs,fuse.sshfs -o TARGET | grep -vxE "$KIB|$HOME/\.claude/(skills|plugins|agents|commands|hooks)|$HOME/\.cache/keep-it-in-your-box/node-vm|$HOME/\.local/state/keep-it-in-your-box/vm-r[wo]" && echo "❌ unexpected host mount above" || echo "✅ only kib's mounts"
-limactl shell kib-vm -- findmnt -rn -t fuse.sshfs -o TARGET | grep -q . && echo "❌ reverse-sshfs in use" || echo "✅ no reverse-sshfs"
-limactl shell kib-vm -- touch "$HOME/.local/state/keep-it-in-your-box/vm-ro/x" 2>/dev/null && echo "❌ vm-ro is writable from the VM" || echo "✅ vm-ro is read-only in the VM"
-ls "$HOME/.local/state/keep-it-in-your-box/vm-rw"   # one dir per OPEN project, plus .state
-limactl shell kib-vm -- test -e "$HOME/.ssh" && echo "❌ ~/.ssh visible in the VM" || echo "✅ ~/.ssh not in the VM"
-DOCKER_HOST="unix://$HOME/.lima/kib-vm/sock/docker.sock" docker volume ls -q --filter label=kib-src
-for v in $(DOCKER_HOST="unix://$HOME/.lima/kib-vm/sock/docker.sock" docker volume ls -q --filter label=kib-src); do DOCKER_HOST="unix://$HOME/.lima/kib-vm/sock/docker.sock" docker run --rm -v "$v:/s:ro" alpine sh -c 'find /s -name ".env*" -type f -exec cat {} + | grep -E "^[A-Za-z_][A-Za-z0-9_]*=" | grep -vq "=<redacted>$" && echo "❌ a .env value reached '"$v"'" || echo "✅ only redacted .env renders in '"$v"'"'; done
-```
-
-The volume list must show one `kib-<project>-<hash>-src` per **open** project and nothing else.
-
-**Baseline, 2026-11-05 (before phases 1–3):** `❌` is expected today. The current VM code also
-mounts a project folder (`~/scripts`), `~/.claude/projects`, kib's state, the Node cache and
-`~/.keep-it-in-your-box` (read-only). These are exactly what phases 1–3 remove. `~/.ssh` was not
-visible and no `reverse-sshfs` was in use.
-
-### macOS, Docker Desktop
+With at least one kib session open, in a host terminal, from the kib checkout:
 
 ```
-grep -A12 FilesharingDirectories ~/Library/Group\ Containers/group.com.docker/settings-store.json
-docker run --rm --privileged --pid=host alpine nsenter -t 1 -m -- ls /run/host_virtiofs/Users/"$USER"
-docker run --rm --privileged --pid=host alpine nsenter -t 1 -m -- test -e /run/host_virtiofs/Users/"$USER"/.ssh && echo "❌ ~/.ssh visible in the VM" || echo "✅ ~/.ssh not in the VM"
-docker run --rm --privileged --pid=host alpine nsenter -t 1 -m -- test -e /run/host_virtiofs/Users/"$USER"/Documents && echo "❌ ~/Documents visible in the VM" || echo "✅ ~/Documents not in the VM"
-docker volume ls -q --filter label=kib-src
+./tests/vm-check.sh
 ```
 
-The `ls` must list only kib's checkout and `.claude`. The volume list must show only open projects.
+Every line must pass. Close a project and run it again: its volume must be gone.
 
 ### Linux, no Lima (native: no VM boundary)
 

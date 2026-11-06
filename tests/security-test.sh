@@ -799,6 +799,27 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════
+section "Engine VM (kib's Lima VM: always on macOS, vm = on on Linux)"
+
+# Both modes: package caches persist per project, outside the image and the project.
+allow "the box's ~/.cache is the project's own package-cache volume" \
+    grep -q " $HOME/.cache " /proc/self/mountinfo
+if [ -z "${KIB_HOST_KERNEL:-}" ]; then
+    skip "the box runs on another kernel than the host" "native engine: no VM (KIB_HOST_KERNEL unset)"
+else
+    _kern="$(uname -r)"
+    if [ "$_kern" != "$KIB_HOST_KERNEL" ]; then
+        pass "the box runs on another kernel than the host ($_kern ≠ $KIB_HOST_KERNEL)"
+    else
+        fail "the box shares the host's kernel ($_kern) in VM mode"
+    fi
+    unset _kern
+    allow "host.docker.internal resolves (the host, through the VM)" getent hosts host.docker.internal
+    allow "the policy tells the agent the host wins sync conflicts" \
+        grep -q "host wins a conflict" /etc/claude-code/CLAUDE.md
+fi
+
+# ═════════════════════════════════════════════════════════════════
 section "Host resolver reach (live-DNS mount)"
 
 if [ -d /run/host-resolve ]; then
