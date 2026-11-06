@@ -248,8 +248,18 @@ def _tightens_cmd(old_file: str, new_file: str) -> int:
     return cli.OK if tightens(load(old_file), load(new_file)) else cli.REFUSED
 
 
-#: Never synced: the box builds its own in the VM, for Linux, whatever the host's OS.
-VM_LOCAL = ("node_modules", ".venv", "__pycache__", "target", ".next", ".nuxt", ".turbo")
+#: Never synced: the box builds its own in the VM, for Linux, whatever the host's OS. Caches too:
+#: a box's `.pnpm-store` lands in the project (pnpm's store must share its filesystem).
+VM_LOCAL = (
+    *("node_modules", ".pnpm-store", ".next", ".nuxt", ".turbo", "target"),
+    *(".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"),
+)
+
+
+def vm_local(skip: str) -> list[str]:
+    """`VM_LOCAL` plus the user's `vm_skip` names (config: comma- or space-separated). First in
+    every list, so a later guard rule always wins over one."""
+    return [*VM_LOCAL, *skip.replace(",", " ").split()]
 
 
 def _print_sync_config(paths: list[str]) -> int:
@@ -258,16 +268,16 @@ def _print_sync_config(paths: list[str]) -> int:
     return cli.OK
 
 
-def _sync_config_cmd(guard_file: str, rule_file: str) -> int:
-    """`sync-config <guard-file> <rule-file>` — project ⇄ shadow: the guard is applied here."""
+def _sync_config_cmd(guard_file: str, rule_file: str, skip: str) -> int:
+    """`sync-config <guard-file> <rule-file> <skip>` — project ⇄ shadow: the guard applies here."""
     return _print_sync_config(
-        [*VM_LOCAL, *sync_ignores(load(guard_file, guard=True), load(rule_file))]
+        [*vm_local(skip), *sync_ignores(load(guard_file, guard=True), load(rule_file))]
     )
 
 
-def _vm_sync_config_cmd() -> int:
-    """`vm-sync-config` — shadow ⇄ VM: the shadow holds nothing guarded, so build dirs only."""
-    return _print_sync_config(list(VM_LOCAL))
+def _vm_sync_config_cmd(skip: str) -> int:
+    """`vm-sync-config <skip>` — shadow ⇄ VM: the shadow holds nothing guarded, build dirs only."""
+    return _print_sync_config(vm_local(skip))
 
 
 def main(argv: list[str]) -> int:
@@ -276,8 +286,8 @@ def main(argv: list[str]) -> int:
         {
             "optouts": (_optouts_cmd, 2),
             "tightens": (_tightens_cmd, 2),
-            "sync-config": (_sync_config_cmd, 2),
-            "vm-sync-config": (_vm_sync_config_cmd, 0),
+            "sync-config": (_sync_config_cmd, 3),
+            "vm-sync-config": (_vm_sync_config_cmd, 1),
         },
         argv,
     )

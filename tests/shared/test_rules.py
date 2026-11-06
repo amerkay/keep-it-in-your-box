@@ -4,6 +4,7 @@ This suite carries the weight for two consumers at once: the FUSE guard and the 
 audit gate. One ruleset, so a case that passes in one context can't silently diverge in another.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -317,3 +318,13 @@ def test_real_mutagen_syncs_exactly_what_verdict_passes(project: str, tmp_path: 
         if rules.verdict(guard + proj, p) is None and not rules.git_sensitive(p)
     }
     assert got == want
+
+
+def test_vm_skip_names_follow_the_build_dirs_and_precede_the_guard(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert rules.vm_local("dist, .yarn  out")[-3:] == ["dist", ".yarn", "out"]
+    rules._sync_config_cmd(str(GUARD), "/nonexistent", "!.env")
+    paths = json.loads(capsys.readouterr().out)["sync"]["defaults"]["ignore"]["paths"]
+    # Last match wins in Mutagen: a user `!.env` comes before the guard's `.env`, never after it.
+    assert paths.index("!.env") < paths.index(".env")

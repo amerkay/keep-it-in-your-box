@@ -501,7 +501,8 @@ preflight_platform() {
 # shellcheck disable=SC2034
 KIB_CONFIG="${KIB_CONFIG:-$HOME/.keep-it-in-your-box/config}"
 KIB_CFG_BROKER=on
-KIB_CFG_VM=off # opt-in until PLAN_VM_SECURITY.md lands: `vm = on`
+KIB_CFG_VM=off   # opt-in until PLAN_VM_SECURITY.md lands: `vm = on`
+KIB_CFG_VM_SKIP= # more folder names the VM sync skips: `vm_skip = dist, .yarn`
 
 read_kib_config() {
     [ -f "$KIB_CONFIG" ] || return 0
@@ -520,6 +521,7 @@ read_kib_config() {
         case "$key" in
             broker) KIB_CFG_BROKER="$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" ;;
             vm) KIB_CFG_VM="$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" ;;
+            vm_skip) KIB_CFG_VM_SKIP="$val" ;;
         esac
     done <"$KIB_CONFIG"
 }

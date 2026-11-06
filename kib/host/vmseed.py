@@ -11,6 +11,7 @@ import io
 import os
 import sys
 import tarfile
+from collections.abc import Sequence
 from typing import IO
 
 from kib.shared import cli, render, rules
@@ -19,14 +20,14 @@ from kib.shared import cli, render, rules
 GIT_BULK = ("objects", "refs", "logs", "lfs")
 
 
-def seed(project: str, rule_list: list[rules.Rule], out: IO[bytes]) -> None:
+def seed(
+    project: str, rule_list: list[rules.Rule], out: IO[bytes], local: Sequence[str] = rules.VM_LOCAL
+) -> None:
     """Stream the seed of `project` to `out` as a tar."""
     with tarfile.open(fileobj=out, mode="w|") as tar:
         for top, dirs, files in os.walk(project):
             in_git = os.path.basename(top) == ".git"
-            dirs[:] = [
-                d for d in dirs if d not in rules.VM_LOCAL and not (in_git and d in GIT_BULK)
-            ]
+            dirs[:] = [d for d in dirs if d not in local and not (in_git and d in GIT_BULK)]
             for name in files:
                 path = os.path.join(top, name)
                 rel = os.path.relpath(path, project)
@@ -41,14 +42,15 @@ def seed(project: str, rule_list: list[rules.Rule], out: IO[bytes]) -> None:
                     tar.addfile(info, io.BytesIO(data))
 
 
-def _seed_cmd(guard_file: str, rule_file: str, project: str) -> int:
-    """`seed <guard-file> <rule-file> <project>` — the tar on stdout."""
-    seed(project, rules.load(guard_file, guard=True) + rules.load(rule_file), sys.stdout.buffer)
+def _seed_cmd(guard_file: str, rule_file: str, project: str, skip: str) -> int:
+    """`seed <guard-file> <rule-file> <project> <skip>` — the tar on stdout."""
+    rule_list = rules.load(guard_file, guard=True) + rules.load(rule_file)
+    seed(project, rule_list, sys.stdout.buffer, rules.vm_local(skip))
     return cli.OK
 
 
 def main(argv: list[str]) -> int:
-    return cli.dispatch("kib.host.vmseed", {"seed": (_seed_cmd, 3)}, argv)
+    return cli.dispatch("kib.host.vmseed", {"seed": (_seed_cmd, 4)}, argv)
 
 
 if __name__ == "__main__":

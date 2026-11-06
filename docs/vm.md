@@ -35,8 +35,11 @@ If `/dev/kvm` is missing, turn on virtualization (VT-x / AMD-V) in your BIOS. If
   VM and the VM cannot write `.git/hooks`. Edits flow both ways within about a second.
 - **The host wins a conflict.** If you and the box change the same file at once, your version is
   kept. The box is told to re-read before editing.
-- **Build folders stay in the VM:** `node_modules`, `.venv`, `target`, `.next`, `.nuxt`, `.turbo`
-  are built there, for Linux, and never sync.
+- **Build folders and caches stay in the VM**, built there for Linux, and never sync:
+  `node_modules`, `.pnpm-store`, `.venv`, `venv`, `target`, `.next`, `.nuxt`, `.turbo`, and
+  Python's `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`. Closing a project
+  deletes them, so its first install after reopening downloads again. The first sync shows the
+  file it is copying, so a big folder stands out: add it to `vm_skip` (below).
 - **Closing a project deletes its volume.** If the last sync fails, kib keeps it, and the next
   launch carries the edits back.
 - **The VM sees only this**, at the same paths:
@@ -70,6 +73,7 @@ Lima: Apache-2.0. Mutagen: MIT, with SSPL parts in its release build (fine for l
 | To | Run |
 |---|---|
 | Turn it on / off (Linux) | `vm = on` / `vm = off` in `~/.keep-it-in-your-box/config` |
+| Skip more folders | `vm_skip = dist, .yarn` in that file: names at any depth, or `a/b` from the project root |
 | Resize | `limactl stop kib-vm && limactl edit kib-vm --cpus 4 --memory 8` |
 | Start from scratch | `limactl delete -f kib-vm` — the next `kib` creates it again |
 | Stop it now | `limactl stop kib-vm` (kib does this when your last session closes) |

@@ -135,7 +135,11 @@ kib on the host, Docker in a VM, and only **open** projects go into that VM.
 - ✅ kib's own Mutagen daemon (`~/.local/state/kib-mutagen`, off the VM's mounts), stopped with
       the VM
 - ✅ The FUSE sidecar serves `/src` from that volume, not `$PWD`. The box path stays `$PWD`
-- ✅ The box waits for the first sync to finish before Claude starts, with a progress line
+- ✅ The box waits for the first sync to finish before Claude starts, with Mutagen's status live
+      on one line. 2026-11-06 Mac: a 1.6 GB first sync took 3–4 min, 1.3 GB of it a box-made
+      `.pnpm-store`; caches now join the never-synced build dirs. The status line names the file
+      being copied, and `vm_skip = …` in the config adds names (before the guard, so a `!` in it
+      can't un-ignore a guarded file)
 - ✅ Last session: `mutagen sync flush` → terminate → remove the volume and sync container. A
       failed flush keeps all of it; the next launch's session carries the edits back
 - ✅ Seed after the first sync (`kib/host/vmseed.py`): redacted files as their key-only render,

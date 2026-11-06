@@ -3,7 +3,7 @@
 # the VM's kernel, not yours (docs/vm.md). Same ~/.claude, login and broker either way: kib
 # itself never moves. The VM mounts a fixed set and never a project, so it never restarts for one.
 #
-# Reads:  KIB_CFG_VM KIB_VM KIB_CONFIG KIB_STATE_ROOT KIB_ROOT HOME LIMA_VM_TYPE LIMA_MOUNT_TYPE
+# Reads:  KIB_CFG_VM KIB_CFG_VM_SKIP KIB_VM KIB_CONFIG KIB_STATE_ROOT KIB_ROOT HOME LIMA_VM_TYPE LIMA_MOUNT_TYPE
 #         LIMA_MOUNT_SET CNAME SYNC_CNAME PATTERNS_STATE KIB_GUARD_FILE_HOST IMAGE_NAME SLUG
 #         CLAUDE_HOME
 # Writes: DOCKER_HOST DOCKER_CONFIG (exported) _KIB_ENGINE_VM KIB_NODE_CACHE KIB_HOST_GATEWAY
@@ -26,6 +26,7 @@ VM_RW="$KIB_STATE_ROOT/vm-rw"
 VM_RO="$KIB_STATE_ROOT/vm-ro"
 # Never VM-mounted: these files steer the host's Mutagen daemon.
 MUTAGEN_DATA="${XDG_STATE_HOME:-$HOME/.local/state}/kib-mutagen"
+VM_SYNC_STATUS='{{range .}}{{.Status.Description}}{{with .Beta.StagingProgress}} {{.ReceivedFiles}}/{{.ExpectedFiles}}: {{.Path}}{{end}}{{end}}'
 # Each open project's filtered copy, the VM's side of its sync. Never VM-mounted.
 VM_SHADOW="${XDG_STATE_HOME:-$HOME/.local/state}/kib-shadow"
 
@@ -203,8 +204,8 @@ _install() { # <sha256> <url> <dir under ~> [tar members…, or the name of a ba
 vm_sync_start() {
     local uid gid cfg="$PATTERNS_STATE.sync.yml" shadow="$VM_SHADOW/$CNAME"
     uid="$(box_uid)" gid="$(box_gid)"
-    kib_py shared.rules sync-config "$KIB_GUARD_FILE_HOST" "$PATTERNS_STATE" >"$cfg"
-    kib_py shared.rules vm-sync-config >"$cfg.vm"
+    kib_py shared.rules sync-config "$KIB_GUARD_FILE_HOST" "$PATTERNS_STATE" "$KIB_CFG_VM_SKIP" >"$cfg"
+    kib_py shared.rules vm-sync-config "$KIB_CFG_VM_SKIP" >"$cfg.vm"
     # A shadow and volume a failed close kept are reused: the new sessions carry their edits back.
     _mutagen sync terminate "$CNAME" "$CNAME-host" >/dev/null 2>&1 || true
     docker rm -f "$SYNC_CNAME" >/dev/null 2>&1 || true
@@ -222,20 +223,33 @@ vm_sync_start() {
     # ponytail: seeded once per container; a host edit to one shows at the next cold start.
     {
         (umask 077 && mkdir -p "$shadow") \
-            && kib_py host.vmseed seed "$KIB_GUARD_FILE_HOST" "$PATTERNS_STATE" "$PWD" \
+            && kib_py host.vmseed seed "$KIB_GUARD_FILE_HOST" "$PATTERNS_STATE" "$PWD" "$KIB_CFG_VM_SKIP" \
             | tar -xf - -C "$shadow"
     } || die "could not stage the redacted and protected files' stand-ins in $shadow."
     echo "🔄 kib: syncing $PWD into the VM…" >&2
+    local t0=$SECONDS
     {
         _vm_session "$CNAME-host" "$cfg" "$PWD" "$shadow" \
             && _vm_session "$CNAME" "$cfg.vm" "$shadow" "docker://$SYNC_CNAME/src"
     } || die "could not sync $PWD into the VM." "$(_mutagen sync list "$CNAME-host" "$CNAME" 2>&1)"
+    [ $((SECONDS - t0)) -lt 30 ] || note "ℹ️  kib: the first sync took $((SECONDS - t0)) s. To skip folders the box can rebuild:
+   vm_skip = dist, .yarn   in $KIB_CONFIG"
 }
 
 _vm_session() { # <name> <config> <alpha> <beta> — create, then wait for the first sync
+    local pid cols
     _mutagen sync create --name "$1" --label kib=1 --sync-mode two-way-resolved \
-        --symlink-mode posix-raw --no-ignore-vcs -c "$2" "$3" "$4" >/dev/null \
-        && _mutagen sync flush "$1" >/dev/null
+        --symlink-mode posix-raw --no-ignore-vcs -c "$2" "$3" "$4" >/dev/null || return 1
+    _mutagen sync flush "$1" >/dev/null 200>&- 201>&- 205>&- 206>&- &
+    pid=$!
+    cols="$(tput cols 2>/dev/null || echo 80)"
+    while [ -t 2 ] && kill -0 "$pid" 2>/dev/null; do # one line: status, and the file it is on
+        printf '\r\033[K   %s' "$(_mutagen sync list "$1" --template "$VM_SYNC_STATUS" 2>/dev/null \
+            | sed 's/ on beta//' | cut -c "1-$((cols - 4))")" >&2
+        sleep 1
+    done
+    [ ! -t 2 ] || printf '\r\033[K' >&2
+    wait "$pid"
 }
 
 # Flush VM → shadow → project, then drop it all. A failed flush keeps everything, so no box edit
