@@ -149,10 +149,14 @@ _vm_tools() {
 }
 
 _vm_install() { # <commands>
-    local t a
-    for t in $1; do [ -n "$(_tool "$t")" ] || return 1; done
+    local t a list=""
+    for t in $1; do
+        [ -n "$(_tool "$t")" ] || return 1
+        case "$t" in limactl) t=Lima ;; docker) t="the docker command (not Docker Desktop)" ;; esac
+        list="$list${list:+, }$t"
+    done
     printf '🛡️  kib: VM mode runs every box in a Lima VM, so a kernel exploit stays in it.\n' >&2
-    printf '   Install%s into ~/.local? [Y/n/never] ' "$1" >&2
+    printf '   Install %s into ~/.local? [Y/n/never] ' "$list" >&2
     read -r a || true
     case "$a" in
         [nN]ever)

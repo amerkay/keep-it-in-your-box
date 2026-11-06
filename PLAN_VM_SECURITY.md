@@ -190,7 +190,9 @@ checkout and `vm-ro`. Dropped instead: no Docker Desktop code or dependency left
       breaks pulls once it is gone. The image needs no BuildKit, so no buildx
 - ✅ Removed: Docker Desktop start/probe/preflight, `engine_in_vm` (now `engine_lima`), the
       `desktop-linux` context check
-- ⬜ Verify on the Mac with Docker Desktop quit and its CLI off `PATH` (`tmp_macos_test.sh`)
+- ✅ Verified on the Mac 2026-11-06, Docker Desktop quit and its CLI off `PATH`: kib installed
+      its own docker CLI; box in Lima, `.env` redacted and its value not in the volume, Mac server
+      reached, sync both ways, only kib's mounts, VM stopped after, Docker Desktop never started
 - ⬜ `bin/kib`'s `preflight_platform` comment still names the engine check: fix once no Linux
       session is live (editing it under one corrupts it)
 
