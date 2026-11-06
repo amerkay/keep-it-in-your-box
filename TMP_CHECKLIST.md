@@ -90,7 +90,8 @@ kib build
 
 - [ ] `sn-workspace`: drop pnpm `store-dir`/`storeDir` and uv `cache-dir` if set; delete its
       `.pnpm-store`
-- [ ] With no Linux session open, tell Claude "fix bin/kib" (a stale comment)
+- [ ] With no Linux session open, tell Claude "fix bin/kib": a stale comment, and `kib build`
+      alone starts the VM without the 10-minute stop timer
 - [ ] Remove the native Docker leftovers on Linux (below)
 - [ ] Happy? Tell Claude "merge"
 
