@@ -14,14 +14,20 @@ docker info >/dev/null 2>&1 || {
     echo "start kib-vm first: limactl start kib-vm"
     exit 1
 }
+vm() { limactl shell --workdir / kib-vm sudo -n -- "$@" </dev/null; }
 LOG="$(mktemp)"
 cleanup() {
     docker volume rm $P-src $P-cache $P-bin >/dev/null 2>&1
+    vm rm -f /var/tmp/$P-passwd /var/tmp/$P-group
     rm -f "$LOG"
 }
+cleanup
 trap cleanup EXIT
+# fusermount refuses a uid with no /etc/passwd entry.
+vm sh -c "printf 'root:x:0:0::/root:/bin/sh\nhostuser:x:${U%:*}:${U#*:}::/tmp:/bin/sh\n' >/var/tmp/$P-passwd
+    printf 'root:x:0:\nhostuser:x:${U#*:}:\n' >/var/tmp/$P-group"
 
-echo "VM kernel $(limactl shell --workdir / kib-vm uname -r </dev/null) (passthrough needs 6.9+)"
+echo "VM kernel $(vm uname -r) (passthrough needs 6.9+)"
 echo "⏳ building go-fuse's loopback example…"
 for v in src cache bin; do docker volume create $P-$v >/dev/null; done
 docker run --rm -v $P-bin:/out golang:latest sh -c 'git clone -q --depth 1 \
@@ -30,18 +36,22 @@ docker run --rm -v $P-bin:/out golang:latest sh -c 'git clone -q --depth 1 \
     echo "the build failed: $(tail -n 4 "$LOG")"
     exit 1
 }
-(cd "$D" && {
+# The whole repo, as a project may be a subfolder of one (pnpm runs in the subfolder).
+TOP="$(git -C "$D" rev-parse --show-toplevel)" || exit 1
+(cd "$TOP" && {
     echo .git
     git ls-files
 } | tar -cf - -T - 2>/dev/null) | docker run --rm -i -v $P-src:/w -v $P-cache:/c \
     --entrypoint sh "$IMG" -c "tar -xf - -C /w && chown -R $U /w /c"
 
 FUSE=(--cap-drop=ALL --cap-add=SYS_ADMIN --device /dev/fuse --security-opt apparmor=unconfined
-    -v "$KR/kib:/usr/local/lib/kib:ro" -v "$KR/guest/policy/global.kibignore:/g:ro")
+    -v "$KR/kib:/usr/local/lib/kib:ro" -v "$KR/guest/policy/global.kibignore:/g:ro"
+    -v "/var/tmp/$P-passwd:/etc/passwd:ro" -v "/var/tmp/$P-group:/etc/group:ro")
 ENV=(-v "$P-src:/src" -v "$P-cache:/c" -v "$P-bin:/b" -e XDG_CACHE_HOME=/c -e pnpm_config_store_dir=/c/store
     -e npm_config_store_dir=/c/store -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory
     -e "GIT_CONFIG_VALUE_0=*" --entrypoint sh "$IMG" -c)
-WAIT='for i in $(seq 50); do grep -q " /tmp/m fuse" /proc/mounts && break; sleep 0.1; done; cd /tmp/m'
+WAIT='for i in $(seq 50); do grep -q " /tmp/m fuse" /proc/mounts && break; sleep 0.1; done
+    grep -q " /tmp/m fuse" /proc/mounts || { tail -n 3 /tmp/d >&2; exit 1; }; cd /tmp/m'
 # Runs $W in the view, as the user; prints its seconds (a failure's tail goes to stderr).
 TIMED='export HOME=/tmp; s=$(date +%s.%N); sh -c "$W" >/tmp/log 2>&1 || tail -n 4 /tmp/log >&2
     awk -v s=$s -v e=$(date +%s.%N) "BEGIN { printf \"%.1f\", e - s }"'
@@ -52,10 +62,10 @@ run() { # <column index> <sh command>: seconds
     case $1 in
         0) pre='cd /src' ;;
         1) pre=": >/tmp/p && mkdir /tmp/m && /usr/local/bin/fuse --src /src --mnt /tmp/m --uid ${U%:*} \
-            --gid ${U#*:} --patterns-file /tmp/p --guard-file /g & $WAIT" ;;
-        2) pre="mkdir /tmp/m && /b/loopback -q /tmp/m /src & $WAIT" ;;
+            --gid ${U#*:} --patterns-file /tmp/p --guard-file /g 2>/tmp/d & $WAIT" ;;
+        2) pre="mkdir /tmp/m && /b/loopback -q /tmp/m /src 2>/tmp/d & $WAIT" ;;
         3)
-            pre="mkdir /tmp/m && /b/loopback -q -allow-other /tmp/m /src & $WAIT"
+            pre="mkdir /tmp/m && /b/loopback -q -allow-other /tmp/m /src 2>/tmp/d & $WAIT"
             as=(--user 0:0 --cap-add SETUID --cap-add SETGID)
             run="exec gosu $U $run"
             ;;
@@ -67,16 +77,16 @@ bench() { # <label> <sh command>
     local i t base="" line
     line="$(printf '  %-34s' "$1")"
     for i in 0 1 2 3; do
-        t="$(run $i "$2")"
+        t="$(run $i "$2")" || t=fail
         base="${base:-$t}"
         line="$line $(printf '%s %6ss' "${NAMES[$i]}" "$t")"
-        [ $i = 0 ] || line="$line$(awk -v a="$base" -v b="$t" 'BEGIN { printf " (×%.1f)", (a > 0 ? b / a : 0) }')"
+        [ $i = 0 ] || [ "$t" = fail ] || line="$line$(awk -v a="$base" -v b="$t" 'BEGIN { printf " (×%.1f)", (a > 0 ? b / a : 0) }')"
     done
     echo "$line"
 }
 
 pt="$(docker run --rm --user 0:0 "${FUSE[@]}" "${ENV[@]}" "mkdir /tmp/m && /b/loopback -debug \
-    -allow-other /tmp/m /src >/tmp/l 2>&1 & $WAIT && cat .git/HEAD >/dev/null; grep -c backing= /tmp/l")"
+    -allow-other /tmp/m /src >/tmp/d 2>&1 & $WAIT && cat .git/HEAD >/dev/null; grep -c 'backing=[1-9]' /tmp/d")"
 case "$pt" in
     0 | "") echo "FUSE passthrough as root: OFF (the kernel or the capability refused it)" ;;
     *) echo "FUSE passthrough as root: ON" ;;
@@ -89,7 +99,7 @@ bench "write, read, delete 3000 files" 'mkdir t && for i in $(seq 3000); do echo
     cat t/* >/dev/null; rm -rf t'
 bench "read every tracked file" 'git ls-files -z | xargs -0 cat >/dev/null'
 
-lock="$(cd "$D" && git ls-files | grep -m1 -E '(^|/)pnpm-lock\.yaml$')"
+lock="$(cd "$D" && git ls-files --full-name | grep -m1 -E '(^|/)pnpm-lock\.yaml$')"
 [ -n "$lock" ] || {
     echo "no pnpm-lock.yaml tracked: no pnpm timing"
     exit 0
