@@ -44,6 +44,9 @@ for t in limactl colima mutagen; do echo "$t: $(command -v "$t" || ls "$HOME/.lo
 
 step "1. S3: where Docker Desktop keeps its sharing list (key names; values only for sharing)"
 GC="$HOME/Library/Group Containers/group.com.docker"
+# A plain folder in ~, never ~/Documents: macOS privacy-prompts Docker for that one.
+O="$HOME/kib-s3-outside"
+mkdir -p "$O" && touch "$O/seen"
 for f in "$GC/settings-store.json" "$GC/settings.json" \
     "/Library/Application Support/com.docker.docker/admin-settings.json"; do
     [ -f "$f" ] || {
@@ -63,8 +66,8 @@ if dd_up; then
     echo "Docker Desktop VM's host shares:"
     dd run --rm --privileged --pid=host alpine nsenter -t 1 -m -- \
         sh -c 'mount | grep -iE "virtiofs|grpcfuse|osxfs|fakeowner" | head; ls /run/host_virtiofs 2>&1' 2>&1
-    check "Docker Desktop shares ~/Documents today (expected now; Phase 5 closes it)" \
-        dd run --rm -v "$HOME/Documents:/d:ro" alpine true
+    check "Docker Desktop shares any folder in ~ today (expected now; Phase 5 closes it)" \
+        dd run --rm -v "$O:/o:ro" alpine test -e /o/seen
 else
     echo "Docker Desktop is not running: start it and rerun for this part."
 fi
@@ -100,13 +103,15 @@ EOF
     dd_start
     python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print("   after start:", [v for k,v in d.items() if k.lower()=="filesharingdirectories"])' "$F"
     check "the probe dir is shared" dd run --rm -v "$P:/p:ro" alpine test -e /p/seen
-    check "Documents is refused now" not dd run --rm -v "$HOME/Documents:/d:ro" alpine true
-    dd run --rm -v "$HOME/Documents:/d:ro" alpine true 2>&1 | tail -1 | sed 's/^/   docker says: /'
+    check "a folder outside the list is refused now" not dd run --rm -v "$O:/o:ro" alpine test -e /o/seen
+    dd run --rm -v "$O:/o:ro" alpine test -e /o/seen 2>&1 | tail -1 | sed 's/^/   docker says: /'
     dd_stop
     cp "$F.kib-bak" "$F" && rm -f "$F.kib-bak" && rm -rf "$P"
     dd_start
-    check "restored: ~/Documents shared again" dd run --rm -v "$HOME/Documents:/d:ro" alpine true
+    check "restored: that folder is shared again" dd run --rm -v "$O:/o:ro" alpine test -e /o/seen
 fi
+
+rm -rf "$O"
 
 step "2. S7: a kib box in the Lima VM (vz + virtiofs)"
 if ask "Run one kib box in Lima? kib may prompt to install Lima and Mutagen; the first run builds the image in the VM (~5-10 min)."; then
