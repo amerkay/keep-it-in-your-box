@@ -16,7 +16,8 @@ check() { if "${@:2}" >/dev/null 2>&1; then ok "$1"; else bad "$1"; fi; }
     || limactl start --tty=false "$VM" >/dev/null 2>&1 || { echo "cannot start $VM"; exit 1; }
 DOCKER_HOST="unix://$(limactl list --format '{{.Dir}}' "$VM")/sock/docker.sock"
 export DOCKER_HOST
-docker image inspect "$IMG" >/dev/null 2>&1 || { echo "no $IMG image in the VM: run kib once"; exit 1; }
+for _ in $(seq 60); do docker info >/dev/null 2>&1 && break; sleep 1; done # a fresh boot
+docker image inspect "$IMG" >/dev/null || { echo "no $IMG image in the VM (error above)"; exit 1; }
 
 # shellcheck disable=SC2046 # ids
 cleanup() {
