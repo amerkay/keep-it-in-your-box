@@ -60,20 +60,22 @@ TARBALL="node-$VERSION-linux-$ARCH.tar.xz"
 # Staged in a temp dir and renamed in at the end, so an interrupted fetch cannot leave a partial
 # version that resolve_node_version would happily put on PATH.
 TMP="$(mktemp -d "$STORE/.tmp.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT
+# Built container-local, then copied in: a VM's share refuses tar's utime (macOS virtiofs).
+WORK="$(mktemp -d)"
+trap 'rm -rf "$TMP" "$WORK"' EXIT
 
 echo "node-fetch: downloading $TARBALL …"
-curl -fsSL -o "$TMP/$TARBALL" "$DIST/$VERSION/$TARBALL" \
+curl -fsSL -o "$WORK/$TARBALL" "$DIST/$VERSION/$TARBALL" \
     || die "download failed for $VERSION ($ARCH). Is it a real release?"
 
 # Every project on this machine will run this binary: prove it is the published one.
-curl -fsSL "$DIST/$VERSION/SHASUMS256.txt" >"$TMP/SHASUMS256.txt" \
+curl -fsSL "$DIST/$VERSION/SHASUMS256.txt" >"$WORK/SHASUMS256.txt" \
     || die "could not fetch checksums for $VERSION."
-(cd "$TMP" && grep " $TARBALL\$" SHASUMS256.txt | sha256sum -c -) >/dev/null 2>&1 \
+(cd "$WORK" && grep " $TARBALL\$" SHASUMS256.txt | sha256sum -c -) >/dev/null 2>&1 \
     || die "CHECKSUM MISMATCH for $TARBALL — refusing to cache it."
 
-tar -xJf "$TMP/$TARBALL" -C "$TMP"
-TREE="$TMP/node-$VERSION-linux-$ARCH"
+tar --no-same-owner -xJf "$WORK/$TARBALL" -C "$WORK"
+TREE="$WORK/node-$VERSION-linux-$ARCH"
 [ -x "$TREE/bin/node" ] || die "the tarball for $VERSION has no bin/node."
 
 # include/ is ~60 MB of v8 + openssl headers; node-gyp downloads its own and only reads a prefix
@@ -96,7 +98,8 @@ else
 fi
 
 chmod -R a+rX "$TREE"
-mv "$TREE" "$STORE/$VERSION" 2>/dev/null || [ -x "$STORE/$VERSION/bin/node" ] \
+cp -R "$TREE" "$TMP/tree" || die "could not copy $VERSION into the cache."
+mv "$TMP/tree" "$STORE/$VERSION" 2>/dev/null || [ -x "$STORE/$VERSION/bin/node" ] \
     || die "could not install $VERSION into the cache."
 
 echo "node-fetch: cached $VERSION ($(du -sh "$STORE/$VERSION" | cut -f1))."
