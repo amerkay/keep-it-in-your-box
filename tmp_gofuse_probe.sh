@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # TMP (delete when decided): how fast can a compiled FUSE view be? kib's Python view vs go-fuse's
 # stock loopback (no kib rules), as the user and as root (root enables FUSE passthrough).
-# In kib-vm, on a volume copy (no virtiofs, no gVisor: the FUSE cost alone). Removes all it adds.
-# Usage: tmp_gofuse_probe.sh <project dir>   (~5 min, most of it kib's Python pnpm install)
+# In kib-vm, on a throwaway project it builds in a volume (no virtiofs, no gVisor: the FUSE cost
+# alone). Touches none of your files; removes all it adds. Usage: tmp_gofuse_probe.sh (~4 min)
 set -u
-D="$(cd "${1:?usage: $0 <project dir>}" && pwd)" || exit 1
 KR="$(cd "$(dirname "$0")" && pwd)" # kib-vm mounts kib's checkout at this same path
 export PATH="$PATH:$HOME/.local/bin:$HOME/.local/docker" DOCKER_CONFIG="$HOME/.local/docker"
 IMG=keep-it-in-your-box P=kibgf U="$(id -u):$(id -g)"
@@ -36,14 +35,6 @@ docker run --rm -v $P-bin:/out golang:latest sh -c 'git clone -q --depth 1 \
     echo "the build failed: $(tail -n 4 "$LOG")"
     exit 1
 }
-# The whole repo, as a project may be a subfolder of one (pnpm runs in the subfolder).
-TOP="$(git -C "$D" rev-parse --show-toplevel)" || exit 1
-(cd "$TOP" && {
-    printf '.git\0'
-    git ls-files -z
-} | tar --null -cf - -T - 2>/dev/null) | docker run --rm -i -v $P-src:/w -v $P-cache:/c \
-    --entrypoint sh "$IMG" -c "tar -xf - -C /w && chown -R $U /w /c"
-
 FUSE=(--cap-drop=ALL --cap-add=SYS_ADMIN --device /dev/fuse --security-opt apparmor=unconfined
     -v "$KR/kib:/usr/local/lib/kib:ro" -v "$KR/guest/policy/global.kibignore:/g:ro"
     -v "/var/tmp/$P-passwd:/etc/passwd:ro" -v "/var/tmp/$P-group:/etc/group:ro")
@@ -52,9 +43,9 @@ ENV=(-v "$P-src:/src" -v "$P-cache:/c" -v "$P-bin:/b" -e XDG_CACHE_HOME=/c -e pn
     -e "GIT_CONFIG_VALUE_0=*" --entrypoint sh "$IMG" -c)
 WAIT='for i in $(seq 50); do grep -q " /tmp/m fuse" /proc/mounts && break; sleep 0.1; done
     grep -q " /tmp/m fuse" /proc/mounts || { tail -n 3 /tmp/d >&2; exit 1; }; cd /tmp/m'
-# Runs $W in the view, as the user; prints its seconds (a failure's tail goes to stderr).
-TIMED='export HOME=/tmp; s=$(date +%s.%N); sh -ec "$W" >/tmp/log 2>&1 || tail -n 4 /tmp/log >&2
-    awk -v s=$s -v e=$(date +%s.%N) "BEGIN { printf \"%.2f\", e - s }"'
+# Runs $W in the view, as the user; prints its seconds and fails with it (its tail to stderr).
+TIMED='export HOME=/tmp; s=$(date +%s.%N); f=0; sh -ec "$W" >/tmp/log 2>&1 || { f=1; tail -n 4 /tmp/log >&2; }
+    awk -v s=$s -v e=$(date +%s.%N) "BEGIN { printf \"%.2f\", e - s }"; exit $f'
 NAMES=("no FUSE" "kib Python" "Go" "Go as root")
 run() { # <column index> <sh command>: seconds
     local -a as=(--user "$U")
@@ -87,6 +78,17 @@ bench() { # <label> <sh command>
     echo "$line"
 }
 
+echo "⏳ building a throwaway project (2000 files, a git repo, a few hundred npm packages)…"
+SETUP='git init -q && mkdir src && for i in $(seq 2000); do echo "export const v$i = $i" >src/m$i.js; done
+    cat >package.json <<J
+{"name": "probe", "private": true, "dependencies": {"vue": "^3", "vite": "^6", "typescript": "^5",
+  "eslint": "^9", "@vitejs/plugin-vue": "^5", "webpack": "^5", "lodash": "^4", "axios": "^1"}}
+J
+    pnpm install && echo node_modules >.gitignore && git add -A
+    git -c user.name=probe -c user.email=probe@example.invalid commit -qm init'
+docker run --rm --user 0:0 -v "$P-src:/w" -v "$P-cache:/c" --entrypoint chown "$IMG" "$U" /w /c
+run 0 "$SETUP" >/dev/null || exit 1
+
 pt="$(docker run --rm --user 0:0 "${FUSE[@]}" "${ENV[@]}" "mkdir /tmp/m && /b/loopback -debug \
     -allow-other /tmp/m /src >/tmp/d 2>&1 & $WAIT && cat .git/HEAD >/dev/null; grep -c 'backing=[1-9]' /tmp/d")"
 case "$pt" in
@@ -101,14 +103,5 @@ bench "write, read, delete 3000 files" 'mkdir t && for i in $(seq 3000); do echo
     cat t/* >/dev/null; rm -rf t'
 bench "read every tracked file" 'git ls-files -z | xargs -0 cat >/dev/null'
 
-lock="$(cd "$D" && git ls-files --full-name | grep -m1 -E '(^|/)pnpm-lock\.yaml$')"
-[ -n "$lock" ] || {
-    echo "no pnpm-lock.yaml tracked: no pnpm timing"
-    exit 0
-}
-d="$(dirname "$lock")"
-echo "  (pnpm in ./$d: filling the cache once, not timed…)"
-run 0 "cd '$d' && pnpm install --frozen-lockfile" >/dev/null
-bench "pnpm install (warm cache)" \
-    "cd '$d' && rm -rf node_modules && pnpm install --prefer-offline --frozen-lockfile"
+bench "pnpm install (warm cache)" 'rm -rf node_modules && pnpm install --prefer-offline --frozen-lockfile'
 echo "Done. Everything the probe added is being removed."
