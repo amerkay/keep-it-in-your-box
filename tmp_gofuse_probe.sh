@@ -39,7 +39,7 @@ FUSE=(--cap-drop=ALL --cap-add=SYS_ADMIN --device /dev/fuse --security-opt appar
     -v "$KR/kib:/usr/local/lib/kib:ro" -v "$KR/guest/policy/global.kibignore:/g:ro"
     -v "/var/tmp/$P-passwd:/etc/passwd:ro" -v "/var/tmp/$P-group:/etc/group:ro")
 ENV=(-v "$P-src:/src" -v "$P-cache:/c" -v "$P-bin:/b" -e XDG_CACHE_HOME=/c -e pnpm_config_store_dir=/c/store
-    -e npm_config_store_dir=/c/store -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory
+    -e npm_config_store_dir=/c/store -e UV_PYTHON_DOWNLOADS=never -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory
     -e "GIT_CONFIG_VALUE_0=*" --entrypoint sh "$IMG" -c)
 WAIT='for i in $(seq 50); do grep -q " /tmp/m fuse" /proc/mounts && break; sleep 0.1; done
     grep -q " /tmp/m fuse" /proc/mounts || { tail -n 3 /tmp/d >&2; exit 1; }; cd /tmp/m'
@@ -78,13 +78,23 @@ bench() { # <label> <sh command>
     echo "$line"
 }
 
-echo "⏳ building a throwaway project (2000 files, a git repo, a few hundred npm packages)…"
+echo "⏳ building a throwaway project (2000 files, a git repo, a few hundred npm and a few dozen PyPI packages)…"
 SETUP='git init -q && mkdir src && for i in $(seq 2000); do echo "export const v$i = $i" >src/m$i.js; done
     cat >package.json <<J
 {"name": "probe", "private": true, "dependencies": {"vue": "^3", "vite": "^6", "typescript": "^5",
   "eslint": "^9", "@vitejs/plugin-vue": "^5", "webpack": "^5", "lodash": "^4", "axios": "^1"}}
 J
-    pnpm install && echo node_modules >.gitignore && git add -A
+    pnpm install --ignore-scripts
+    cat >pyproject.toml <<J
+[project]
+name = "probe"
+version = "0"
+requires-python = ">=3.11"
+dependencies = ["requests", "pydantic", "rich", "httpx", "sqlalchemy", "pytest", "ruff"]
+J
+    uv sync --no-install-project
+    printf "node_modules\n.venv\n" >.gitignore
+    git add -A
     git -c user.name=probe -c user.email=probe@example.invalid commit -qm init'
 docker run --rm --user 0:0 -v "$P-src:/w" -v "$P-cache:/c" --entrypoint chown "$IMG" "$U" /w /c
 run 0 "$SETUP" >/dev/null || exit 1
@@ -103,5 +113,6 @@ bench "write, read, delete 3000 files" 'mkdir t && for i in $(seq 3000); do echo
     cat t/* >/dev/null; rm -rf t'
 bench "read every tracked file" 'git ls-files -z | xargs -0 cat >/dev/null'
 
-bench "pnpm install (warm cache)" 'rm -rf node_modules && pnpm install --prefer-offline --frozen-lockfile'
+bench "pnpm install (warm cache)" 'rm -rf node_modules && pnpm install --prefer-offline --frozen-lockfile --ignore-scripts'
+bench "uv sync (warm cache)" 'rm -rf .venv && uv sync --offline --no-install-project'
 echo "Done. Everything the probe added is being removed."
