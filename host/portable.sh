@@ -38,6 +38,12 @@ if is_macos; then
 else
     LIMA_VM_TYPE=qemu LIMA_MOUNT_TYPE=9p LIMA_MOUNT_SET='.mounts[]."9p".cache = "none"'
 fi
+# Lima on Linux needs QEMU and KVM, which take root to set up (docs/vm.md). macOS has its own.
+lima_host_ready() {
+    is_macos && return 0
+    command -v "qemu-system-$(uname -m)" >/dev/null && command -v qemu-img >/dev/null \
+        && [ -w /dev/kvm ]
+}
 
 _is_uint() { case "$1" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac }
 

@@ -16,8 +16,8 @@ VM_SPEC="$KIB_STATE_ROOT/vm-spec" # the mount set the VM was last booted with
 # ponytail: Lima's user-mode network address; read it from the VM if a network differs.
 LIMA_HOST_IP=192.168.5.2
 
-# Pinned, not read off the release: a SHA256SUMS beside the tarball vouches for nothing.
 MUTAGEN_VERSION=v0.18.1
+LIMA_VERSION=2.2.1
 # Open projects' state, and the VM's only view of kib's: what the box writes in VM_RW, what the
 # host writes for the VM (and its own per-container files) in VM_RO, read-only there.
 VM_RW="$KIB_STATE_ROOT/vm-rw"
@@ -115,7 +115,7 @@ _mutagen() {
 }
 
 _mutagen_ensure() {
-    local a arch sum tmp bin="$HOME/.local/bin"
+    local a arch sum bin="$HOME/.local/bin"
     MUTAGEN_BIN="$(command -v mutagen || echo "$bin/mutagen")"
     [ -x "$MUTAGEN_BIN" ] && return 0
     [ -t 0 ] || die "VM mode syncs projects with Mutagen, which is not installed." \
@@ -131,16 +131,48 @@ _mutagen_ensure() {
         darwin-arm64) arch=darwin_arm64 sum=6f810416d9e5fc4fd5e18431146f8b3c5a2056ba5a24f76c1e66da86eb3257e2 ;;
         *) die "no Mutagen build for $KIB_OS-$(uname -m). Turn VM mode off: vm = off in $KIB_CONFIG" ;;
     esac
-    tmp="$(mktemp -d)"
-    curl -fsSL -o "$tmp/m.tgz" "https://github.com/mutagen-io/mutagen/releases/download/$MUTAGEN_VERSION/mutagen_${arch}_$MUTAGEN_VERSION.tar.gz" \
-        || die "could not download Mutagen (curl, above)."
-    [ "$(sha256_file "$tmp/m.tgz")" = "$sum" ] || die "the Mutagen download failed its checksum."
-    {
-        tar -xzf "$tmp/m.tgz" -C "$tmp" mutagen mutagen-agents.tar.gz && mkdir -p "$bin" \
-            && mv "$tmp/mutagen" "$tmp/mutagen-agents.tar.gz" "$bin/"
-    } || die "could not install Mutagen into $bin."
-    rm -rf "$tmp"
+    _install "https://github.com/mutagen-io/mutagen/releases/download/$MUTAGEN_VERSION/mutagen_${arch}_$MUTAGEN_VERSION.tar.gz" \
+        "$sum" "$bin" mutagen mutagen-agents.tar.gz
     MUTAGEN_BIN="$bin/mutagen"
+}
+
+_lima_install() { # 1 = not installed: declined, or this host cannot run it
+    local a sum os
+    case "$KIB_OS-$(uname -m)" in
+        linux-x86_64) os=Linux-x86_64 sum=b391ac7fcac2b2a5a1628107756463188ded4d18d3104a40a66a8bb6fec01bcb ;;
+        linux-aarch64) os=Linux-aarch64 sum=fbcf4d127936666aa2cf6013b663c250431f2a59394757b404070f8d6a160e10 ;;
+        darwin-x86_64) os=Darwin-x86_64 sum=6b776e4bc41f358e6ee01fefcc78e2eb26f11635a0fcff632234af77a566c6c4 ;;
+        darwin-arm64) os=Darwin-arm64 sum=9e9eacce88f37e185c346bad73aa6136f738d8cdf8c3bb23cd42b071824bc66e ;;
+        *) return 1 ;;
+    esac
+    lima_host_ready || return 1
+    printf '🛡️  kib: VM mode runs boxes in a Lima VM (Apache-2.0): a kernel exploit stays in it.\n' >&2
+    printf '   Install Lima %s into ~/.local? [Y/n/never] ' "$LIMA_VERSION" >&2
+    read -r a || true
+    case "$a" in
+        [nN]ever)
+            mkdir -p "${KIB_CONFIG%/*}" && echo "vm = off" >>"$KIB_CONFIG" && KIB_CFG_VM=off
+            echo "   OK: 'vm = off' is now in $KIB_CONFIG." >&2
+            return 1
+            ;;
+        [nN]*) return 1 ;;
+    esac
+    _install "https://github.com/lima-vm/lima/releases/download/v$LIMA_VERSION/lima-$LIMA_VERSION-$os.tar.gz" \
+        "$sum" "$HOME/.local"
+}
+
+# Pinned, not read off the release: a SHA256SUMS beside the tarball vouches for nothing.
+_install() { # <url> <sha256> <dir> [tar members…]
+    local tmp
+    tmp="$(mktemp -d)"
+    curl -fsSL -o "$tmp/t.tgz" "$1" || die "could not download $1 (curl, above)."
+    [ "$(sha256_file "$tmp/t.tgz")" = "$2" ] || die "$1 failed its checksum."
+    # Via tmp, and cp not tar into place: a tarball's ./ would rewrite the target dir's mode.
+    {
+        mkdir -p "$tmp/x" "$3" && tar -xzf "$tmp/t.tgz" -C "$tmp/x" "${@:4}" \
+            && cp -R "$tmp/x/." "$3/"
+    } || die "could not install into $3."
+    rm -rf "$tmp"
 }
 
 # The project reaches the VM in two hops. Host-local first, into a shadow copy with every guarded
@@ -245,13 +277,17 @@ vm_use() { # <verb>
         esac
         return 0
     fi
+    PATH="$PATH:$HOME/.local/bin" # where kib installs Lima and Mutagen
     if ! command -v limactl >/dev/null 2>&1; then
-        is_macos && return 0 # Docker Desktop is already a VM
         case "$1" in claude | exec) ;; *) return 0 ;; esac
-        echo "⚠️  kib: this box shares your kernel — a kernel exploit inside it owns this machine." >&2
-        echo "   Install Lima once and every box runs in a VM: $KIB_ROOT/docs/vm.md" >&2
-        echo "   (hide this note: 'vm = off' in $KIB_CONFIG)" >&2
-        return 0
+        if ! { [ -t 0 ] && _lima_install; }; then
+            is_macos && return 0  # Docker Desktop is already a VM
+            vm_wanted || return 0 # answered never
+            warn "this box shares your kernel: a kernel exploit inside it owns this machine." \
+                "Install Lima once and every box runs in a VM: $KIB_ROOT/docs/vm.md" \
+                "(hide this note: 'vm = off' in $KIB_CONFIG)"
+            return 0
+        fi
     fi
     _mutagen_ensure
     vm_up

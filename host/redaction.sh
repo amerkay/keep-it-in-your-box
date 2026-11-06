@@ -21,8 +21,8 @@ report_kibignore_optouts() {
     local optouts
     optouts="$(kib_py shared.rules optouts "$KIB_GUARD_FILE_HOST" "$PWD/$KIB_RULE_FILE")" || return 0
     [ -n "$optouts" ] || return 0
-    echo "ℹ️  $KIB_RULE_FILE un-redacts these for the sandbox — Claude reads them in full:" >&2
-    printf '%s\n' "$optouts" | sed 's/^/   !/' >&2
+    note "ℹ️  $KIB_RULE_FILE un-redacts these for the sandbox — Claude reads them in full:
+$(printf '%s\n' "$optouts" | sed 's/^/   !/')"
 }
 
 # ── The redaction layer ──────────────────────────────────────────

@@ -536,6 +536,7 @@ kib_cleanup() {
     # SIG_IGN survives fork+exec, so every `docker` child below is covered too, and a handler that
     # `exit`s would abort this trap exactly like the default did. (container-lifecycle.md)
     trap '' INT HUP TERM
+    local notes="${_KIB_NOTES:-}" # the launch's, not teardown's own
 
     kill "$SLEEP_GUARD_PID" 2>/dev/null || true
 
@@ -569,7 +570,7 @@ kib_cleanup() {
     # NO `tput reset` here or before the exec below: it wipes the terminal AND its scrollback,
     # erasing a short command's output the instant it exits. Claude's TUI manages its own
     # screen, as it does on the host, so kib leaves the terminal alone. Regression-guarded.
-    :
+    [ -z "$notes" ] || printf '\n🛡️  kib: said before the session:\n%s' "$notes" >&2
 }
 
 # ── Run this terminal's session inside the project container ─────

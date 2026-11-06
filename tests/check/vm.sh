@@ -213,5 +213,29 @@ case "$_vm_out" in
     *) fail "no-Lima fallback is wrong" "$_vm_out" ;;
 esac
 
+_vm_t_lima() { # <answer> — the install prompt's outcome, the config and any limactl it left
+    # shellcheck disable=SC2317 # called by _lima_install
+    lima_host_ready() { :; }
+    rm -f "$KIB_CONFIG"
+    printf '%s\n' "$1" | _lima_install 2>&3 && echo installed || echo declined
+    cat "$KIB_CONFIG" 2>/dev/null || true
+    [ ! -e "$HOME/.local/bin/limactl" ] || echo limactl
+}
+mkdir -p "$_vm_dir/curl"
+printf '#!/bin/sh\nwhile [ "$1" != -o ]; do shift; done; echo junk >"$2"\n' >"$_vm_dir/curl/curl"
+chmod +x "$_vm_dir/curl/curl"
+is "Lima prompt: never writes vm = off" "declined vm = off" \
+    "$(_vm_run /usr/bin:/bin _vm_t_lima never 3>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+is "Lima prompt: n declines this launch only" "declined" "$(_vm_run /usr/bin:/bin _vm_t_lima n 3>/dev/null)"
+case "$(_vm_run "$_vm_dir/curl:/usr/bin:/bin" _vm_t_lima y 3>&1)" in
+    *"failed its checksum"*declined) pass "Lima prompt: a download off its pinned checksum installs nothing" ;;
+    *) fail "a Lima download off its checksum was installed or not refused" ;;
+esac
+
+_vm_t_notes() { _KIB_NOTES='' && warn one two && note three && printf '%s' "$_KIB_NOTES" >&3; }
+is "launch notices are kept for the replay after the session" "⚠️  kib: one
+   two
+three" "$(_vm_run "$PATH" _vm_t_notes 3>&1 >/dev/null)"
+
 rm -rf "$_vm_dir"
 unset _vm_dir _vm_m _vm_out _vm_c _c
