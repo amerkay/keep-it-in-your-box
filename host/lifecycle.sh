@@ -170,7 +170,7 @@ container_ready() {
 _container_ready_or_gone() { container_ready || ! container_running; }
 
 wait_for_container_ready() {
-    wait_until 120 0.5 _container_ready_or_gone # ≤60s; a cold entrypoint is ~1s
+    wait_until 600 0.1 _container_ready_or_gone # ≤60s; a cold entrypoint is ~1s
     container_ready && return 0
     if container_running; then
         echo "❌ kib: the project container never finished starting up (60s)." >&2

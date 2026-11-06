@@ -281,7 +281,7 @@ _vm_session() { # <name> [<config> <alpha> <beta>] — create it if given, then 
     while [ -t 2 ] && kill -0 "$pid" 2>/dev/null; do # one line: status, and the file it is on
         printf '\r\033[K   %s' "$(_mutagen sync list "$1" --template "$VM_SYNC_STATUS" 2>/dev/null \
             | sed 's/ on beta//' | cut -c "1-$((cols - 4))")" >&2
-        sleep 1
+        sleep 0.2 # a resumed sync is done in well under a second
     done
     [ ! -t 2 ] || printf '\r\033[K' >&2
     wait "$pid"
