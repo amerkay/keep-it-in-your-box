@@ -219,8 +219,8 @@ if [ -n "$lock" ]; then
     d="$(dirname "$lock")"
     echo "  (pnpm in ./$d: filling the cache once, not timed…)"
     if docker run --rm "${BOX[@]}" "cd '$d' && pnpm install --frozen-lockfile" >"$TAR.log" 2>&1; then
-        bench "pnpm install (offline, from cache)" "cd '$d' && rm -rf node_modules &&
-            pnpm install --offline --frozen-lockfile"
+        bench "pnpm install (from a warm cache)" "cd '$d' && rm -rf node_modules &&
+            pnpm install --prefer-offline --frozen-lockfile"
     else info "pnpm install failed in ./$d, so no pnpm timing: $(tail -n 4 "$TAR.log")"; fi
 else info "no pnpm-lock.yaml tracked in $PROJ: no pnpm timing"; fi
 echo "Done. gVisor, every probe container${MAC:+, the probe VM and the copy} were removed."
