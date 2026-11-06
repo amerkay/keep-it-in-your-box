@@ -1,17 +1,24 @@
 #!/usr/bin/env bash
-# TMP (delete when decided): does gVisor (design C) work for kib, and how slow is it?
-# Never on your host's Docker: no sudo, open sessions untouched. Linux: inside kib-vm, on a
-# volume copy. macOS: a throwaway VM with ~ mounted (design C), on a copy under ~. gVisor and
-# everything else is removed after. Usage: tmp_gvisor_probe.sh <project>
+# TMP (delete when decided): does gVisor (design C) work for kib, and how fast is it?
+#   tmp_gvisor_probe.sh <project>          Linux: in kib-vm. macOS: a throwaway VM with ~ mounted
+#   tmp_gvisor_probe.sh --host <project>   Linux: on this machine's Docker (sudo once), + KVM mode
+# Works on a copy of the project; gVisor, the copy and every probe container are removed after.
 set -u
-PROJ="$(cd "${1:?usage: $0 <project dir>}" && pwd)" || exit 1
-KR="$(cd "$(dirname "$0")" && pwd)" # kib's checkout: the VM mounts it at this same path
+HOST=""
+if [ "${1:-}" = --host ]; then HOST=1 && shift; fi
+PROJ="$(cd "${1:?usage: $0 [--host] <project dir>}" && pwd)" || exit 1
+KR="$(cd "$(dirname "$0")" && pwd)" # kib's checkout: every VM here mounts it at this same path
 export PATH="$PATH:$HOME/.local/bin:$HOME/.local/docker" DOCKER_CONFIG="$HOME/.local/docker"
-IMG=keep-it-in-your-box P=kib-probe U="$(id -u):$(id -g)" GV=/opt/kib-probe-gvisor
+IMG=keep-it-in-your-box P=kibprobe U="$(id -u):$(id -g)" GV=/opt/kibprobe-gvisor
 VM=kib-vm MAC="" SRC=$P-src
 if [ "$(uname -s)" = Darwin ]; then VM=$P MAC=1 SRC="$HOME/.$P-proj"; fi
+[ -z "$HOST" ] || SRC="$HOME/.$P-proj"
 now() { perl -MTime::HiRes=time -e 'printf "%.3f", time'; }
-vm() { limactl shell --workdir / "$VM" sudo -n -- "$@" </dev/null; }
+vm() { # root where the containers run
+    if [ -n "$HOST" ]; then sudo -n -- "$@" </dev/null; else
+        limactl shell --workdir / "$VM" sudo -n -- "$@" </dev/null
+    fi
+}
 ok() { printf '  ✔ %s\n' "$1"; }
 bad() { printf '  ✘ %s\n' "$1"; }
 info() { printf '  ℹ %s\n' "$1"; }
@@ -30,21 +37,30 @@ up() { # <vm> [create args…]
         sleep 1
     done
 }
-up kib-vm
-if [ -n "$MAC" ]; then
-    echo "⏳ a throwaway VM with ~ mounted, and kib's image copied in (a few minutes)…"
-    limactl start --tty=false --name $P --vm-type=vz --mount-type=virtiofs --mount-only "$HOME:w" \
-        template:docker-rootful >/dev/null 2>&1 || {
-        echo "cannot create the probe VM"
-        exit 1
-    }
-    up $P
-    DOCKER_HOST="$(sock kib-vm)" docker save "$IMG" | DOCKER_HOST="$(sock $P)" docker load >/dev/null
+if [ -n "$HOST" ]; then
+    unset DOCKER_HOST
+    echo "🔑 sudo, once: gVisor is registered with this machine's Docker for the run"
+    sudo -v || exit 1
+    # Kept fresh: the run outlasts sudo's 15 min, and cleanup must still restore daemon.json.
+    while sleep 60; do sudo -n -v; done 2>/dev/null &
+    KEEP=$!
+else
+    up kib-vm
+    if [ -n "$MAC" ]; then
+        echo "⏳ a throwaway VM with ~ mounted, and kib's image copied in (a few minutes)…"
+        limactl start --tty=false --name $P --vm-type=vz --mount-type=virtiofs \
+            --mount-only "$HOME:w" template:docker-rootful >/dev/null 2>&1 || {
+            echo "cannot create the probe VM"
+            exit 1
+        }
+        up $P
+        DOCKER_HOST="$(sock kib-vm)" docker save "$IMG" | DOCKER_HOST="$(sock $P)" docker load >/dev/null
+    fi
+    DOCKER_HOST="$(sock "$VM")"
+    export DOCKER_HOST
 fi
-DOCKER_HOST="$(sock "$VM")"
-export DOCKER_HOST
 docker image inspect "$IMG" >/dev/null || {
-    echo "no $IMG image in the VM (error above)"
+    echo "no $IMG image here (error above)"
     exit 1
 }
 
@@ -53,36 +69,45 @@ cleanup() {
     docker rm -f $(docker ps -aq --filter name=^$P) >/dev/null 2>&1
     docker volume rm $(docker volume ls -q --filter name=^$P) >/dev/null 2>&1
     docker network rm $P-net >/dev/null 2>&1
+    # daemon.json back exactly as it was (or gone, if runsc created it), then a reload: no
+    # running container restarts.
     vm sh -c "awk '\$2 ~ \"^/mnt/$P\" { print \$2 }' /proc/mounts | sort -r | xargs -r -n1 umount -l
         rm -rf /mnt/$P /var/tmp/$P-*
-        for r in runsc runsc-uds; do $GV/runsc uninstall --runtime=\$r >/dev/null 2>&1; done
+        if [ -f $GV/daemon.json.orig ]; then cp -a $GV/daemon.json.orig /etc/docker/daemon.json
+        elif [ -f $GV/daemon.json.none ]; then rm -f /etc/docker/daemon.json; fi
         rm -rf $GV; systemctl reload docker"
     rm -f "$TAR" "$TAR.log"
-    [ -z "$MAC" ] || {
-        limactl delete -f $P >/dev/null 2>&1
-        rm -rf "$SRC"
-    }
+    [ -z "$MAC" ] || limactl delete -f $P >/dev/null 2>&1
+    [ "$SRC" = $P-src ] || rm -rf "$SRC"
+    [ -z "${KEEP:-}" ] || kill "$KEEP" 2>/dev/null
 }
 TAR="$(mktemp)"
 trap cleanup EXIT
 
-echo "⏳ installing gVisor in the VM…"
+echo "⏳ installing gVisor…"
 # The release archive (runsc + gvisor-bin/) in its own dir: cleanup is one rm. No && chains, so
 # set -e stops at the first failure.
 vm sh -c "set -e; u=https://storage.googleapis.com/gvisor/releases/release/latest/\$(uname -m)
     rm -rf $GV; mkdir -p $GV; cd $GV
+    if [ -f /etc/docker/daemon.json ]; then cp -a /etc/docker/daemon.json daemon.json.orig
+    else : >daemon.json.none; fi
     curl -fsSLO \"\$u/gvisor.tar.bz2\"
     curl -fsSLO \"\$u/gvisor.tar.bz2.sha512\"
     sha512sum -c gvisor.tar.bz2.sha512
     python3 -c 'import tarfile; tarfile.open(\"gvisor.tar.bz2\").extractall()' # no bzip2 here
-    ./runsc install
-    ./runsc install --runtime=runsc-uds -- --host-uds=open
+    ./runsc install --runtime=$P-gvisor -- --host-uds=open
+    if [ -e /dev/kvm ]; then ./runsc install --runtime=$P-kvm -- --platform=kvm --host-uds=open; fi
     systemctl reload docker" >/dev/null || {
     echo "runsc install failed (above)"
     exit 1
 }
 sleep 2
-G=(--runtime=runsc)
+G=("--runtime=$P-gvisor")
+COLS=("" "$P-gvisor") NAMES=(plain gVisor)
+if docker run --rm --runtime=$P-kvm --entrypoint true "$IMG" >/dev/null 2>&1; then
+    COLS+=("$P-kvm") NAMES+=(gVisor+KVM)
+    ok "gVisor's KVM mode runs here"
+else info "gVisor's KVM mode does not run here (no /dev/kvm, or nested)"; fi
 # kib's own box flags (host/lifecycle.sh start_container)
 HARD=(--init --cap-drop=ALL --cap-add=SETUID --cap-add=SETGID --cap-add=CHOWN
     --cap-add=DAC_OVERRIDE --cap-add=FOWNER --security-opt no-new-privileges)
@@ -90,11 +115,6 @@ HARD=(--init --cap-drop=ALL --cap-add=SETUID --cap-add=SETGID --cap-add=CHOWN
 echo "The box itself:"
 check "starts under gVisor with kib's flags, and drops to a user (gosu)" docker run --rm "${G[@]}" \
     "${HARD[@]}" --entrypoint gosu "$IMG" "$U" true
-docker run -d --name $P-top "${G[@]}" "${HARD[@]}" --entrypoint sleep "$IMG" infinity >/dev/null
-case "$(docker top $P-top -o args 2>/dev/null)" in
-    *"sleep infinity"*) ok "docker top sees 'sleep infinity' (kib's readiness check)" ;;
-    *) bad "docker top does not see 'sleep infinity' (kib's readiness check)" ;;
-esac
 
 echo "Network:"
 docker network create $P-net >/dev/null
@@ -105,13 +125,10 @@ vm sh -c "grep '^nameserver' /run/systemd/resolve/resolv.conf >/var/tmp/$P-resol
 docker create --name $P-gv "${G[@]}" --add-host "kib-broker:$ip" \
     -v /var/tmp/$P-resolv.conf:/etc/resolv.conf:ro --entrypoint sleep "$IMG" 300 >/dev/null
 docker network connect $P-net $P-gv && docker start $P-gv >/dev/null
-check "the broker net, connected before start (create → connect → start)" docker exec $P-gv true
 check "kib-broker as a host entry reaches the broker's port" docker exec $P-gv \
     curl -sf -o /dev/null --max-time 10 http://kib-broker:8100/
 check "our own resolv.conf reaches the internet (dual-homed)" docker exec $P-gv \
     curl -s -o /dev/null --max-time 10 https://api.anthropic.com
-
-echo "Socket sidecars (the Wayland clipboard proxy on Linux):"
 vm sh -c "mkdir -p /var/tmp/$P-sock && chmod 777 /var/tmp/$P-sock"
 srv='import socket,os
 s=socket.socket(socket.AF_UNIX); s.bind("/s/sock"); os.chmod("/s/sock",0o777); s.listen()
@@ -120,12 +137,8 @@ while True:
 cli='import socket; s=socket.socket(socket.AF_UNIX); s.connect("/s/sock"); print(s.recv(2).decode())'
 docker run -d --name $P-uds -v /var/tmp/$P-sock:/s --entrypoint python3 "$IMG" -c "$srv" >/dev/null
 sleep 1
-if [ "$(docker run --rm "${G[@]}" -v /var/tmp/$P-sock:/s --entrypoint python3 "$IMG" -c "$cli" 2>/dev/null)" = hi ]; then
-    ok "the box connects to a sidecar's unix socket"
-else
-    is "the box connects to a sidecar's unix socket, with --host-uds=open" hi \
-        "$(docker run --rm --runtime=runsc-uds -v /var/tmp/$P-sock:/s --entrypoint python3 "$IMG" -c "$cli" 2>&1)"
-fi
+is "the box connects to a sidecar's unix socket (--host-uds=open)" hi \
+    "$(docker run --rm "${G[@]}" -v /var/tmp/$P-sock:/s --entrypoint python3 "$IMG" -c "$cli" 2>&1)"
 
 echo "kib's real redaction view (its FUSE sidecar) on a copy of $PROJ:"
 (cd "$PROJ" && {
@@ -134,7 +147,7 @@ echo "kib's real redaction view (its FUSE sidecar) on a copy of $PROJ:"
 } | tar -cf "$TAR" -T - 2>/dev/null)
 docker volume create $P-cache >/dev/null
 docker run --rm -v $P-cache:/c --entrypoint chown "$IMG" "$U" /c
-if [ -n "$MAC" ]; then # a plain folder under ~, as a real project would be
+if [ "$SRC" != $P-src ]; then # a plain folder under ~, as a real project would be
     rm -rf "$SRC" && mkdir -p "$SRC" && tar -xf "$TAR" -C "$SRC" && echo SECRET=kibprobevalue >"$SRC/.env"
 else
     docker volume create $P-src >/dev/null
@@ -157,70 +170,94 @@ for _ in $(seq 50); do
     vm grep -q " $F/mnt fuse" /proc/mounts && break
     sleep 0.2
 done
-BOX=(-v "$F/mnt:/w:rslave" --user "$U" -w /w -v "$P-cache:/c" -e HOME=/tmp
-    -e XDG_CACHE_HOME=/c -e pnpm_config_store_dir=/c/store -e npm_config_store_dir=/c/store --entrypoint sh "$IMG" -c) # as kib
-if vm grep -q " $F/mnt fuse" /proc/mounts; then
-    out="$(docker run --rm "${G[@]}" "${BOX[@]}" 'cat .env' 2>&1)"
-    case "$out" in
-        *kibprobevalue*) bad "gVisor box reads .env: the REAL value leaked" ;;
-        *"<redacted>"*) ok "gVisor box reads .env as key names only (SECRET=<redacted>)" ;;
-        *) bad "gVisor box reads .env: unexpected ($out)" ;;
-    esac
-    case "$(docker run --rm "${G[@]}" "${BOX[@]}" 'echo x >.git/hooks/pre-commit' 2>&1)" in
-        *"ermission"* | *"not permitted"*) ok "gVisor box: writing .git/hooks is refused" ;;
-        *) bad "gVisor box: writing .git/hooks was NOT refused" ;;
-    esac
-    docker run --rm "${G[@]}" "${BOX[@]}" 'echo box >probe-write.txt' >/dev/null 2>&1
-    is "gVisor box: an ordinary write lands in the project" box \
-        "$(docker run --rm -v "$SRC:/w" --entrypoint cat "$IMG" /w/probe-write.txt 2>&1)"
-    VIEW=1
-else
+# As kib: ~/.cache on the cache volume, and both pnpm store names (pnpm 9 and 12).
+BOX=(-v "$F/mnt:/w:rslave" --user "$U" -w /w -v "$P-cache:/c" -e HOME=/tmp -e XDG_CACHE_HOME=/c
+    -e pnpm_config_store_dir=/c/store -e npm_config_store_dir=/c/store
+    -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e "GIT_CONFIG_VALUE_0=*")
+# Variation 4: pnpm's package files (the virtual store) on the cache volume, not in node_modules.
+VSTORE=(-e pnpm_config_virtual_store_dir=/c/vstore -e npm_config_virtual_store_dir=/c/vstore)
+if ! vm grep -q " $F/mnt fuse" /proc/mounts; then
     bad "kib's FUSE sidecar never mounted: $(docker logs $P-fuse 2>&1 | tail -3)"
-    VIEW=0
+    exit 1
 fi
-
-w='const fs=require("fs");fs.watch("/w",()=>{console.log("event");process.exit(0)});
-   setTimeout(()=>{if(process.argv[1])fs.writeFileSync("/w/in","x")},1000);
-   setTimeout(()=>{console.log("none");process.exit(0)},5000)'
-vm mkdir -p /var/tmp/$P-w
-docker run -d --name $P-watch "${G[@]}" -v /var/tmp/$P-w:/w --entrypoint node "$IMG" -e "$w" >/dev/null
-sleep 1 && vm sh -c "echo x >/var/tmp/$P-w/out"
-sleep 5
-case "$(docker logs $P-watch 2>&1)" in
-    event) ok "a host-side edit wakes a watcher in the box (hot reload works)" ;;
-    *) info "a host-side edit does NOT wake a watcher in the box: dev servers need polling" ;;
+out="$(docker run --rm "${G[@]}" "${BOX[@]}" --entrypoint cat "$IMG" .env 2>&1)"
+case "$out" in
+    *kibprobevalue*) bad "gVisor box reads .env: the REAL value leaked" ;;
+    *"<redacted>"*) ok "gVisor box reads .env as key names only (SECRET=<redacted>)" ;;
+    *) bad "gVisor box reads .env: unexpected ($out)" ;;
 esac
-is "an edit inside the box wakes a watcher in the box" event \
-    "$(docker run --rm "${G[@]}" -v /var/tmp/$P-w:/w --entrypoint node "$IMG" -e "$w" 1 2>&1)"
+case "$(docker run --rm "${G[@]}" "${BOX[@]}" --entrypoint sh "$IMG" -c 'echo x >.git/hooks/pre-commit' 2>&1)" in
+    *"ermission"* | *"not permitted"*) ok "gVisor box: writing .git/hooks is refused" ;;
+    *) bad "gVisor box: writing .git/hooks was NOT refused" ;;
+esac
 
-[ "$VIEW" = 1 ] || exit 1
-echo "Speed through the redaction view, today's kib (plain) vs gVisor:"
+echo "Speed through the redaction view:"
 secs() { # the failure's last lines go to stderr, above the timing line
     local s log="$TAR.log"
     s=$(now)
     "$@" >"$log" 2>&1 || printf '    failed: %s\n' "$(tail -n 4 "$log")" >&2
     awk -v s="$s" -v e="$(now)" 'BEGIN { printf "%.1f", e - s }'
 }
-GITOK=(-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e "GIT_CONFIG_VALUE_0=*")
-bench() { # <label> <sh command, run in the project>
-    local a b
-    a="$(secs docker run --rm "${GITOK[@]}" "${BOX[@]}" "$2")"
-    b="$(secs docker run --rm "${G[@]}" "${GITOK[@]}" "${BOX[@]}" "$2")"
-    printf '  %-36s plain %6ss   gVisor %6ss   ×%s\n' "$1" "$a" "$b" \
-        "$(awk -v a="$a" -v b="$b" 'BEGIN { printf "%.1f", (a > 0 ? b / a : 0) }')"
+bench() { # <label> <sh command, run in the project> [extra docker args…]
+    local i line base="" t
+    local -a rt
+    line="$(printf '  %-44s' "$1")"
+    for i in "${!COLS[@]}"; do
+        rt=()
+        [ -z "${COLS[$i]}" ] || rt=(--runtime="${COLS[$i]}")
+        t="$(secs docker run --rm ${rt[@]+"${rt[@]}"} "${BOX[@]}" "${@:3}" --entrypoint sh "$IMG" -c "$2")"
+        base="${base:-$t}"
+        line="$line $(printf '%s %6ss' "${NAMES[$i]}" "$t")"
+        [ "$i" = 0 ] || line="$line $(awk -v a="$base" -v b="$t" 'BEGIN { printf "(×%.1f)", (a > 0 ? b / a : 0) }')"
+    done
+    echo "$line"
 }
-bench "start a box" 'true'
 bench "git status ×3" 'git status >/dev/null; git status >/dev/null; git status'
 bench "list every file (find)" 'find . -path ./.git -prune -o -type f -print | wc -l'
 bench "write, read, delete 3000 files" 'mkdir t && for i in $(seq 3000); do echo $i >t/$i; done
     cat t/* >/dev/null; rm -rf t'
+
 lock="$(cd "$PROJ" && git ls-files | grep -m1 -E '(^|/)pnpm-lock\.yaml$')"
-if [ -n "$lock" ]; then
-    d="$(dirname "$lock")"
-    echo "  (pnpm in ./$d: filling the cache once, not timed…)"
-    if docker run --rm "${BOX[@]}" "cd '$d' && pnpm install --frozen-lockfile" >"$TAR.log" 2>&1; then
-        bench "pnpm install (from a warm cache)" "cd '$d' && rm -rf node_modules &&
-            pnpm install --prefer-offline --frozen-lockfile"
-    else info "pnpm install failed in ./$d, so no pnpm timing: $(tail -n 4 "$TAR.log")"; fi
-else info "no pnpm-lock.yaml tracked in $PROJ: no pnpm timing"; fi
-echo "Done. gVisor, every probe container${MAC:+, the probe VM and the copy} were removed."
+if [ -z "$lock" ]; then
+    info "no pnpm-lock.yaml tracked in $PROJ: no pnpm timing"
+    exit 0
+fi
+d="$(dirname "$lock")"
+echo "  (pnpm in ./$d: filling the cache once, not timed…)"
+if ! docker run --rm "${BOX[@]}" --entrypoint sh "$IMG" -c "cd '$d' && pnpm install --frozen-lockfile" \
+    >"$TAR.log" 2>&1; then
+    info "pnpm install failed in ./$d, so no pnpm timing: $(tail -n 4 "$TAR.log")"
+    exit 0
+fi
+inst="cd '$d' && rm -rf node_modules /c/vstore && pnpm install --prefer-offline --frozen-lockfile"
+bench "pnpm install (warm cache)" "$inst"
+bench "pnpm install, package files on the cache vol" "$inst" "${VSTORE[@]}"
+
+# Does a Vite dev server still serve every file a page pulls in, with the package files outside
+# the project? A crawl from / through every import, script and stylesheet; any 4xx is named.
+if grep -q '"vite"' "$PROJ/$d/package.json" 2>/dev/null; then
+    crawl='const b="http://127.0.0.1:5199",seen=new Set(),bad=[];
+    async function get(u){if(seen.has(u)||seen.size>400)return;seen.add(u);
+      let r;try{r=await fetch(b+u)}catch(e){bad.push("ERR "+u);return}
+      if(r.status>=400){bad.push(r.status+" "+u);return}
+      const t=await r.text();
+      for(const re of [/(?:from|import)\s*\(?\s*["\x27](\/[^"\x27]+)["\x27]/g,
+          /<(?:script|link)[^>]+(?:src|href)=["\x27](\/[^"\x27]+)["\x27]/g])
+        for(const m of t.matchAll(re))await get(m[1])}
+    get("/").then(()=>console.log(bad.length?"BAD "+bad.slice(0,4).join(" , "):"OK "+seen.size))'
+    serve="cd '$d' && (pnpm exec vite --host 127.0.0.1 --port 5199 --strictPort >/tmp/v.log 2>&1 &)
+        for i in \$(seq 90); do curl -s -o /dev/null http://127.0.0.1:5199/ && break; sleep 1; done
+        node -e '$crawl' || tail -5 /tmp/v.log"
+    for v in "normal layout" "package files on the cache volume"; do
+        extra=()
+        [ "$v" = "normal layout" ] || extra=("${VSTORE[@]}")
+        docker run --rm "${BOX[@]}" ${extra[@]+"${extra[@]}"} --entrypoint sh "$IMG" -c "$inst" >/dev/null 2>&1
+        r="$(docker run --rm "${G[@]}" "${BOX[@]}" ${extra[@]+"${extra[@]}"} --entrypoint sh "$IMG" \
+            -c "$serve" 2>&1 | tail -1)"
+        case "$r" in
+            OK*) ok "Vite under gVisor serves every file a page loads, $v (${r#OK } files)" ;;
+            *) bad "Vite under gVisor, $v: $r" ;;
+        esac
+    done
+else info "no vite in ./$d/package.json: no dev-server check"; fi
+echo "Done. Everything the probe added is being removed."
