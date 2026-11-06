@@ -24,8 +24,9 @@ cleanup() {
     docker rm -f $(docker ps -aq --filter name=^$P) >/dev/null 2>&1
     docker volume rm $(docker volume ls -q --filter name=^$P) >/dev/null 2>&1
     docker network rm $P-net >/dev/null 2>&1
-    vm sh -c "umount -l /mnt/$P 2>/dev/null; rm -rf /mnt/$P /var/tmp/$P-w; \
-        /opt/kib-probe-gvisor/runsc uninstall >/dev/null 2>&1; rm -rf /opt/kib-probe-gvisor; \
+    vm sh -c "umount -l /mnt/$P 2>/dev/null; rm -rf /mnt/$P /var/tmp/$P-w /var/tmp/$P-resolv.conf; \
+        /opt/kib-probe-gvisor/runsc uninstall >/dev/null 2>&1
+        /opt/kib-probe-gvisor/runsc uninstall --runtime=runsc-nat >/dev/null 2>&1; rm -rf /opt/kib-probe-gvisor; \
         systemctl reload docker"
     rm -f "$TAR"
 }
@@ -71,6 +72,26 @@ if [ -n "$n" ] && [ "$(nics)" != "$n" ]; then
     info "connecting after start works too (no reorder needed)"
 else info "connecting after start fails: kib must create → connect → start"; fi
 
+# gVisor never reaches Docker's DNS (127.0.0.11, by design). The documented workaround: our own
+# resolv.conf, and kib-broker as a fixed host entry.
+ip="$(docker inspect -f '{{(index .NetworkSettings.Networks "'$P-net'").IPAddress}}' $P-peer)"
+vm sh -c "grep '^nameserver' /run/systemd/resolve/resolv.conf >/var/tmp/$P-resolv.conf"
+docker create --name $P-fix "${G[@]}" --add-host "kib-broker:$ip" \
+    -v /var/tmp/$P-resolv.conf:/etc/resolv.conf:ro --entrypoint sleep "$IMG" 300 >/dev/null
+docker network connect $P-net $P-fix && docker start $P-fix >/dev/null
+check "workaround: kib-broker as a host entry reaches the broker" docker exec $P-fix \
+    curl -sf -o /dev/null --max-time 10 http://kib-broker:8100/
+check "workaround: our own resolv.conf reaches the internet" docker exec $P-fix \
+    curl -s -o /dev/null --max-time 10 https://api.anthropic.com
+if vm /opt/kib-probe-gvisor/runsc --help 2>&1 | grep -q reproduce-nat; then
+    vm sh -c '/opt/kib-probe-gvisor/runsc install --runtime=runsc-nat -- --reproduce-nat \
+        && systemctl reload docker' >/dev/null 2>&1
+    sleep 2
+    docker create --name $P-nat --runtime=runsc-nat --entrypoint sleep "$IMG" 300 >/dev/null
+    docker network connect $P-net $P-nat && docker start $P-nat >/dev/null
+    check "with --reproduce-nat, Docker's DNS works after all" docker exec $P-nat getent hosts kib-broker
+else info "this runsc has no --reproduce-nat flag"; fi
+
 # kib's FUSE sidecar (runc) mounts the redacted view; the box binds it. A tmpfs stands in.
 vm sh -c "mkdir -p /mnt/$P && mount --bind /mnt/$P /mnt/$P && mount --make-rshared /mnt/$P"
 docker run -d --name $P-side --privileged -v /mnt/$P:/p:rshared --entrypoint sh "$IMG" \
@@ -104,7 +125,7 @@ bench() { # <label> <sh command run in the project dir>
     a="$(secs docker run --rm -v $P-runc:/w -v $P-cache:/c -w /w "${E[@]}" --entrypoint sh "$IMG" -c "$2")"
     b="$(secs docker run --rm "${G[@]}" -v $P-runsc:/w -v $P-cache:/c -w /w "${E[@]}" --entrypoint sh "$IMG" -c "$2")"
     printf '  %-34s plain %6ss   gVisor %6ss   ×%s\n' "$1" "$a" "$b" \
-        "$(awk -v a="$a" -v b="$b" 'BEGIN { printf "%.1f", a > 0 ? b / a : 0 }')"
+        "$(awk -v a="$a" -v b="$b" 'BEGIN { printf "%.1f", (a > 0 ? b / a : 0) }')"
 }
 E=(-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e "GIT_CONFIG_VALUE_0=*"
     -e pnpm_config_store_dir=/c/store -e HOME=/tmp)
