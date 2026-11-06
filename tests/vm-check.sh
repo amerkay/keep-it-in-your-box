@@ -5,6 +5,7 @@ set -u
 KIB_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=SCRIPTDIR/lib.sh
 . "$KIB_ROOT/tests/lib.sh"
+IMAGE_NAME="keep-it-in-your-box" # as bin/kib names it
 # shellcheck source=SCRIPTDIR/../host/_load.sh
 . "$KIB_ROOT/host/_load.sh"
 
@@ -35,10 +36,11 @@ _vols="$(docker volume ls -q --filter label=kib-src=1)"
 for v in $_vols; do
     is "$v belongs to an open project" "${v%-src}" \
         "$(docker ps --format '{{.Names}}' --filter "name=^${v%-src}\$")"
-    # Every .env assignment in the volume is kib's render, never a value.
-    is "no .env value in $v" "" "$(docker run --rm --network none -v "$v:/s:ro" --entrypoint sh \
+    # Every .env assignment in the volume is kib's render, never a value. `ok` last: a probe
+    # that never ran must not read as a clean volume.
+    is "no .env value in $v" "ok" "$(docker run --rm --network none -v "$v:/s:ro" --entrypoint sh \
         "$IMAGE_NAME" -c 'find /s -name ".env*" -type f ! -name .env.example ! -name .env.sample \
-        ! -name .env.template -exec grep -H "=" {} + | grep -v "=<redacted>\$"')"
+        ! -name .env.template -exec grep -H "=" {} + | grep -v "=<redacted>\$"; echo ok' 2>&1)"
 done
 is "vm-rw holds one dir per open project (and .state)" "$(printf '%s\n' "$_vols" | grep -c .)" \
     "$(find "$VM_RW" -mindepth 1 -maxdepth 1 ! -name .state | grep -c .)"

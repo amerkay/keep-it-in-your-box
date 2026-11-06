@@ -2,7 +2,7 @@
 
 Branch `feat/vm-security`. Every step runs in a host terminal.
 
-## 0. Smoke test before closing your sessions (Linux, ~10 min)
+## 0. Smoke test before closing your sessions (Linux, ~10 min) — ✅ passed 2026-11-06
 
 A separate VM and state folder, so your running sessions are never touched. Use the same
 `export` line in **every** terminal of this test.
@@ -88,6 +88,8 @@ kib build
 
 ## 3. Housekeeping
 
+- [ ] `~/kib-vm-test/.kibignore`: delete the `!.env` line left from the Phase 4 test (an opt-out
+      syncs `.env` in full, and `vm-check` rightly reports its value)
 - [ ] `sn-workspace`: drop pnpm `store-dir`/`storeDir` and uv `cache-dir` if set; delete its
       `.pnpm-store`
 - [ ] With no Linux session open, tell Claude "fix bin/kib": a stale comment, and `kib build`
