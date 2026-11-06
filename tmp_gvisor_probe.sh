@@ -21,20 +21,32 @@ is() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (got: $3)"; fi; }
 sock() { echo "unix://$(limactl list --format '{{.Dir}}' "$1")/sock/docker.sock"; }
 up() { # <vm> [create args…]
     [ "$(limactl list --format '{{.Status}}' "$1" 2>/dev/null)" = Running ] \
-        || limactl start --tty=false "${@:2}" "$1" >/dev/null 2>&1 || { echo "cannot start $1"; exit 1; }
-    for _ in $(seq 60); do DOCKER_HOST="$(sock "$1")" docker info >/dev/null 2>&1 && break; sleep 1; done
+        || limactl start --tty=false "${@:2}" "$1" >/dev/null 2>&1 || {
+        echo "cannot start $1"
+        exit 1
+    }
+    for _ in $(seq 60); do
+        DOCKER_HOST="$(sock "$1")" docker info >/dev/null 2>&1 && break
+        sleep 1
+    done
 }
 up kib-vm
 if [ -n "$MAC" ]; then
     echo "⏳ a throwaway VM with ~ mounted, and kib's image copied in (a few minutes)…"
     limactl start --tty=false --name $P --vm-type=vz --mount-type=virtiofs --mount-only "$HOME:w" \
-        template:docker-rootful >/dev/null 2>&1 || { echo "cannot create the probe VM"; exit 1; }
+        template:docker-rootful >/dev/null 2>&1 || {
+        echo "cannot create the probe VM"
+        exit 1
+    }
     up $P
     DOCKER_HOST="$(sock kib-vm)" docker save "$IMG" | DOCKER_HOST="$(sock $P)" docker load >/dev/null
 fi
 DOCKER_HOST="$(sock "$VM")"
 export DOCKER_HOST
-docker image inspect "$IMG" >/dev/null || { echo "no $IMG image in the VM (error above)"; exit 1; }
+docker image inspect "$IMG" >/dev/null || {
+    echo "no $IMG image in the VM (error above)"
+    exit 1
+}
 
 # shellcheck disable=SC2046 # ids
 cleanup() {
@@ -46,7 +58,10 @@ cleanup() {
         for r in runsc runsc-uds; do $GV/runsc uninstall --runtime=\$r >/dev/null 2>&1; done
         rm -rf $GV; systemctl reload docker"
     rm -f "$TAR" "$TAR.log"
-    [ -z "$MAC" ] || { limactl delete -f $P >/dev/null 2>&1; rm -rf "$SRC"; }
+    [ -z "$MAC" ] || {
+        limactl delete -f $P >/dev/null 2>&1
+        rm -rf "$SRC"
+    }
 }
 TAR="$(mktemp)"
 trap cleanup EXIT
@@ -62,7 +77,10 @@ vm sh -c "set -e; u=https://storage.googleapis.com/gvisor/releases/release/lates
     python3 -c 'import tarfile; tarfile.open(\"gvisor.tar.bz2\").extractall()' # no bzip2 here
     ./runsc install
     ./runsc install --runtime=runsc-uds -- --host-uds=open
-    systemctl reload docker" >/dev/null || { echo "runsc install failed (above)"; exit 1; }
+    systemctl reload docker" >/dev/null || {
+    echo "runsc install failed (above)"
+    exit 1
+}
 sleep 2
 G=(--runtime=runsc)
 # kib's own box flags (host/lifecycle.sh start_container)
@@ -110,7 +128,10 @@ else
 fi
 
 echo "kib's real redaction view (its FUSE sidecar) on a copy of $PROJ:"
-(cd "$PROJ" && { echo .git; git ls-files; } | tar -cf "$TAR" -T - 2>/dev/null)
+(cd "$PROJ" && {
+    echo .git
+    git ls-files
+} | tar -cf "$TAR" -T - 2>/dev/null)
 docker volume create $P-cache >/dev/null
 docker run --rm -v $P-cache:/c --entrypoint chown "$IMG" "$U" /c
 if [ -n "$MAC" ]; then # a plain folder under ~, as a real project would be
@@ -132,9 +153,12 @@ docker run -d --name $P-fuse --cap-drop=ALL --cap-add=SYS_ADMIN --device /dev/fu
     -v "$KR/guest/policy/global.kibignore:/usr/local/share/global.kibignore:ro" \
     --entrypoint /usr/local/bin/fuse "$IMG" --src /src --mnt "$F/mnt" --uid "${U%:*}" --gid "${U#*:}" \
     --patterns-file /kib-patterns --guard-file /usr/local/share/global.kibignore >/dev/null
-for _ in $(seq 50); do vm grep -q " $F/mnt fuse" /proc/mounts && break; sleep 0.2; done
+for _ in $(seq 50); do
+    vm grep -q " $F/mnt fuse" /proc/mounts && break
+    sleep 0.2
+done
 BOX=(-v "$F/mnt:/w:rslave" --user "$U" -w /w -v "$P-cache:/c" -e HOME=/tmp
-    -e XDG_CACHE_HOME=/c -e pnpm_config_store_dir=/c/store --entrypoint sh "$IMG" -c) # as kib
+    -e XDG_CACHE_HOME=/c -e pnpm_config_store_dir=/c/store -e npm_config_store_dir=/c/store --entrypoint sh "$IMG" -c) # as kib
 if vm grep -q " $F/mnt fuse" /proc/mounts; then
     out="$(docker run --rm "${G[@]}" "${BOX[@]}" 'cat .env' 2>&1)"
     case "$out" in
@@ -172,9 +196,11 @@ is "an edit inside the box wakes a watcher in the box" event \
 [ "$VIEW" = 1 ] || exit 1
 echo "Speed through the redaction view, today's kib (plain) vs gVisor:"
 secs() { # the failure's last lines go to stderr, above the timing line
-    local s log="$TAR.log"; s=$(now)
+    local s log="$TAR.log"
+    s=$(now)
     "$@" >"$log" 2>&1 || printf '    failed: %s\n' "$(tail -n 4 "$log")" >&2
-    awk -v s="$s" -v e="$(now)" 'BEGIN { printf "%.1f", e - s }'; }
+    awk -v s="$s" -v e="$(now)" 'BEGIN { printf "%.1f", e - s }'
+}
 GITOK=(-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e "GIT_CONFIG_VALUE_0=*")
 bench() { # <label> <sh command, run in the project>
     local a b
