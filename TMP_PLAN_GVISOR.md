@@ -23,12 +23,18 @@ One code path: only where `dockerd` lives differs. No sync, no copies, no skip l
 - ✔ Unix-socket sidecar only with `--host-uds=open`
 - ✘ `docker top` sees no processes → readiness needs another signal
 - ℹ Host edits wake no watcher in the box → dev servers need polling
-- Speed vs runc through the FUSE view: `git status` ×0.9, `find` ×1.6, 3000-file write ×1.8
+- Same results on macOS (2026-11-06, a Lima VM with `~` on virtiofs + gVisor)
+- Speed vs runc, through the FUSE view (Linux / Mac): `git status` ×0.8 / ×0.8, `find`
+  ×1.5 / ×1.3, 3000-file write ×1.7 / ×2.0. **`pnpm install`, warm cache, `sn-frontend`
+  (Linux): 112 s → 227 s, ×2.0.** The 112 s is mostly the Python FUSE view, which every
+  design pays
 
 ## Phase 0: last probes (user)
 
-- [ ] `pnpm install` timing: run the probe on a project with a tracked `pnpm-lock.yaml`
-- [ ] Mac: the probe in a Lima VM with `~` on virtiofs (probe variant needed)
+- [x] `pnpm install` timing (Linux): ×2.0
+- [x] Mac: the probe in a Lima VM with `~` on virtiofs: all checks pass
+- [ ] Mac `pnpm install` timing (rerun with `--prefer-offline`)
+- [ ] Decide: accept ×2 installs (recommended), or first a compiled FUSE view
 
 ## Phase 1: gVisor box on native Linux
 
@@ -69,7 +75,7 @@ One code path: only where `dockerd` lives differs. No sync, no copies, no skip l
 
 ## Accepted costs
 
-- Writes ~2× slower in the box (installs, builds); reads unchanged
+- Writes ~2× slower in the box: `pnpm install` 112 s → 227 s on `sn-frontend`; reads unchanged
 - Dev servers poll for host edits
 - Mac: the box's Linux `node_modules` land in the real folder
 - Mac: VM root (behind gVisor) could read all of `~`
