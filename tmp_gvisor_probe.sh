@@ -45,7 +45,7 @@ cleanup() {
         rm -rf /mnt/$P /var/tmp/$P-*
         for r in runsc runsc-uds; do $GV/runsc uninstall --runtime=\$r >/dev/null 2>&1; done
         rm -rf $GV; systemctl reload docker"
-    rm -f "$TAR"
+    rm -f "$TAR" "$TAR.log"
     [ -z "$MAC" ] || { limactl delete -f $P >/dev/null 2>&1; rm -rf "$SRC"; }
 }
 TAR="$(mktemp)"
@@ -171,7 +171,9 @@ is "an edit inside the box wakes a watcher in the box" event \
 
 [ "$VIEW" = 1 ] || exit 1
 echo "Speed through the redaction view, today's kib (plain) vs gVisor:"
-secs() { local s; s=$(now); "$@" >/dev/null 2>&1 || printf '(failed) ' >&2
+secs() { # the failure's last lines go to stderr, above the timing line
+    local s log="$TAR.log"; s=$(now)
+    "$@" >"$log" 2>&1 || { printf '    failed: %s\n' "$(tail -n 4 "$log")" >&2; printf 'FAIL '; }
     awk -v s="$s" -v e="$(now)" 'BEGIN { printf "%.1f", e - s }'; }
 GITOK=(-e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e "GIT_CONFIG_VALUE_0=*")
 bench() { # <label> <sh command, run in the project>
@@ -190,9 +192,9 @@ lock="$(cd "$PROJ" && git ls-files | grep -m1 -E '(^|/)pnpm-lock\.yaml$')"
 if [ -n "$lock" ]; then
     d="$(dirname "$lock")"
     echo "  (pnpm in ./$d: filling the cache once, not timed…)"
-    if docker run --rm "${BOX[@]}" "cd '$d' && pnpm install --frozen-lockfile" >/dev/null 2>&1; then
-        bench "pnpm install (offline, from cache)" "cd '$d' && find . -name node_modules -prune \
-            -exec rm -rf {} + && pnpm install --offline --frozen-lockfile"
-    else info "pnpm install failed in ./$d, so no pnpm timing"; fi
+    if docker run --rm "${BOX[@]}" "cd '$d' && pnpm install --frozen-lockfile" >"$TAR.log" 2>&1; then
+        bench "pnpm install (offline, from cache)" "cd '$d' && rm -rf node_modules &&
+            pnpm install --offline --frozen-lockfile"
+    else info "pnpm install failed in ./$d, so no pnpm timing: $(tail -n 4 "$TAR.log")"; fi
 else info "no pnpm-lock.yaml tracked in $PROJ: no pnpm timing"; fi
 echo "Done. gVisor, every probe container${MAC:+, the probe VM and the copy} were removed."
