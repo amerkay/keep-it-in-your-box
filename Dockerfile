@@ -1,3 +1,14 @@
+# The redacting FUSE view (guest/fuse): built and unit-tested here, so a failing guard test
+# fails `kib build` and no Go toolchain reaches the image. The mount tests run in CI.
+FROM golang:1.27-trixie AS fuse
+WORKDIR /k/guest/fuse
+COPY guest/fuse/go.mod guest/fuse/go.sum ./
+RUN go mod download
+COPY guest/fuse/ ./
+COPY guest/policy/global.kibignore /k/guest/policy/
+COPY tests/fixtures/redaction /k/tests/fixtures/redaction
+RUN go vet ./... && go test ./... && CGO_ENABLED=0 go build -trimpath -o /fuse .
+
 FROM debian:trixie
 
 # Install Node.js via NodeSource repository and all system dependencies in one layer
@@ -42,11 +53,9 @@ RUN apt-get update && apt-get install -y curl \
     direnv \
     # Required for Claude Code's built-in sandbox
     bubblewrap socat \
-    # FUSE runtime for the .kibignore redacting mount. python3-yaml is the redaction
-    # renderer's YAML parser (kib/guest/fuse.py), not a build-time tool.
-    # trixie's 64-bit time_t transition renamed libfuse2 -> libfuse2t64, and both are
-    # packaged, so they come from apt instead of a PEP 668 --break-system-packages override.
-    fuse3 libfuse2t64 python3-fusepy python3-yaml \
+    # FUSE runtime (fusermount3) for the .kibignore redacting mount, a Go binary built above.
+    # python3-yaml is the host-side renderer's YAML parser (kib/shared/render.py), for tests.
+    fuse3 python3-yaml \
     && rm -rf /var/lib/apt/lists/*
 
 # Runtime config for the packages above. Its own RUN so editing either line is a
@@ -59,10 +68,8 @@ RUN echo 'user_allow_other' > /etc/fuse.conf \
 # Smoke-test the layers above. Kept as its own cheap RUN on purpose: editing an
 # assertion then re-runs in seconds off the cache, instead of re-doing the whole
 # ~10-minute apt install. Each check is one an earlier build actually failed on:
-# fusepy is 'fusepy' in Debian but 'fuse' from PyPI, and rsvg-convert/cairosvg
-# have both been silently absent before.
+# rsvg-convert/cairosvg have both been silently absent before.
 RUN node --version && npm --version \
-    && python3 -c "from fusepy import FUSE, FuseOSError, Operations; print('fusepy OK')" \
     && python3 -c "import yaml; print('PyYAML', yaml.__version__)" \
     && rsvg-convert --version \
     && python3 -c "import PIL, cairosvg; print('Pillow', PIL.__version__, '/ cairosvg', cairosvg.__version__)" \
@@ -229,12 +236,14 @@ RUN echo "Installing Claude Code version: ${CLAUDE_VERSION}" && \
 COPY guest/entrypoint/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # The kib package is COPIED here as a fallback, then bind-mounted over at run time from the
 # checkout — in the SIDECARS, which are the only containers that import it (the agent's runs no
-# kib code). So editing the FUSE server or a sidecar takes effect on the next container with no
-# rebuild. The three shims in /usr/local/bin are baked because they never change: each is one
-# `exec` line that puts /usr/local/lib on sys.path for that process only. PYTHONPATH is NOT
-# an image ENV — it would leak into every process the agent later runs.
+# kib code). So editing a Python sidecar takes effect on the next container with no rebuild;
+# the FUSE view is the Go binary above and needs one. The two shims in /usr/local/bin are baked
+# because they never change: each is one `exec` line that puts /usr/local/lib on sys.path for
+# that process only. PYTHONPATH is NOT an image ENV — it would leak into every process the
+# agent later runs.
 COPY kib /usr/local/lib/kib
-COPY guest/bin/fuse guest/bin/wayland-guard guest/bin/broker /usr/local/bin/
+COPY guest/bin/wayland-guard guest/bin/broker /usr/local/bin/
+COPY --from=fuse /fuse /usr/local/bin/fuse
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
 	/usr/local/bin/fuse /usr/local/bin/wayland-guard /usr/local/bin/broker \
 	&& chmod -R a+rX /usr/local/lib/kib \

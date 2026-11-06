@@ -145,14 +145,6 @@ def test_an_opt_out_does_not_spill_past_the_rule(project_rule: str, path: str) -
     assert rules.verdict(guarded(project_rule), path) == rules.REDACT
 
 
-def test_redact_optouts_names_the_rules_the_launch_prints() -> None:
-    guard = rules.load(str(GUARD), guard=True)
-    project = rules.parse(["!.env", "!.vscode", "!build", "secrets"])
-    # [protect] and unguarded names are inert, so reporting them would teach the user that
-    # every negation un-guards something.
-    assert rules.redact_optouts(guard, project) == [".env"]
-
-
 def test_a_project_may_still_add_redaction_over_a_placeholder() -> None:
     assert rules.verdict(guarded(".env.example"), ".env.example") == rules.REDACT
 
@@ -221,37 +213,6 @@ def test_matches_is_the_boolean_face_of_verdict() -> None:
     parsed = rules.parse(["secrets", "!secrets/ok"])
     assert rules.matches(parsed, "secrets") is True
     assert rules.matches(parsed, "other") is False
-
-
-# ── tightens(): the live-reload gate (host/redaction.sh) ─────────
-# A false positive here swaps looser rules into a RUNNING view with nobody asked, so each case
-# is one way a rule file can withhold less than the one before it.
-
-
-def test_tightens_accepts_an_added_rule() -> None:
-    assert rules.tightens(rules.parse(["*.pem"]), rules.parse(["*.pem", "secrets"])) is True
-
-
-def test_tightens_refuses_a_new_optout() -> None:
-    assert rules.tightens(rules.parse(["*.pem"]), rules.parse(["*.pem", "!.env"])) is False
-
-
-def test_tightens_refuses_a_dropped_rule() -> None:
-    assert rules.tightens(rules.parse(["*.pem", "secrets"]), rules.parse(["secrets"])) is False
-
-
-def test_tightens_refuses_a_reorder_that_flips_a_negation() -> None:
-    """The set of rules is identical and the verdict is opposite: last match wins."""
-    old, new = rules.parse(["!foo", "foo"]), rules.parse(["foo", "!foo"])
-    assert set(old) == set(new)
-    assert rules.verdict(old, "foo") == rules.REDACT
-    assert rules.verdict(new, "foo") is None
-    assert rules.tightens(old, new) is False
-
-
-def test_tightens_accepts_a_first_rule_file() -> None:
-    assert rules.tightens([], rules.parse(["secrets"])) is True
-    assert rules.tightens([], rules.parse(["!.env"])) is False
 
 
 # ── Mutagen sync ignores ─────────────────────────────────────────

@@ -104,33 +104,21 @@ else
         "every rebuild then leaks the old :latest — Dockerfile LABEL and prune must match"
 fi
 
-# FUSE reads must be pread, not lseek+read. With nothreads=False several worker threads serve
-# one open file and share the fd's offset, so racing lseeks made a reader see the file
-# truncated at a 16 KiB boundary — silent corruption that showed up as "flaky" lint runs.
-if grep -qE '^\s*os\.lseek\(' "$KIB_ROOT/kib/guest/fuse.py"; then
-    fail "kib/guest/fuse.py uses lseek+read/write" \
-        "use os.pread/os.pwrite — a shared fd offset truncates concurrent reads at 16 KiB"
-elif grep -q 'os.pread(' "$KIB_ROOT/kib/guest/fuse.py" && grep -q 'os.pwrite(' "$KIB_ROOT/kib/guest/fuse.py"; then
-    pass "FUSE passthrough reads/writes are offset-atomic (pread/pwrite, no shared fd offset)"
+# The FUSE view (guest/fuse, Go) — what its tests cannot see. Its behaviour is pinned by
+# `go test` against tests/fixtures/redaction (run by `kib build`, and on a real mount in CI).
+_gf="$(cat "$KIB_ROOT"/guest/fuse/*.go)"
+# Concurrent requests share one fd offset: lseek+read truncated reads at a 16 KiB boundary.
+if printf '%s\n' "$_gf" | grep -q 'Seek(' \
+    || ! printf '%s\n' "$_gf" | grep -q 'syscall.Pwrite(h.fd'; then
+    fail "the FUSE view seeks, or lost pwrite" "a shared fd offset truncates concurrent I/O"
 else
-    fail "kib/guest/fuse.py lost its pread/pwrite passthrough" "expected os.pread + os.pwrite"
+    pass "FUSE view I/O is offset-atomic (pread/pwrite, no shared fd offset)"
 fi
-
-# The mirror relaxation must never reach git's own executed paths. _mirror_anchor walks shorter
-# and shorter suffixes looking for one that reads PROTECT, so without the _git_sensitive gate
-# FIRST, a repo carrying a root `config` or `hooks/` twin would make `.git/config` mirrorable —
-# and those fire on an ordinary git command with nobody asking. Pinned on ORDER, not presence.
-# Body only, to the next method — a blank-line terminator would stop inside the docstring.
-_ma="$(awk '/^    def _mirror_anchor\(/ {f=1; next} f && /^    def / {exit} f' \
-    "$KIB_ROOT/kib/guest/fuse.py")"
-if ! printf '%s\n' "$_ma" | grep -q '_git_sensitive'; then
-    fail "_mirror_anchor no longer excludes git's own paths" \
-        ".git/config and .git/hooks/* would become mirrorable — never allow one"
-elif [ "$(printf '%s\n' "$_ma" | grep -n '_git_sensitive' | head -1 | cut -d: -f1)" \
-    -lt "$(printf '%s\n' "$_ma" | grep -n 'for i in range' | head -1 | cut -d: -f1)" ]; then
+# git's own executed paths are never a mirror, checked before any suffix walk.
+if [ "$(printf '%s\n' "$_gf" | awk '/^func \(v \*view\) mirrorAnchor/ {f=1} f && /gitSensitive/ {print "ok"; exit} f && /for i/ {exit}')" = ok ]; then
     pass "the mirror rule excludes git's own paths before any suffix walk"
 else
-    fail "_mirror_anchor walks suffixes before checking _git_sensitive" \
+    fail "mirrorAnchor walks suffixes before checking gitSensitive" \
         "a root 'config'/'hooks' twin would make .git/config mirrorable"
 fi
 unset _ma
@@ -334,55 +322,37 @@ else
         "virtiofs reports root:root; git then refuses the whole tree"
 fi
 
-# Both rule files are argv, and both are required=True in fuse.py — an optional --guard-file
-# would fail OPEN: the sidecar starts with zero [protect] rules, reports the mount active, and
-# the box launches unprotected. "No rules" is an empty file, never a missing flag.
+# Both rule files are argv and both required: an optional --guard-file fails OPEN (zero
+# [protect] rules, the mount reported active). "No rules" is an empty file, never a missing flag.
 if grep -q -- '--guard-file /usr/local/share/global.kibignore' "$KIB_ROOT/host/redaction.sh" \
     && grep -q -- '--patterns-file /kib-patterns' "$KIB_ROOT/host/redaction.sh" \
-    && grep -q 'add_argument("--guard-file", required=True)' "$KIB_ROOT/kib/guest/fuse.py"; then
+    && printf '%s\n' "$_gf" | grep -q '\*patterns == "" || \*guardFile == ""'; then
     pass "the sidecar is handed both rule files, and refuses to start without the guard one"
 else
     fail "the redaction sidecar can start without guard rules" \
         "a dropped --guard-file must abort the sidecar, not launch an unprotected box"
 fi
-
-# The server's syscalls run as ITS uid, not the caller's. Without default_permissions nothing in
-# the project is permission-checked and a `chmod 000` file reads and writes fine.
-if grep -q 'default_permissions=True' "$KIB_ROOT/kib/guest/fuse.py"; then
+# The server's syscalls run as ITS uid: without default_permissions a `chmod 000` file reads.
+if printf '%s\n' "$_gf" | grep -q '"default_permissions"'; then
     pass "the FUSE mount asks the kernel to enforce owner/mode (default_permissions)"
 else
-    fail "kib/guest/fuse.py no longer mounts with default_permissions=True" \
+    fail "the FUSE view no longer mounts with default_permissions" \
         "a passthrough enforces no POSIX permission at all without it"
 fi
-
-# Page caching, and the ONE safe spelling of it. Without auto_cache libfuse leaves keep_cache=0
-# and the kernel drops a file's pages on every open, so a re-read never gets faster — that cost
-# a Nuxt cold build 7 minutes against 20 seconds on the host. kernel_cache is the trap: it never
-# revalidates, and the project is bind-mounted from the host, so it would serve the user their
-# own stale bytes after an edit in their editor.
-# Code only: the comment above `auto_cache=True` names kernel_cache to warn against it.
-_fu="$(sed 's/#.*$//' "$KIB_ROOT/kib/guest/fuse.py")"
-if printf '%s\n' "$_fu" | grep -q 'kernel_cache'; then
-    fail "kib/guest/fuse.py mounts with kernel_cache" \
-        "the host edits this tree — use auto_cache, which revalidates mtime+size at open"
-elif printf '%s\n' "$_fu" | grep -q 'auto_cache=True'; then
-    pass "the FUSE mount page-caches with open-time revalidation (auto_cache)"
+# Page cache kept only while mtime+size hold (libfuse's auto_cache): never-revalidate would
+# serve the user's own stale bytes after a host edit, and none at all cost a Nuxt build 20x.
+if ! printf '%s\n' "$_gf" | grep -A1 'if same {' | grep -q 'return fuse.FOPEN_KEEP_CACHE' \
+    || [ "$(printf '%s\n' "$_gf" | grep -c 'FOPEN_KEEP_CACHE')" != 1 ]; then
+    fail "the FUSE view caches pages without revalidating, or not at all" \
+        "keep the cache only while mtime and size are what the last open saw"
 else
-    fail "kib/guest/fuse.py no longer mounts with auto_cache=True" \
-        "every re-read of an unchanged file goes back to crossing userspace in full"
+    pass "the FUSE mount page-caches with open-time revalidation"
 fi
-
-# The live rule reload, and the only spelling of it that works. A signal.signal handler for
-# SIGHUP would never run — the main thread is inside libfuse's C loop for the mount's whole
-# life, and CPython runs handlers only when the MAIN thread reaches the eval loop — and libfuse
-# would keep the signal for its own handler, which tears the mount down. Both failures are
-# silent: the host restages, reports a reload, and the box keeps the old rules.
-if grep -q 'signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGHUP})' "$KIB_ROOT/kib/guest/fuse.py" \
-    && grep -q 'signal.sigwait(\[signal.SIGHUP\])' "$KIB_ROOT/kib/guest/fuse.py"; then
-    pass "the sidecar takes SIGHUP off libfuse and reloads from a sigwait thread"
+# SIGHUP is the live rule reload; an unhandled one kills pid 1 and the view with it.
+if printf '%s\n' "$_gf" | grep -q 'signal.Notify(sig, syscall.SIGHUP'; then
+    pass "the sidecar reloads its rules on SIGHUP"
 else
-    fail "kib/guest/fuse.py no longer blocks SIGHUP and sigwaits it" \
-        "a signal.signal handler never runs under fuse_main_real, and libfuse unmounts on SIGHUP"
+    fail "the FUSE view no longer handles SIGHUP" "the host's live reload would kill the view"
 fi
 
 # The watcher runs detached, with no terminal to ask at, so its ONE reload call must sit behind
@@ -391,31 +361,22 @@ fi
 # Code only: the header names _reload_rules in prose, which must not count as a call.
 _rw="$(sed 's/#.*$//' "$KIB_ROOT/host/rules-watch.sh")"
 if [ "$(printf '%s\n' "$_rw" | grep -c '_reload_rules')" = 1 ] \
-    && printf '%s\n' "$_rw" | grep -A1 'shared.rules tightens' | grep -q '_reload_rules'; then
+    && printf '%s\n' "$_rw" | grep -A1 '_rules tightens' | grep -q '_reload_rules'; then
     pass "host/rules-watch.sh reloads only behind the tightens gate"
 else
-    fail "host/rules-watch.sh can reload without checking rules.tightens first" \
+    fail "host/rules-watch.sh can reload without checking tightens first" \
         "a detached watcher has nobody to ask, so a loosening edit must wait for an attach"
 fi
 unset _rw
 
-# libfuse calls flush on EVERY close(2), so an fsync there is a forced writeback per file —
-# on read-only opens too. It bought nothing: writes are os.pwrite straight to the backing fd
-# with no userspace buffer, and release()'s mirror size check reads the same kernel's view
-# either way. fsync() proper is still there for callers that mean durability.
-_fl="$(awk '/^    def flush\(/ {f=1; next} f && /^    def / {exit} f' "$KIB_ROOT/kib/guest/fuse.py")"
-if printf '%s\n' "$_fl" | grep -qE '^\s*os\.(f|fdata)sync\('; then
-    fail "kib/guest/fuse.py fsyncs in flush()" \
-        "that is a forced writeback on every close, including read-only opens"
+# flush runs on EVERY close(2): an fsync there is a forced writeback per file, read-only too.
+if printf '%s\n' "$_gf" | awk '/^func \(n \*node\) Flush/ {f=1; next} f && /^func / {exit} f' \
+    | grep -q 'Fsync'; then
+    fail "the FUSE view fsyncs in Flush" "that is a forced writeback on every close"
 else
-    pass "flush() does not fsync (libfuse calls it on every close)"
+    pass "Flush does not fsync (the kernel calls it on every close)"
 fi
-
-# (Inode adoption — that every path creating an inode hands it to the caller — is guarded
-# behaviourally in tests/guest/test_fuse.py: test_a_created_file_is_given_to_the_caller,
-# test_a_created_directory_is_given_to_the_caller, test_an_adopted_symlink_is_not_dereferenced
-# and test_adoption_failure_does_not_fail_the_create. Those monkeypatch os.fchown/os.chown and
-# assert the ids actually passed, which a grep for `_adopt(` cannot see.)
+unset _gf
 
 # kib installs no hook into a user's repo: the checks run at launch, teardown and `kib audit`.
 # Why a hook is not an option is in kib/host/gitaudit.py's docstring.

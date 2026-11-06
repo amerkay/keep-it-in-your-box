@@ -46,8 +46,20 @@ jobs:
           shfmt --version
           shellcheck --version
 
+      # The redaction view (guest/fuse): dev.sh runs gofmt, go vet and go test with Go on PATH,
+      # and KIB_FUSE_TESTS=1 makes the real-mount tests fail rather than skip without FUSE.
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: guest/fuse/go.mod
+          cache-dependency-path: guest/fuse/go.sum
+
+      - name: Install fuse3 (fusermount3 for the mount tests)
+        run: sudo apt-get update -q && sudo apt-get install -y -q fuse3
+
       # `check` = lint (ruff, mypy, shfmt) + tests/check.sh, which stays the authoritative
       # implementation of syntax, shellcheck and the portability contract — dev.sh does not
       # duplicate those, so CI and a local run cannot disagree about them.
       - name: ./dev.sh check
+        env:
+          KIB_FUSE_TESTS: '1'
         run: ./dev.sh check

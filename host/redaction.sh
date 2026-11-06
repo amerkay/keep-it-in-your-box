@@ -10,23 +10,39 @@
 KIB_RULE_FILE=".kibignore"
 KIB_GUARD_FILE_HOST="$KIB_ROOT/guest/policy/global.kibignore"
 
+# The rule checks are the redaction view's own binary (guest/fuse), so `.kibignore` has one
+# matcher. In the running sidecar, else a throwaway container of the image; the project's rule
+# file goes in on stdin, where the arguments say `-`. `tightens` needs the sidecar's staged copy.
+_rules() { # <fuse subcommand args…>
+    local f="$PWD/$KIB_RULE_FILE"
+    [ -f "$f" ] || f=/dev/null
+    if sidecar_running; then
+        docker exec -i "$FUSE_CNAME" /usr/local/bin/fuse "$@" <"$f"
+    elif [ "$1" = optouts ]; then
+        docker run --rm -i --network none --entrypoint /usr/local/bin/fuse \
+            -v "$KIB_GUARD_FILE_HOST:/usr/local/share/global.kibignore:ro" "$IMAGE_NAME" "$@" <"$f"
+    else
+        return 1
+    fi
+}
+_optouts() { _rules optouts /usr/local/share/global.kibignore -; }
+
 # ── The [redact] opt-out, named at every launch ──────────────────
-# `!.env` in a project .kibignore cancels the guard's redaction (kib.shared.rules), so the
-# session reads that file in full. The box can write .kibignore, so the user seeing the rule is
-# the only control there is — but keep it to one line per rule: this is a deliberate setting on
-# the projects that use it, and an alarm printed at every launch stops being read.
+# `!.env` in a project .kibignore cancels the guard's redaction, and so does a wildcard `!*`, so
+# the session reads that file in full. The box can write .kibignore, so the user seeing the rule
+# is the only control there is — but keep it to one line per rule: this is a deliberate setting
+# on the projects that use it, and an alarm printed at every launch stops being read.
 report_kibignore_optouts() {
     [ -f "$PWD/$KIB_RULE_FILE" ] || return 0
-    have_python || return 0
     local optouts
-    optouts="$(kib_py shared.rules optouts "$KIB_GUARD_FILE_HOST" "$PWD/$KIB_RULE_FILE")" || return 0
+    optouts="$(_optouts)" || return 0
     [ -n "$optouts" ] || return 0
     note "ℹ️  $KIB_RULE_FILE un-redacts these for the sandbox — Claude reads them in full:
 $(printf '%s\n' "$optouts" | sed 's/^/   !/')"
 }
 
 # ── The redaction layer ──────────────────────────────────────────
-# kib.guest.fuse runs in its OWN container — the sidecar — and the agent's container consumes
+# The view (guest/fuse, a Go binary in the image) runs in its OWN container — the sidecar — and the agent's container consumes
 # the view by shared-mount propagation. Matched paths refuse writes, including files created
 # AFTER launch, which no bind mount can cover and which a nested `git init` or a mid-session
 # clone relies on.
@@ -121,7 +137,7 @@ _confirm_looser_rules() {
     [ -t 0 ] || return 1
     warn "$KIB_RULE_FILE changed, and the new rules withhold LESS than the running view."
     diff -u "$staged" "$PWD/$KIB_RULE_FILE" | head -40 | sed 's/^/   /' >&2
-    optouts="$(kib_py shared.rules optouts "$KIB_GUARD_FILE_HOST" "$PWD/$KIB_RULE_FILE")" || true
+    optouts="$(_optouts)" || true
     [ -n "$optouts" ] && printf '%s\n' "$optouts" | sed 's/^/   hands the session: !/' >&2
     echo "   A session in the box can write $KIB_RULE_FILE, so an edit nobody made by hand is" >&2
     echo "   expected here. Applying it is what makes those files readable." >&2
@@ -133,12 +149,12 @@ _confirm_looser_rules() {
 # The rule file changed since the container started, so the running layer is on the OLD rules. A
 # change that can only redact MORE is swapped in without asking; anything that could hand the
 # session a path it could not read before is the user's call, because the box can write this
-# file. Without python the gate fails and every edit falls to the prompt — the safe direction.
+# file. If the check cannot run, every edit falls to the prompt — the safe direction.
 _reload_or_refuse_stale_rules() {
     local staged="$1"
     cmp -s "$PWD/$KIB_RULE_FILE" "$staged" 2>/dev/null && return 0
     [ ! -f "$PWD/$KIB_RULE_FILE" ] && [ ! -s "$staged" ] && return 0
-    if kib_py shared.rules tightens "$staged" "$PWD/$KIB_RULE_FILE"; then
+    if _rules tightens /kib-patterns - >/dev/null 2>&1; then
         _reload_rules "$staged" "it redacts strictly more" && return 0
     elif _confirm_looser_rules "$staged"; then
         _reload_rules "$staged" "you confirmed it" && return 0
@@ -191,7 +207,6 @@ prepare_redaction() {
         -v "$PASSWD_STATE:/etc/passwd:ro" \
         -v "$GROUP_STATE:/etc/group:ro" \
         -v "$FUSE_ROOT:$FUSE_ROOT:rshared" \
-        -v "$KIB_ROOT/kib:/usr/local/lib/kib:ro" \
         -v "$KIB_GUARD_FILE_HOST:/usr/local/share/global.kibignore:ro" \
         --entrypoint /usr/local/bin/fuse \
         "$IMAGE_NAME" \

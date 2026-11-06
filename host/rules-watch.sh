@@ -18,7 +18,7 @@ POLL=2
 # (container-lifecycle.md)
 HOST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
 KIB_ROOT="$(cd "$HOST_DIR/.." && pwd)" || exit 1
-# kib_py, lock_fd, and _reload_rules itself — the reload is ONE implementation, shared with the
+# lock_fd, _rules and _reload_rules itself — the reload is ONE implementation, shared with the
 # attach path. Not _load.sh: that is bin/kib's loader, and drags in the launch path for three
 # functions. `|| exit 1` because this script has no `set -e`.
 # shellcheck source=SCRIPTDIR/core.sh
@@ -51,9 +51,9 @@ while sleep "$POLL"; do
     _rule_text
     [ "$RULE_TEXT" = "$seen" ] && continue
     # Recorded either way: a loosening edit is answered at the next attach, and re-running the
-    # gate every 2s would fork python for the life of the container.
+    # gate every 2s would `docker exec` for the life of the container.
     seen="$RULE_TEXT"
-    if kib_py shared.rules tightens "$PATTERNS_STATE" "$RULE_PATH" >/dev/null 2>&1; then
+    if _rules tightens /kib-patterns - >/dev/null 2>&1; then
         _reload_rules "$PATTERNS_STATE" "it redacts strictly more"
     fi
 done

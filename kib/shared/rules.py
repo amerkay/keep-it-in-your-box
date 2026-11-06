@@ -1,8 +1,8 @@
-"""`.kibignore` — parsed and matched in exactly one place.
+"""`.kibignore` on the host: the VM sync's ignores and the audit gate's tracked-file check.
 
-The FUSE guard and the launch-time audit gate both read this module, so anchoring, negation and
-unsafe-rule skipping mean one thing everywhere. A second copy of this logic drifts from the
-first, and the drift shows up as a guard that admits a write.
+The redaction view itself is guest/fuse (Go), which also answers the launch's opt-out and
+live-reload checks. tests/shared/test_redaction_fixtures.py holds this copy to the same
+fixtures, so the two cannot drift; it goes with the sync (TMP_PLAN_GVISOR.md Phase 3).
 
 Syntax (gitignore-shaped, with two additions the guard file needs):
 
@@ -21,10 +21,10 @@ committed placeholder back out.
 
 `[protect]` is immune to a project's negation — a repo cannot write `!.git/config` to disarm
 the host-execution guard. `[redact]` is NOT: a project's `!` on the same component cancels it,
-so a repo whose `.env` holds no secrets can hand it to the session (`redact_optouts()` names
-those rules, and the launch prints them). The asymmetry is the two tiers' threat models —
-`[protect]` stops the box writing what the HOST later runs, and no repo may waive that;
-`[redact]` withholds the user's own secrets from the session, which is the user's to waive.
+so a repo whose `.env` holds no secrets can hand it to the session (the launch names those
+rules). The asymmetry is the two tiers' threat models — `[protect]` stops the box writing what
+the HOST later runs, and no repo may waive that; `[redact]` withholds the user's own secrets
+from the session, which is the user's to waive.
 """
 
 from __future__ import annotations
@@ -170,34 +170,6 @@ def matches(rules: Sequence[Rule], rel: str) -> bool:
     return verdict(rules, rel) is not None
 
 
-def redact_optouts(guard_rules: Sequence[Rule], project_rules: Iterable[Rule]) -> list[str]:
-    """Project `!` rules that hand a guard-`[redact]` path back to the session.
-
-    The launch names these (host/redaction.sh): the box can write `.kibignore`, so the one
-    thing standing between a smuggled `!.env` and a full read of it is the user seeing it.
-    Reported as RULES, not as a filesystem scan — no tree walk, and it says the same thing
-    whether or not the file exists yet.
-    """
-    # REDACT only: a `!` aimed at a [protect] rule is inert, and reporting it would teach the
-    # user that every negation un-guards something.
-    return [
-        r.pattern for r in project_rules if r.negated and verdict(guard_rules, r.pattern) == REDACT
-    ]
-
-
-def tightens(old: Sequence[Rule], new: Sequence[Rule]) -> bool:
-    """True if `new` can only withhold MORE than `old` — the live-reload gate.
-
-    A project rule that is not negated only ever ADDS a redact verdict (see `verdict`), so a
-    list keeping every old rule and adding none that are negated cannot hand the session a path
-    it could not already read. SUBSEQUENCE, not subset: rules are last-match-wins, so swapping
-    `!foo` and `foo` flips the verdict with the set unchanged.
-    """
-    remaining = iter(new)
-    kept_in_order = all(rule in remaining for rule in old)  # `old` is a subsequence of `new`
-    return kept_in_order and not any(rule.negated for rule in set(new) - set(old))
-
-
 #: git's own host-executed paths (kib/guest/fuse.py `_git_sensitive`), as Mutagen globs.
 GIT_SENSITIVE = ("**/.git/**/config", "**/.git/**/config.worktree", "**/.git/**/hooks")
 
@@ -236,18 +208,6 @@ def sync_ignores(guard: Sequence[Rule], project: Sequence[Rule]) -> list[str]:
     return out + [_glob(r) for r in guard if r.action == PROTECT] + list(GIT_SENSITIVE)
 
 
-def _optouts_cmd(guard_file: str, rule_file: str) -> int:
-    """`optouts <guard-file> <rule-file>` — one un-redacting project rule per line."""
-    for pattern in redact_optouts(load(guard_file, guard=True), load(rule_file)):
-        print(pattern)
-    return cli.OK
-
-
-def _tightens_cmd(old_file: str, new_file: str) -> int:
-    """`tightens <old-rules> <new-rules>` — status 0 if the new set can only redact more."""
-    return cli.OK if tightens(load(old_file), load(new_file)) else cli.REFUSED
-
-
 #: Never synced: the box builds its own in the VM, for Linux, whatever the host's OS. Caches too:
 #: a box's `.pnpm-store` lands in the project (pnpm's store must share its filesystem).
 VM_LOCAL = (
@@ -284,8 +244,6 @@ def main(argv: list[str]) -> int:
     return cli.dispatch(
         "kib.shared.rules",
         {
-            "optouts": (_optouts_cmd, 2),
-            "tightens": (_tightens_cmd, 2),
             "sync-config": (_sync_config_cmd, 3),
             "vm-sync-config": (_vm_sync_config_cmd, 1),
         },
