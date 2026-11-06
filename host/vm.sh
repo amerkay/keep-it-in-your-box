@@ -237,8 +237,9 @@ vm_sync_start() {
         _vm_session "$CNAME-host" "$cfg" "$PWD" "$shadow" \
             && _vm_session "$CNAME" "$cfg.vm" "$shadow" "docker://$SYNC_CNAME/src"
     } || die "could not sync $PWD into the VM." "$(_mutagen sync list "$CNAME-host" "$CNAME" 2>&1)"
-    [ $((SECONDS - t0)) -lt 30 ] || note "ℹ️  kib: the first sync took $((SECONDS - t0)) s. To skip folders the box can rebuild:
-   vm_skip = dist, .yarn   in $KIB_CONFIG"
+    [ $((SECONDS - t0)) -lt 30 ] || note "ℹ️  kib: the first sync took $((SECONDS - t0)) s. To skip folders the box can rebuild,
+   put their names in this line, then paste it:
+   echo 'vm_skip = dist, .yarn' >> $KIB_CONFIG"
 }
 
 # A reloaded .kibignore re-filters the host hop: recreate it on the new ignores, and swap every

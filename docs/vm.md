@@ -74,7 +74,7 @@ Lima: Apache-2.0. Mutagen: MIT, with SSPL parts in its release build (fine for l
 | To | Run |
 |---|---|
 | Turn it on / off (Linux) | `vm = on` / `vm = off` in `~/.keep-it-in-your-box/config` |
-| Skip more folders | `vm_skip = dist, .yarn` in that file: names at any depth, or `a/b` from the project root |
+| Skip more folders | `vm_skip = dist, .yarn` in that file (lines add up): names at any depth, or `a/b` from the project root |
 | Resize | `limactl stop kib-vm && limactl edit kib-vm --cpus 4 --memory 8` |
 | Start from scratch | `limactl delete -f kib-vm` — the next `kib` creates it again |
 | Stop it now | `limactl stop kib-vm` (kib does this 10 minutes after your last session) |
