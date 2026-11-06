@@ -26,15 +26,16 @@ One code path: only where `dockerd` lives differs. No sync, no copies, no skip l
 - Same results on macOS (2026-11-06, a Lima VM with `~` on virtiofs + gVisor)
 - Speed vs runc, through the FUSE view (Linux / Mac): `git status` ×0.8 / ×0.8, `find`
   ×1.5 / ×1.3, 3000-file write ×1.7 / ×2.0. **`pnpm install`, warm cache, `sn-frontend`
-  (Linux): 112 s → 227 s, ×2.0.** The 112 s is mostly the Python FUSE view, which every
+  : Linux 112 s → 227 s (×2.0), Mac 109 s → 243 s (×2.2).** The 112 s is mostly the Python FUSE view, which every
   design pays
 
 ## Phase 0: last probes (user)
 
 - [x] `pnpm install` timing (Linux): ×2.0
 - [x] Mac: the probe in a Lima VM with `~` on virtiofs: all checks pass
-- [ ] Mac `pnpm install` timing (rerun with `--prefer-offline`)
-- [ ] Decide: accept ×2 installs (recommended), or first a compiled FUSE view
+- [x] Mac `pnpm install` timing: ×2.2
+- [ ] Decide: C (kib runs Lima + gVisor on Mac) or D (kib runs no VM; gVisor whenever the
+      user's Docker engine has it: Linux, Colima. Docker Desktop/OrbStack get none)
 
 ## Phase 1: gVisor box on native Linux
 
