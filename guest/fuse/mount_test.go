@@ -238,3 +238,52 @@ func kernelRefused(got, want string) bool {
 	w, wp, _ := strings.Cut(want, "@")
 	return w == "EPERM" && gp == wp && (g == "ENOENT" || g == "EACCES")
 }
+
+// A file opened before a reload redacted it reads as a new open would (the Python re-checked
+// every read); and no write lands through a symlink swapped in after the check.
+func TestReloadAndSymlinkSwap(t *testing.T) {
+	src := t.TempDir()
+	os.WriteFile(filepath.Join(src, "notes.txt"), []byte("K=s3cr3t\n"), 0o644)
+	os.MkdirAll(filepath.Join(src, ".git", "hooks"), 0o755)
+	os.MkdirAll(filepath.Join(src, "d"), 0o755)
+	guard := guardRules(t)
+	v, err := newView(src, guard, -1, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := mountOptions(false)
+	opts.DirectMount = true
+	mnt := t.TempDir()
+	server, err := fs.Mount(mnt, v.root, opts)
+	if err != nil {
+		if os.Getenv("KIB_FUSE_TESTS") == "1" {
+			t.Fatalf("mount: %v", err)
+		}
+		t.Skipf("no FUSE here: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Unmount() })
+
+	f, err := os.Open(filepath.Join(mnt, "notes.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	v.reload(append(slices.Clone(guard), ParseRules([]string{"notes.txt"}, false)...))
+	buf := make([]byte, 64)
+	n, _ := f.ReadAt(buf, 0)
+	if strings.Contains(string(buf[:n]), "s3cr3t") {
+		t.Errorf("an open file still reads its value after a reload redacted it: %q", buf[:n])
+	}
+
+	// d is checked as an ordinary directory; the host swaps it for a link into .git/hooks.
+	os.WriteFile(filepath.Join(mnt, "payload"), []byte("#!/bin/sh\n"), 0o755)
+	if _, err := os.Stat(filepath.Join(mnt, "d")); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(filepath.Join(src, "d"))
+	os.Symlink(".git/hooks", filepath.Join(src, "d"))
+	_ = os.Rename(filepath.Join(mnt, "payload"), filepath.Join(mnt, "d", "pre-commit"))
+	if _, err := os.Lstat(filepath.Join(src, ".git", "hooks", "pre-commit")); err == nil {
+		t.Error("a rename landed in .git/hooks through a swapped-in symlink")
+	}
+}

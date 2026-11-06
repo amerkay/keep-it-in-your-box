@@ -3,8 +3,9 @@ package main
 // The redacting view of --src at --mnt. Redacted paths refuse writes and read as their keys
 // (Render) or the stub; protected paths read through and refuse writes, except a nested
 // byte-identical copy of the same guarded tail at the ROOT (reproduce, never author). Every
-// check and the syscall after it use the same path string. An operation not implemented here
-// is refused by go-fuse (xattrs, mknod, fallocate), as fusepy's defaults did.
+// check and the syscall after it use the same path, and every syscall resolves it beneath --src
+// with no symlink on the way (`at`), so nothing swapped in between can redirect it. An
+// operation not implemented here is refused by go-fuse (xattrs, mknod, fallocate).
 // Spec: tests/fixtures/redaction/fs.json; history: docs/design-notes/redaction-config-guard.md.
 
 import (
@@ -12,8 +13,10 @@ import (
 	"context"
 	"encoding/binary"
 	"hash/fnv"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -61,6 +64,7 @@ type renderKey struct {
 
 type view struct {
 	src              string
+	srcfd            int   // O_PATH: every syscall resolves beneath it
 	uid, gid         int64 // -1: report the real ids
 	baseUID, baseGID uint32
 	rules            atomic.Pointer[ruleSet]
@@ -79,7 +83,11 @@ func newView(src string, rules []Rule, uid, gid int64) (*view, error) {
 	if err := syscall.Lstat(real, &st); err != nil {
 		return nil, err
 	}
-	v := &view{src: real, uid: uid, gid: gid, baseUID: st.Uid, baseGID: st.Gid,
+	fd, err := unix.Open(real, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	v := &view{src: real, srcfd: fd, uid: uid, gid: gid, baseUID: st.Uid, baseGID: st.Gid,
 		renders: map[renderKey][]byte{}}
 	v.setRules(rules)
 	v.root = &node{v: v}
@@ -92,6 +100,45 @@ func (v *view) setRules(rules []Rule) {
 }
 
 func (v *view) real(rel string) string { return filepath.Join(v.src, rel) }
+
+// at opens rel beneath --src with no symlink anywhere on the way: the kernel resolved every
+// link through the view already, so one here was planted after the check.
+func (v *view) at(rel string, flags int, mode uint32) (int, error) {
+	if rel == "" {
+		rel = "."
+	}
+	return unix.Openat2(v.srcfd, rel, &unix.OpenHow{Flags: uint64(flags | unix.O_CLOEXEC),
+		Mode: uint64(mode), Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS})
+}
+
+// inParent runs fn on rel's directory (opened as `at` does) and base name.
+func (v *view) inParent(rel string, fn func(dfd int, name string) error) error {
+	dfd, err := v.at(filepath.Dir(rel), unix.O_PATH|unix.O_DIRECTORY, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(dfd)
+	return fn(dfd, filepath.Base(rel))
+}
+
+// readAt reads up to max bytes of rel, resolved as `at` does.
+func (v *view) readAt(rel string, max int64) ([]byte, error) {
+	fd, err := v.at(rel, unix.O_RDONLY|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(fd), rel)
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, max))
+}
+
+func (v *view) lstatAt(rel string) (unix.Stat_t, error) {
+	var st unix.Stat_t
+	err := v.inParent(rel, func(dfd int, name string) error {
+		return unix.Fstatat(dfd, name, &st, unix.AT_SYMLINK_NOFOLLOW)
+	})
+	return st, err
+}
 
 // verdict is memoised: within one rule set it is a pure function of the path.
 func (v *view) verdict(rel string) string {
@@ -211,6 +258,88 @@ func (v *view) mirrorable(rel string) bool {
 	return a != "" && lexists(v.real(a))
 }
 
+// throughRule: a multi-component rule passes through this directory, so moving it would carry
+// files out of (`secrets` for `secrets/key.pem`) or into (`.zed` for `.zed/tasks.json`) the
+// rule's reach. Negations count too: moving onto `!certs/pub.pem`'s path un-redacts.
+func throughRule(rules []Rule, dir []string) bool {
+	for i := range rules {
+		r := &rules[i]
+		if len(r.parts) < 2 {
+			continue
+		}
+		for k := 1; k < len(r.parts) && k <= len(dir); k++ {
+			if r.Anchor == exact && k != len(dir) {
+				continue
+			}
+			ok := true
+			for j := 0; j < k && ok; j++ {
+				ok = fnmatch(dir[len(dir)-k+j], r.parts[j])
+			}
+			if ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// denyDirMove refuses moving a directory a multi-component rule passes through, one named
+// .git or laid out as a git dir, or one crossing into or out of .git (where bare rules stop).
+func (v *view) denyDirMove(old, dst string) syscall.Errno {
+	rules := v.rules.Load().rules
+	o, d := lowerParts(old), lowerParts(dst)
+	if o[len(o)-1] == ".git" || d[len(d)-1] == ".git" || v.isGitdir(old) ||
+		throughRule(rules, o) || throughRule(rules, d) ||
+		(strings.Split(old, "/")[0] == ".git") != (strings.Split(dst, "/")[0] == ".git") {
+		logf("kib-fuse: refusing to move directory %s to %s (a guard rule spans it)", old, dst)
+		return refused
+	}
+	return 0
+}
+
+// plantsGitdir: rel adds the last of HEAD/objects/refs to a directory whose hooks or config
+// were written before it was a git dir, so never checked.
+func (v *view) plantsGitdir(rel string) bool {
+	base, d := filepath.Base(rel), filepath.Dir(rel)
+	found := false
+	for _, m := range gitdirMarkers {
+		if strings.EqualFold(m, base) {
+			found = true
+		} else if _, err := v.lstatAt(filepath.Join(d, m)); err != nil {
+			return false
+		}
+	}
+	if !found {
+		return false
+	}
+	if fd, err := v.at(filepath.Join(d, "hooks"), unix.O_RDONLY|unix.O_DIRECTORY, 0); err == nil {
+		f := os.NewFile(uintptr(fd), "hooks")
+		names, _ := f.Readdirnames(1)
+		f.Close()
+		if len(names) > 0 {
+			return true
+		}
+	}
+	for _, c := range []string{"config", "config.worktree"} {
+		if b, err := v.readAt(filepath.Join(d, c), 1<<20); err == nil && len(GitIniEntries(string(b))) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// denyNew is deny for an op that makes a new name, which may also complete a git dir.
+func (v *view) denyNew(rel string, mirrorOK bool) syscall.Errno {
+	if errno := v.deny(rel, mirrorOK); errno != 0 {
+		return errno
+	}
+	if v.plantsGitdir(rel) {
+		logf("kib-fuse: refusing %s: it makes a git dir of unchecked hooks or config", rel)
+		return refused
+	}
+	return 0
+}
+
 // deny refuses a write to a masked path. mirrorOK=false refuses even an exact copy, for the ops
 // that move bytes the guard never compared (rename, link, symlink) or reshape one (truncate).
 func (v *view) deny(rel string, mirrorOK bool) syscall.Errno {
@@ -226,19 +355,24 @@ func (v *view) deny(rel string, mirrorOK bool) syscall.Errno {
 }
 
 func (v *view) render(root string) []byte {
-	var st syscall.Stat_t
-	real := v.real(root)
-	if syscall.Stat(real, &st) != nil {
+	fd, err := v.at(root, unix.O_RDONLY|unix.O_NONBLOCK, 0)
+	if err != nil {
 		return Stub
 	}
-	key := renderKey{real, st.Ino, uint64(st.Mtim.Nano()), st.Size}
+	f := os.NewFile(uintptr(fd), root)
+	defer f.Close()
+	var st unix.Stat_t
+	if unix.Fstat(fd, &st) != nil {
+		return Stub
+	}
+	key := renderKey{root, st.Ino, uint64(st.Mtim.Nano()), st.Size}
 	v.renderMu.Lock()
 	hit, ok := v.renders[key]
 	v.renderMu.Unlock()
 	if ok {
 		return hit
 	}
-	hit, _ = Render(real)
+	hit, _ = Render(f)
 	v.renderMu.Lock()
 	if len(v.renders) >= renderKeep {
 		v.renders = map[renderKey][]byte{}
@@ -328,6 +462,12 @@ var (
 
 func (n *node) rel() string { return n.Path(nil) }
 
+// unmasked: still a plain path under the CURRENT rules (a reload may have redacted it since).
+func (n *node) unmasked() bool {
+	k, _ := n.v.classify(n.rel())
+	return k == pass
+}
+
 func (n *node) child(name string) string { return filepath.Join(n.rel(), name) }
 
 func (n *node) newChild(ctx context.Context, rel string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
@@ -343,7 +483,7 @@ func (n *node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 }
 
 func (n *node) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	if h, ok := f.(*handle); ok && h.fd >= 0 { // an open file may be unlinked by now
+	if h, ok := f.(*handle); ok && h.fd >= 0 && n.unmasked() { // an open file may be unlinked
 		var st syscall.Stat_t
 		if err := syscall.Fstat(h.fd, &st); err != nil {
 			return fs.ToErrno(err)
@@ -365,7 +505,13 @@ func (n *node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	case file, inside:
 		return fs.NewListDirStream(nil), 0
 	}
-	ents, err := os.ReadDir(n.v.real(n.rel()))
+	fd, err := n.v.at(n.rel(), unix.O_RDONLY|unix.O_DIRECTORY, 0)
+	if err != nil {
+		return nil, fs.ToErrno(err)
+	}
+	d := os.NewFile(uintptr(fd), n.rel())
+	ents, err := d.ReadDir(-1)
+	d.Close()
 	if err != nil {
 		return nil, fs.ToErrno(err)
 	}
@@ -383,14 +529,19 @@ func (n *node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 }
 
 func (n *node) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
-	if k, _ := n.v.classify(n.rel()); k != pass {
+	if !n.unmasked() {
 		return nil, refused
 	}
-	t, err := os.Readlink(n.v.real(n.rel()))
+	buf := make([]byte, 4096)
+	var got int
+	err := n.v.inParent(n.rel(), func(dfd int, name string) (err error) {
+		got, err = unix.Readlinkat(dfd, name, buf)
+		return err
+	})
 	if err != nil {
 		return nil, fs.ToErrno(err)
 	}
-	return []byte(t), 0
+	return buf[:got], 0
 }
 
 func (n *node) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
@@ -407,18 +558,6 @@ type handle struct {
 	fd        int
 	data      []byte
 	mirroring bool // opened for writing at a protected path: size-checked at release
-}
-
-// openBeneath opens rel under src with no symlink anywhere on the way: the kernel resolved
-// every link through the view already, so one here was planted after the lookup.
-func (v *view) openBeneath(rel string, flags int, mode uint32) (int, error) {
-	dfd, err := unix.Open(v.src, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return -1, err
-	}
-	defer unix.Close(dfd)
-	return unix.Openat2(dfd, rel, &unix.OpenHow{Flags: uint64(flags | unix.O_CLOEXEC),
-		Mode: uint64(mode), Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS})
 }
 
 // keep says whether the kernel may keep its page cache: only while mtime and size are what the
@@ -455,7 +594,7 @@ func (n *node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 	case dir, inside:
 		return &handle{fd: -1, data: Stub}, n.keep(rel), 0
 	}
-	fd, err := n.v.openBeneath(rel, int(flags)&^syscall.O_CREAT, 0)
+	fd, err := n.v.at(rel, int(flags)&^syscall.O_CREAT, 0)
 	if err != nil {
 		return nil, 0, fs.ToErrno(err)
 	}
@@ -473,10 +612,10 @@ func adopt(ctx context.Context, do func(uid, gid int) error) {
 
 func (n *node) Create(ctx context.Context, name string, flags, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
 	rel := n.child(name)
-	if errno := n.v.deny(rel, true); errno != 0 {
+	if errno := n.v.denyNew(rel, true); errno != 0 {
 		return nil, nil, 0, errno
 	}
-	fd, err := n.v.openBeneath(rel, int(flags)|syscall.O_CREAT, mode)
+	fd, err := n.v.at(rel, int(flags)|syscall.O_CREAT, mode)
 	if err != nil {
 		return nil, nil, 0, fs.ToErrno(err)
 	}
@@ -492,11 +631,19 @@ func (n *node) Create(ctx context.Context, name string, flags, mode uint32, out 
 // pread/pwrite, never lseek+read: concurrent requests share the fd's one offset.
 func (n *node) Read(ctx context.Context, f fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	h := f.(*handle)
-	if h.fd < 0 {
-		end := min(off+int64(len(dest)), int64(len(h.data)))
-		return fuse.ReadResultData(h.data[min(off, end):end]), 0
+	data := h.data
+	if h.fd >= 0 {
+		k, root := n.v.classify(n.rel())
+		if k == pass {
+			return fuse.ReadResultFd(uintptr(h.fd), off, len(dest)), 0
+		}
+		data = Stub // opened before a reload redacted it: serve what a new open would
+		if k == file {
+			data = n.v.render(root)
+		}
 	}
-	return fuse.ReadResultFd(uintptr(h.fd), off, len(dest)), 0
+	end := min(off+int64(len(dest)), int64(len(data)))
+	return fuse.ReadResultData(data[min(off, end):end]), 0
 }
 
 // Write lets a mirror only REPRODUCE: each byte is compared with the anchor's at the same
@@ -507,6 +654,9 @@ func (n *node) Write(ctx context.Context, f fs.FileHandle, data []byte, off int6
 		return 0, syscall.EBADF
 	}
 	rel := n.rel()
+	if !n.unmasked() {
+		return 0, refused
+	}
 	if n.v.protected(rel) && !bytes.Equal(data, n.v.anchorBytes(rel, off, len(data))) {
 		logf("kib-fuse: refusing a write to %s (not a copy of its root anchor)", rel)
 		return 0, refused
@@ -520,14 +670,14 @@ func (v *view) anchorBytes(rel string, off int64, size int) []byte {
 	if a == "" {
 		return nil
 	}
-	f, err := os.Open(v.real(a))
+	fd, err := v.at(a, unix.O_RDONLY|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	defer unix.Close(fd)
 	buf := make([]byte, size)
-	got, _ := f.ReadAt(buf, off)
-	return buf[:got]
+	got, _ := unix.Pread(fd, buf, off)
+	return buf[:max(got, 0)]
 }
 
 // Flush is not an fsync (it runs on every close(2), and writes go straight to the backing fd),
@@ -560,27 +710,37 @@ func (n *node) wholeMirror(h *handle) syscall.Errno {
 		return 0
 	}
 	if a := n.v.mirrorAnchor(rel); a != "" {
-		got, err1 := os.Stat(n.v.real(rel))
-		want, err2 := os.Stat(n.v.real(a))
-		if err1 == nil && err2 == nil && got.Size() == want.Size() {
+		got, err1 := n.v.lstatAt(rel)
+		want, err2 := n.v.lstatAt(a)
+		if err1 == nil && err2 == nil && got.Size == want.Size {
 			return 0
 		}
 	}
 	h.mirroring = false
-	_ = os.Remove(n.v.real(rel))
+	_ = n.v.inParent(rel, func(dfd int, name string) error { return unix.Unlinkat(dfd, name, 0) })
 	logf("kib-fuse: removed %s: not a whole copy of its root anchor", rel)
 	return refused
 }
 
 func (n *node) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	rel := n.rel()
-	real := n.v.real(rel)
 	if sz, ok := in.GetSize(); ok {
 		// No mirror: a standalone truncate can only make a short copy.
 		if errno := n.v.deny(rel, false); errno != 0 {
 			return errno
 		}
-		if err := os.Truncate(real, int64(sz)); err != nil {
+		fd := -1
+		if h, ok := f.(*handle); ok {
+			fd = h.fd
+		}
+		var err error
+		if fd < 0 {
+			if fd, err = n.v.at(rel, unix.O_WRONLY|unix.O_NONBLOCK, 0); err != nil {
+				return fs.ToErrno(err)
+			}
+			defer unix.Close(fd)
+		}
+		if err := unix.Ftruncate(fd, int64(sz)); err != nil {
 			return fs.ToErrno(err)
 		}
 	}
@@ -588,7 +748,14 @@ func (n *node) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn,
 		return errno
 	}
 	if m, ok := in.GetMode(); ok {
-		if err := syscall.Chmod(real, m&0o7777); err != nil {
+		// chmod has no no-follow form: change the inode `at` opened, through its fd.
+		fd, err := n.v.at(rel, unix.O_PATH, 0)
+		if err != nil {
+			return fs.ToErrno(err)
+		}
+		err = unix.Fchmodat(unix.AT_FDCWD, "/proc/self/fd/"+strconv.Itoa(fd), m&0o7777, 0)
+		unix.Close(fd)
+		if err != nil {
 			return fs.ToErrno(err)
 		}
 	}
@@ -604,7 +771,9 @@ func (n *node) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn,
 		if gok && !(n.v.gid >= 0 && int64(gid) == n.v.gid) {
 			g = int(gid)
 		}
-		if err := os.Lchown(real, u, g); err != nil {
+		if err := n.v.inParent(rel, func(dfd int, name string) error {
+			return unix.Fchownat(dfd, name, u, g, unix.AT_SYMLINK_NOFOLLOW)
+		}); err != nil {
 			return fs.ToErrno(err)
 		}
 	}
@@ -618,7 +787,9 @@ func (n *node) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn,
 		if mok {
 			ts[1] = unix.NsecToTimespec(mtime.UnixNano())
 		}
-		if err := unix.UtimesNanoAt(unix.AT_FDCWD, real, ts, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if err := n.v.inParent(rel, func(dfd int, name string) error {
+			return unix.UtimesNanoAt(dfd, name, ts, unix.AT_SYMLINK_NOFOLLOW)
+		}); err != nil {
 			return fs.ToErrno(err)
 		}
 	}
@@ -630,7 +801,9 @@ func (n *node) Unlink(ctx context.Context, name string) syscall.Errno {
 	if errno := n.v.deny(rel, true); errno != 0 {
 		return errno
 	}
-	return fs.ToErrno(syscall.Unlink(n.v.real(rel)))
+	return fs.ToErrno(n.v.inParent(rel, func(dfd int, name string) error {
+		return unix.Unlinkat(dfd, name, 0)
+	}))
 }
 
 func (n *node) Rmdir(ctx context.Context, name string) syscall.Errno {
@@ -638,24 +811,31 @@ func (n *node) Rmdir(ctx context.Context, name string) syscall.Errno {
 	if errno := n.v.deny(rel, true); errno != 0 {
 		return errno
 	}
-	return fs.ToErrno(syscall.Rmdir(n.v.real(rel)))
+	return fs.ToErrno(n.v.inParent(rel, func(dfd int, name string) error {
+		return unix.Unlinkat(dfd, name, unix.AT_REMOVEDIR)
+	}))
 }
 
 func (n *node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	rel := n.child(name)
-	if errno := n.v.deny(rel, true); errno != 0 {
+	if errno := n.v.denyNew(rel, true); errno != 0 {
 		return nil, errno
 	}
-	real := n.v.real(rel)
-	if err := syscall.Mkdir(real, mode); err != nil {
+	if err := n.v.inParent(rel, func(dfd int, name string) error {
+		if err := unix.Mkdirat(dfd, name, mode); err != nil {
+			return err
+		}
+		adopt(ctx, func(u, g int) error { return unix.Fchownat(dfd, name, u, g, unix.AT_SYMLINK_NOFOLLOW) })
+		return nil
+	}); err != nil {
 		return nil, fs.ToErrno(err)
 	}
-	adopt(ctx, func(u, g int) error { return os.Lchown(real, u, g) })
 	return n.newChild(ctx, rel, out)
 }
 
-// Rename moves bytes the guard never compared, so neither end may be a mirror. The one
-// validated write: git's config.lock renamed over a config, checked for new command keys.
+// Rename moves bytes the guard never compared, so neither end may be a mirror, and a directory
+// may not carry files across a rule (denyDirMove). The one validated write: git's config.lock
+// renamed over a config, checked for new command keys.
 func (n *node) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
 	if flags&^unix.RENAME_NOREPLACE != 0 {
 		return syscall.EINVAL // an exchange would move the target too, unchecked
@@ -665,16 +845,25 @@ func (n *node) Rename(ctx context.Context, name string, newParent fs.InodeEmbedd
 	if errno := n.v.deny(old, false); errno != 0 {
 		return errno
 	}
-	if n.v.isGitConfig(dst) {
-		cand, err := os.ReadFile(n.v.real(old))
-		cur, curErr := os.ReadFile(n.v.real(dst))
+	if st, err := n.v.lstatAt(old); err == nil && st.Mode&unix.S_IFMT == unix.S_IFDIR {
+		if errno := n.v.denyDirMove(old, dst); errno != 0 {
+			return errno
+		}
+	}
+	if k, _ := n.v.classify(dst); k == pass && n.v.isGitConfig(dst) {
+		cand, err := n.v.readAt(old, 1<<20)
+		cur, curErr := n.v.readAt(dst, 1<<20)
 		if err != nil || !gitConfigWriteOK(cand, cur, curErr) {
 			return refused
 		}
-	} else if errno := n.v.deny(dst, false); errno != 0 {
+	} else if errno := n.v.denyNew(dst, false); errno != 0 {
 		return errno
 	}
-	return fs.ToErrno(unix.Renameat2(unix.AT_FDCWD, n.v.real(old), unix.AT_FDCWD, n.v.real(dst), uint(flags)))
+	return fs.ToErrno(n.v.inParent(old, func(odfd int, oname string) error {
+		return n.v.inParent(dst, func(ddfd int, dname string) error {
+			return unix.Renameat2(odfd, oname, ddfd, dname, uint(flags))
+		})
+	}))
 }
 
 // Link checks the SOURCE too: a hardlink is a second name for the same inode, so an unguarded
@@ -682,13 +871,17 @@ func (n *node) Rename(ctx context.Context, name string, newParent fs.InodeEmbedd
 func (n *node) Link(ctx context.Context, target fs.InodeEmbedder, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	rel := n.child(name)
 	src := target.EmbeddedInode().Path(nil)
-	if errno := n.v.deny(rel, false); errno != 0 {
+	if errno := n.v.denyNew(rel, false); errno != 0 {
 		return nil, errno
 	}
 	if errno := n.v.deny(src, false); errno != 0 {
 		return nil, errno
 	}
-	if err := syscall.Link(n.v.real(src), n.v.real(rel)); err != nil {
+	if err := n.v.inParent(src, func(sdfd int, sname string) error {
+		return n.v.inParent(rel, func(dfd int, dname string) error {
+			return unix.Linkat(sdfd, sname, dfd, dname, 0)
+		})
+	}); err != nil {
 		return nil, fs.ToErrno(err)
 	}
 	return n.newChild(ctx, rel, out)
@@ -697,14 +890,19 @@ func (n *node) Link(ctx context.Context, target fs.InodeEmbedder, name string, o
 // Symlink: a link's content is a path, never the anchor's bytes, so no mirror.
 func (n *node) Symlink(ctx context.Context, target, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	rel := n.child(name)
-	if errno := n.v.deny(rel, false); errno != 0 {
+	if errno := n.v.denyNew(rel, false); errno != 0 {
 		return nil, errno
 	}
-	real := n.v.real(rel)
-	if err := syscall.Symlink(target, real); err != nil {
+	if err := n.v.inParent(rel, func(dfd int, name string) error {
+		if err := unix.Symlinkat(target, dfd, name); err != nil {
+			return err
+		}
+		// The link itself, never its target.
+		adopt(ctx, func(u, g int) error { return unix.Fchownat(dfd, name, u, g, unix.AT_SYMLINK_NOFOLLOW) })
+		return nil
+	}); err != nil {
 		return nil, fs.ToErrno(err)
 	}
-	adopt(ctx, func(u, g int) error { return os.Lchown(real, u, g) }) // the link, not its target
 	return n.newChild(ctx, rel, out)
 }
 

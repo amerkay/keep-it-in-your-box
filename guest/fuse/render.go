@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"os"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -39,12 +38,7 @@ var (
 )
 
 // Render serves a redacted file; the shape is "" for the stub.
-func Render(real string) ([]byte, string) {
-	f, err := os.Open(real)
-	if err != nil {
-		return Stub, ""
-	}
-	defer f.Close()
+func Render(f io.Reader) ([]byte, string) {
 	raw, err := io.ReadAll(io.LimitReader(f, 4*(renderMax+2)))
 	if err != nil || !utf8.Valid(raw) {
 		return Stub, ""

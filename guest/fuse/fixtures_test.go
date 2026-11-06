@@ -134,7 +134,12 @@ func TestRender(t *testing.T) {
 		t.Fatal("the stub or the placeholder differs from the Python's")
 	}
 	for name, want := range f.Cases {
-		out, shape := Render(filepath.Join(fixtures, "render", name))
+		f, err := os.Open(filepath.Join(fixtures, "render", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, shape := Render(f)
+		f.Close()
 		if strings.Contains(string(out), "s3cr3t") {
 			t.Errorf("%s: a value leaked:\n%s", name, out)
 		}

@@ -142,8 +142,9 @@ func (r *Rule) matches(parts []string, underGit bool) bool {
 // tallied apart and the guard wins when it has a verdict, except that a project '!' cancels a
 // [redact] guard rule matched at the SAME component. A matched proper ancestor seals the rest.
 func Verdict(rules []Rule, rel string) string {
+	// Exact case: bare rules stop inside the real .git only, never a look-alike `.GIT`.
+	underGit := strings.Split(rel, "/")[0] == ".git"
 	parts := strings.Split(strings.ToLower(rel), "/")
-	underGit := parts[0] == ".git"
 	guard, project, effective := "", "", ""
 	guardAt, optoutAt := -1, -1
 	for i := 1; i <= len(parts); i++ {
