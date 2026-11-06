@@ -162,7 +162,7 @@ func snapshot(src string) map[string]string {
 	return out
 }
 
-func mount(t *testing.T, src string, rules []Rule) string {
+func mount(t *testing.T, src string, rules []Rule) (string, *view) {
 	t.Helper()
 	mnt := t.TempDir()
 	v, err := newView(src, rules, -1, -1)
@@ -179,7 +179,7 @@ func mount(t *testing.T, src string, rules []Rule) string {
 		t.Skipf("no FUSE here: %v", err)
 	}
 	t.Cleanup(func() { _ = server.Unmount() })
-	return mnt
+	return mnt, v
 }
 
 func TestMount(t *testing.T) {
@@ -204,10 +204,10 @@ func TestMount(t *testing.T) {
 			for _, rel := range c.Drop {
 				os.Remove(filepath.Join(src, rel))
 			}
-			mnt := mount(t, src, append(slices.Clone(guard), ParseRules(lines(c.Project), false)...))
+			mnt, v := mount(t, src, append(slices.Clone(guard), ParseRules(lines(c.Project), false)...))
 			for _, s := range c.Steps {
 				got, want := fmt.Sprint(step(mnt, src, s)), fmt.Sprint(s["want"])
-				if got != want && !kernelRefused(got, want) {
+				if got != want && !kernelRefused(got, want) && !unreachable(v, s["path"].(string), got) {
 					t.Errorf("%s %s: got %s, want %s", s["op"], s["path"], got, want)
 				}
 			}
@@ -286,4 +286,11 @@ func TestReloadAndSymlinkSwap(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(src, ".git", "hooks", "pre-commit")); err == nil {
 		t.Error("a rename landed in .git/hooks through a swapped-in symlink")
 	}
+}
+
+// unreachable: the recorder called the view directly, but the kernel never looks up a path
+// inside a redacted directory (ENOENT) or under a file (ENOTDIR), so the view never sees it.
+func unreachable(v *view, path, got string) bool {
+	k, root := v.classify(path)
+	return (k == inside || k == file) && root != path && (got == "ENOENT" || got == "ENOTDIR")
 }

@@ -594,12 +594,18 @@ func (n *node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 	case dir, inside:
 		return &handle{fd: -1, data: Stub}, n.keep(rel), 0
 	}
-	fd, err := n.v.at(rel, int(flags)&^syscall.O_CREAT, 0)
+	fd, err := n.v.at(rel, openFlags(flags)&^syscall.O_CREAT, 0)
 	if err != nil {
 		return nil, 0, fs.ToErrno(err)
 	}
 	h := &handle{fd: fd, mirroring: flags&writeFlags != 0 && n.v.protected(rel)}
 	return h, n.keep(rel), 0
+}
+
+// openFlags: what the kernel sends, less what openat2 refuses (EINVAL) — the exec marker — and
+// O_APPEND: the kernel already gives each write its offset, and pwrite on an O_APPEND fd ignores it.
+func openFlags(flags uint32) int {
+	return int(flags &^ (syscall.O_APPEND | fuse.FMODE_EXEC))
 }
 
 // adopt hands a just-created inode to the caller: it lands on the HOST. Best effort (virtiofs
@@ -615,7 +621,7 @@ func (n *node) Create(ctx context.Context, name string, flags, mode uint32, out 
 	if errno := n.v.denyNew(rel, true); errno != 0 {
 		return nil, nil, 0, errno
 	}
-	fd, err := n.v.at(rel, int(flags)|syscall.O_CREAT, mode)
+	fd, err := n.v.at(rel, openFlags(flags)|syscall.O_CREAT, mode&0o7777)
 	if err != nil {
 		return nil, nil, 0, fs.ToErrno(err)
 	}
