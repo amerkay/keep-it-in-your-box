@@ -106,16 +106,16 @@ fi
 
 # The FUSE view (guest/fuse, Go) — what its tests cannot see. Its behaviour is pinned by
 # `go test` against tests/fixtures/redaction (run by `kib build`, and on a real mount in CI).
-_gf="$(cat "$KIB_ROOT"/guest/fuse/*.go)"
+_gf="$(cat "$KIB_ROOT"/guest/fuse/[!_]*[!t].go)" # the code, not its *_test.go
 # Concurrent requests share one fd offset: lseek+read truncated reads at a 16 KiB boundary.
-if printf '%s\n' "$_gf" | grep -q 'Seek(' \
-    || ! printf '%s\n' "$_gf" | grep -q 'syscall.Pwrite(h.fd'; then
+if grep -q 'Seek(' <<<"$_gf" \
+    || ! grep -q 'syscall.Pwrite(h.fd' <<<"$_gf"; then
     fail "the FUSE view seeks, or lost pwrite" "a shared fd offset truncates concurrent I/O"
 else
     pass "FUSE view I/O is offset-atomic (pread/pwrite, no shared fd offset)"
 fi
 # git's own executed paths are never a mirror, checked before any suffix walk.
-if [ "$(printf '%s\n' "$_gf" | awk '/^func \(v \*view\) mirrorAnchor/ {f=1} f && /gitSensitive/ {print "ok"; exit} f && /for i/ {exit}')" = ok ]; then
+if [ "$(awk '/^func \(v \*view\) mirrorAnchor/ {f=1} f && /gitSensitive/ {print "ok"; exit} f && /for i/ {exit}' <<<"$_gf")" = ok ]; then
     pass "the mirror rule excludes git's own paths before any suffix walk"
 else
     fail "mirrorAnchor walks suffixes before checking gitSensitive" \
@@ -326,14 +326,14 @@ fi
 # [protect] rules, the mount reported active). "No rules" is an empty file, never a missing flag.
 if grep -q -- '--guard-file /usr/local/share/global.kibignore' "$KIB_ROOT/host/redaction.sh" \
     && grep -q -- '--patterns-file /kib-patterns' "$KIB_ROOT/host/redaction.sh" \
-    && printf '%s\n' "$_gf" | grep -q '\*patterns == "" || \*guardFile == ""'; then
+    && grep -q '\*patterns == "" || \*guardFile == ""' <<<"$_gf"; then
     pass "the sidecar is handed both rule files, and refuses to start without the guard one"
 else
     fail "the redaction sidecar can start without guard rules" \
         "a dropped --guard-file must abort the sidecar, not launch an unprotected box"
 fi
 # The server's syscalls run as ITS uid: without default_permissions a `chmod 000` file reads.
-if printf '%s\n' "$_gf" | grep -q '"default_permissions"'; then
+if grep -q '"default_permissions"' <<<"$_gf"; then
     pass "the FUSE mount asks the kernel to enforce owner/mode (default_permissions)"
 else
     fail "the FUSE view no longer mounts with default_permissions" \
@@ -341,15 +341,15 @@ else
 fi
 # Page cache kept only while mtime+size hold (libfuse's auto_cache): never-revalidate would
 # serve the user's own stale bytes after a host edit, and none at all cost a Nuxt build 20x.
-if ! printf '%s\n' "$_gf" | grep -A1 'if same {' | grep -q 'return fuse.FOPEN_KEEP_CACHE' \
-    || [ "$(printf '%s\n' "$_gf" | grep -c 'FOPEN_KEEP_CACHE')" != 1 ]; then
+if ! grep -A1 'if same {' <<<"$_gf" | grep -q 'return fuse.FOPEN_KEEP_CACHE' \
+    || [ "$(grep -c 'FOPEN_KEEP_CACHE' <<<"$_gf")" != 1 ]; then
     fail "the FUSE view caches pages without revalidating, or not at all" \
         "keep the cache only while mtime and size are what the last open saw"
 else
     pass "the FUSE mount page-caches with open-time revalidation"
 fi
 # SIGHUP is the live rule reload; an unhandled one kills pid 1 and the view with it.
-if printf '%s\n' "$_gf" | grep -q 'signal.Notify(sig, syscall.SIGHUP'; then
+if grep -q 'signal.Notify(sig, syscall.SIGHUP' <<<"$_gf"; then
     pass "the sidecar reloads its rules on SIGHUP"
 else
     fail "the FUSE view no longer handles SIGHUP" "the host's live reload would kill the view"
@@ -370,7 +370,7 @@ fi
 unset _rw
 
 # flush runs on EVERY close(2): an fsync there is a forced writeback per file, read-only too.
-if printf '%s\n' "$_gf" | awk '/^func \(n \*node\) Flush/ {f=1; next} f && /^func / {exit} f' \
+if awk '/^func \(n \*node\) Flush/ {f=1; next} f && /^func / {exit} f' <<<"$_gf" \
     | grep -q 'Fsync'; then
     fail "the FUSE view fsyncs in Flush" "that is a forced writeback on every close"
 else
