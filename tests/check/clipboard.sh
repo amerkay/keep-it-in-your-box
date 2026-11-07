@@ -95,8 +95,8 @@ rm -f "$_clip_tmp/spool"/req.probe1 "$_clip_tmp/spool"/resp.probe1 "$_clip_tmp/s
 unset _clip_i
 
 # The WRITE path, end to end against the real host half. A write is allowed — refusing it broke
-# the fullscreen TUI's select-to-copy — but it reaches pbcopy only through kib.shared.clipboard,
-# the same filter the Wayland guard applies in flight on Linux. The probe carries the sequence
+# the fullscreen TUI's select-to-copy — but it reaches pbcopy only through kib.shared.clipboard.
+# The probe carries the sequence
 # that would end bracketed paste and run the rest as typed input at the user's next paste.
 printf '#!/bin/sh\ncat > "%s/pasteboard"\n' "$_clip_tmp" >"$_clip_tmp/bin/pbcopy"
 chmod +x "$_clip_tmp/bin/pbcopy"

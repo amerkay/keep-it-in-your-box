@@ -30,18 +30,19 @@ is_macos() { [ "$KIB_OS" = darwin ]; }
 _KIB_ENGINE_VM=0
 engine_lima() { [ "$_KIB_ENGINE_VM" = 1 ]; }
 
-# Lima's file share per OS. Never reverse-sshfs: it can reach host paths no mount names.
-# 9p uncached: its default write-back cache lets each side read the other's half-written file.
-if is_macos; then
-    LIMA_VM_TYPE=vz LIMA_MOUNT_TYPE=virtiofs LIMA_MOUNT_SET=''
-else
-    LIMA_VM_TYPE=qemu LIMA_MOUNT_TYPE=9p LIMA_MOUNT_SET='.mounts[]."9p".cache = "none"'
-fi
-# Lima on Linux needs QEMU and KVM, which take root to set up (docs/vm.md). macOS has its own.
+# virtiofs on both: 9p writes ~6x slower. Never reverse-sshfs: it can reach host paths no mount
+# names.
+LIMA_MOUNT_TYPE=virtiofs
+if is_macos; then LIMA_VM_TYPE=vz; else LIMA_VM_TYPE=qemu; fi
+# Lima on Linux needs QEMU, KVM and virtiofsd, which take root to set up (docs/vm.md). macOS has
+# its own. virtiofsd: where Lima looks for it.
 lima_host_ready() {
     is_macos && return 0
     command -v "qemu-system-$(uname -m)" >/dev/null && command -v qemu-img >/dev/null \
-        && [ -w /dev/kvm ]
+        && [ -w /dev/kvm ] && {
+        command -v virtiofsd >/dev/null || [ -x /usr/libexec/virtiofsd ] \
+            || [ -x /usr/lib/qemu/virtiofsd ]
+    }
 }
 
 _is_uint() { case "$1" in '' | *[!0-9]*) return 1 ;; *) return 0 ;; esac }
@@ -221,66 +222,10 @@ host_claude_path() {
     printf '%s\n' "$KIB_HOST_CLAUDE"
 }
 
-# ── Rootless Docker ───────────────────────────────────────────────
-# Rootless dockerd runs inside RootlessKit's own mount namespace, where / is rslave. Two things
-# follow, and both are ENGINE facts rather than OS facts — hence a second predicate beside
-# is_macos rather than a branch in a caller:
-#   • the FUSE root must be marked shared THERE. Marked on the host it stays invisible to the
-#     daemon, which then refuses the sidecar's :rshared bind outright ("… is mounted on / but it
-#     is not a shared mount"). _mount_is_shared reads OUR namespace and wrongly passes.
-#   • the host user maps to container uid 0, so every bind reports 0 inside and the subuid range
-#     (100000+) reaches nothing kib mounts. The box therefore runs as container-root — which IS
-#     the unprivileged host user, one level out.
-# Measured on docker 29.2.1 / rootlesskit 2.3.6 (docs/design-notes/platform-matrix.md).
-#
-# The memo is _KIB_ROOTLESS, deliberately NOT the KIB_ROOTLESS that start_container exports into
-# the box: an inherited value must never be authoritative. Trusting one meant `KIB_ROOTLESS=1 kib`
-# on an ordinary ROOTFUL daemon skipped the cap re-add and gosu, set HOST_UID=0 and IS_SANDBOX=1,
-# and lifted the entrypoint's refusal — a box running as REAL container root, fail-open, from one
-# stray env var. The probe answers, nothing else.
-is_rootless() {
-    if [ -z "${_KIB_ROOTLESS+x}" ]; then
-        _KIB_ROOTLESS=0
-        if [ "$KIB_OS" != darwin ]; then
-            case "$(docker info -f '{{.SecurityOptions}}' 2>/dev/null)" in
-                *name=rootless*) _KIB_ROOTLESS=1 ;;
-            esac
-        fi
-    fi
-    [ "$_KIB_ROOTLESS" = 1 ]
-}
-
-# The ids everything in the box runs as: ours, or 0 under rootless (where 0 *is* ours). Every
-# --user, HOST_UID and FUSE id remap goes through these — tests/check/regressions.sh holds them
-# to it, because a single bare `id -u` left behind reaches an unmapped subuid and fails as EACCES
-# on a path that plainly exists.
-#
-# resolve_box_ids MUST run in the parent shell before the first `$(box_uid)`. A memo written inside
-# a command substitution dies with that subshell, so without it every call re-ran `docker info` —
-# six times on a cold launch — and, far worse, the two halves of `--user "$(box_uid):$(box_gid)"`
-# were INDEPENDENT probes: one transient failure and the container comes up `0:1000`.
-resolve_box_ids() {
-    # `if`, not `[ … ] && return`: that form yields 1 when the test fails, which aborts the launch
-    # under set -e the day a caller stops ignoring the status.
-    if [ -n "${KIB_BOX_UID:-}" ]; then
-        return 0
-    fi
-    if is_rootless; then
-        KIB_BOX_UID=0 KIB_BOX_GID=0
-    else
-        KIB_BOX_UID="$(id -u)" KIB_BOX_GID="$(id -g)"
-    fi
-}
-
-box_uid() {
-    resolve_box_ids
-    printf '%s\n' "$KIB_BOX_UID"
-}
-
-box_gid() {
-    resolve_box_ids
-    printf '%s\n' "$KIB_BOX_GID"
-}
+# The ids everything in the box runs as: ours. Every --user, HOST_UID and FUSE id goes through
+# these (tests/check/regressions.sh).
+box_uid() { id -u; }
+box_gid() { id -g; }
 
 # ── The FUSE redaction root ───────────────────────────────────────
 # The sidecar mounts the redacted view under this root and the agent's container consumes it by
@@ -288,184 +233,58 @@ box_gid() {
 # be able to travel between them.
 #
 # That rules out any path the engine serves as a file share: a share has no mount namespace for
-# the event to land in. In the VM the root is a VM-local dir, never a Lima mount; not /run, which
+# the event to land in. The root is a VM-local dir, never a Lima mount; not /run, which
 # Ubuntu's fusermount3 AppArmor profile denies. (docs/design-notes/macos.md)
-fuse_root_path() { # <per-project key>
-    if engine_lima; then
-        printf '/mnt/kib/fuse.%s\n' "$1"
-    else
-        printf '%s/fuse.%s\n' "$KIB_STATE_ROOT" "$1"
-    fi
-}
+fuse_root_path() { printf '/mnt/kib/fuse.%s\n' "$1"; } # <per-project key>
 
-# ── The engine's own mount namespace ──────────────────────────────
-# Two engines keep the FUSE root somewhere kib cannot act on directly, for different reasons: on
-# macOS it exists only inside the engine VM; under rootless it is our own path, but only the
-# daemon's namespace decides whether a :rshared bind there is accepted. Same shape, one shim.
-engine_ns() { engine_lima || is_rootless; }
-
-# dockerd's pid, host-visible because rootlesskit adds no pid namespace. The pidfile is checked
-# against /proc/<pid>/comm, never trusted: a SIGKILLed dockerd leaves the file behind, and a
-# recycled pid would point nsenter at an unrelated process's namespaces — the same stale-pidfile
-# class kill_pgrp exists for. No pgrep fallback: it returns the rootlesskit PARENT, which sits
-# OUTSIDE the child's user and mount namespaces, so `fuse_mounted` would read the host's mount
-# table and confidently answer the wrong question.
-_rootless_daemon_pid() {
-    local rd p comm
-    rd="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-    for p in "$(cat "$rd/docker.pid" 2>/dev/null)" \
-        "$(cat "$rd/dockerd-rootless/child_pid" 2>/dev/null)"; do
-        [ -n "$p" ] || continue
-        comm="$(cat "/proc/$p/comm" 2>/dev/null)" || continue
-        case "$comm" in dockerd | rootlesskit | exe) printf '%s\n' "$p" && return 0 ;; esac
-    done
-    return 1
+# Root in the VM, over Lima's own ssh. Its ssh master may outlive kib: no lock fd.
+vm_root() {
+    limactl shell --workdir / "$KIB_VM_NAME" sudo -n -- "$@" </dev/null \
+        200>&- 201>&- 202>&- 205>&- 206>&-
 }
-
-# Engine VM: root in the VM, over Lima's own ssh. Never reused for a native engine, where it
-# would target your REAL machine — the rootless branch needs no privilege at all, because owning
-# that user namespace is the only permission setns asks for.
-#
-# One attempt, never a retry: --preserve-credentials has been in util-linux since 2.24 (2013), and
-# a `cmd_a || cmd_b` fallback cannot tell "this nsenter rejected the flag" from "the command inside
-# failed" — so it re-ran the caller's whole script, including fuse_root_create's unmount-and-bind.
-engine_ns_exec() {
-    if engine_lima; then
-        # Lima's ssh master may outlive kib: no lock fd.
-        limactl shell --workdir / "$KIB_VM_NAME" sudo -n -- "$@" </dev/null >/dev/null 2>&1 \
-            200>&- 201>&- 202>&- 205>&- 206>&-
-        return
-    fi
-    local pid
-    pid="$(_rootless_daemon_pid)" || return 1
-    nsenter -t "$pid" -U --preserve-credentials -m -- "$@" >/dev/null 2>&1
-}
+engine_ns_exec() { vm_root "$@" >/dev/null 2>&1; }
 
 # ── Mount state ───────────────────────────────────────────────────
 # Ask the kernel directly. `mountpoint -q` is NOT usable: after the server dies the mount stays
 # in the table but stat() returns ENOTCONN, so mountpoint calls a directory that still IS one
 # "not a mountpoint" — and the unmount gets skipped.
 # shellcheck disable=SC2016  # $1 is the inner sh's argument, not ours
-_KIB_MOUNTED_SH='while read -r _d _m _r; do [ "$_m" = "$1" ] && exit 0; done </proc/self/mounts
-exit 1'
-
 fuse_mounted() {
-    if engine_ns; then
-        # Under rootless this is also the readiness answer that matters: the view propagates to
-        # the daemon's namespace but never to ours, so our /proc/self/mounts is silent on it.
-        engine_ns_exec sh -c "$_KIB_MOUNTED_SH" _ "$1"
-    else
-        awk -v p="$1" '$2 == p { found = 1 } END { exit !found }' /proc/self/mounts 2>/dev/null
-    fi
+    engine_ns_exec sh -c '
+        while read -r _d _m _r; do [ "$_m" = "$1" ] && exit 0; done </proc/self/mounts
+        exit 1' _ "$1"
 }
 
+# `umount -l` only: the VM has no fusermount3, and the server is in a container we are about to
+# remove — there is nobody to answer a clean unmount.
 unmount_fuse() {
     fuse_mounted "$1" || return 0
-    if engine_ns; then
-        # `umount -l` only: the VM has no fusermount3, and either way the server is in a
-        # container we are about to remove — there is nobody to answer a clean unmount.
-        engine_ns_exec umount -l "$1" || true
-    else
-        fusermount3 -u "$1" 2>/dev/null \
-            || fusermount -u "$1" 2>/dev/null \
-            || umount -l "$1" 2>/dev/null || true # lazy: last resort for a dead server
-    fi
+    engine_ns_exec umount -l "$1" || true
     ! fuse_mounted "$1"
 }
 
 # ── Root lifecycle ────────────────────────────────────────────────
-# Propagation of the mount CONTAINING $1 (the longest matching mountpoint), read from
-# /proc/self/mountinfo — 'shared:N' sits in the optional fields, between field 7 and the '-'.
-# Not findmnt: this must not fail merely because util-linux is thin.
-_mount_is_shared() {
-    awk -v p="$1" '
-        {
-            n = 0
-            for (i = 7; i <= NF && $i != "-"; i++) if ($i ~ /^shared:/) n = 1
-            mp = $5
-            if (mp == p || index(p, (mp == "/" ? mp : mp "/")) == 1) {
-                if (length(mp) >= best) { best = length(mp); sh = n }
-            }
-        }
-        END { exit !sh }' /proc/self/mountinfo 2>/dev/null
-}
-
-# Create <root>/mnt owned by <uid>:<gid>, and guarantee the root propagates shared. Called once
-# per cold start, before the sidecar.
+# Create <root>/mnt owned by <uid>:<gid>, propagating shared. Called once per cold start, before
+# the sidecar. A plain directory cannot be a propagation peer until it is a mount in its own
+# right: bind it to itself, then mark it rshared — idempotent, since the second call finds it
+# already mounted. `chown`: fusermount3 refuses a mountpoint its caller does not own.
 fuse_root_create() { # <root> <uid> <gid>
-    if engine_lima; then
-        # A plain directory cannot be a propagation peer until it is a mount in its own right,
-        # and the engine VM's root propagation is not ours to change. Bind it to itself, then
-        # mark it rshared — idempotent, since the second call finds it already mounted.
-        # `chown`: fusermount3 refuses a mountpoint its caller does not own, and here a root VM
-        # helper does the mkdir rather than the user (on Linux that comes free).
-        # shellcheck disable=SC2016  # $1..$3 are the inner sh's arguments, not ours
-        engine_ns_exec sh -c '
-            mkdir -p "$1/mnt" || exit 1
-            chmod 755 "$1" "$1/mnt"
-            chown "$2:$3" "$1/mnt" || exit 1
-            grep -q " $1 " /proc/self/mounts || mount --bind "$1" "$1" || exit 1
-            mount --make-rshared "$1"' _ "$1" "$2" "$3" \
-            || die "could not prepare the redaction root inside the Docker engine VM ($1)." \
-                "kib cannot serve the .kibignore redaction without it, and will not run" \
-                "unprotected. Restart the engine and try again."
-        return 0
-    fi
-
-    # 755 on both: the sidecar runs as our uid, but the agent's container traverses this path as
-    # root before dropping privileges. (`-m` with `-p` would only apply to the deepest dir.)
-    mkdir -p "$1/mnt" || die "could not create the redaction root at $1."
-    chmod 755 "$1" "$1/mnt"
-
-    # Rootless: the path is ours, but the daemon judges it from RootlessKit's namespace, where /
-    # is rslave. Bind the root to itself there and mark it shared — invisible to us by design (it
-    # reads `shared:N master:1` in there). No chown: the dir is already ours, and inside a
-    # rootless container that reads as uid 0, which is what mounts the view.
-    #
-    # The bind is UNCONDITIONAL, and that is the fix: `fuse_root_destroy` rm -rf's a directory whose
-    # bind lives in a namespace it cannot see, so the mount outlives its own mountpoint. The old
-    # "already mounted?" test then matched that corpse, skipped the bind, marked the corpse shared,
-    # and the daemon refused the sidecar with "is mounted on / but it is not a shared mount" on
-    # every later launch. Unmounting first is what makes the bind land on the real directory; it
-    # loops because launches can stack more than one, and drives off umount's own exit status —
-    # a path test cannot see a corpse, which /proc renders as `<path>\040(deleted)`.
-    if is_rootless; then
-        # shellcheck disable=SC2016  # $1 is the inner sh's argument, not ours
-        engine_ns_exec sh -c '
-            n=0
-            while [ "$n" -lt 10 ] && umount -l "$1" 2>/dev/null; do n=$((n + 1)); done
-            mount --bind "$1" "$1" || exit 1
-            mount --make-rshared "$1"' _ "$1" && return 0
-        die "could not mark $1 shared inside the rootless Docker daemon's mount namespace," \
-            "so the redaction sidecar's bind would be refused. kib will not run unprotected." \
-            "Check the daemon is up (systemctl --user status docker) and that nsenter is" \
-            "installed (util-linux) — kib enters that namespace with it, without privilege."
-    fi
-
-    # No fallback and no escalation: kib refuses rather than mount the view somewhere the agent's
-    # container can never see it, because a launch-time bind mask cannot cover files created
-    # mid-session and the downgrade would be silent.
-    _mount_is_shared "$1" && return 0
-    die "kib needs $1 to sit on a shared mount so the redaction view can reach the" \
-        "container, but its filesystem does not propagate. Systemd makes / shared at" \
-        "boot, so this usually means a separate mount for that path. Fix it with:" \
-        "  sudo mount --make-rshared \$(df --output=target '$1' | tail -1)" \
-        "or point kib elsewhere with KIB_STATE_ROOT=/run/user/$(id -u)/kib."
+    # shellcheck disable=SC2016  # $1..$3 are the inner sh's arguments, not ours
+    engine_ns_exec sh -c '
+        mkdir -p "$1/mnt" || exit 1
+        chmod 755 "$1" "$1/mnt"
+        chown "$2:$3" "$1/mnt" || exit 1
+        grep -q " $1 " /proc/self/mounts || mount --bind "$1" "$1" || exit 1
+        mount --make-rshared "$1"' _ "$1" "$2" "$3" \
+        || die "could not prepare the redaction root inside the VM ($1)." \
+            "kib cannot serve the .kibignore redaction without it, and will not run" \
+            "unprotected. Restart the VM (limactl stop $KIB_VM_NAME) and try again."
 }
 
+# The bind-to-self must go before the rm, or the next launch inherits a stacked mount.
 fuse_root_destroy() { # <root>
-    if engine_lima; then
-        # The bind-to-self must go before the rm, or the next launch inherits a stacked mount.
-        # shellcheck disable=SC2016  # $1 is the inner sh's argument, not ours
-        engine_ns_exec sh -c 'umount -l "$1" 2>/dev/null; rm -rf "$1"' _ "$1" || true
-    else
-        # Same ordering, and the rm has to be ours: under rootless only the daemon's namespace
-        # holds the bind-to-self, while the directory itself is on our side of the fence.
-        if is_rootless; then
-            engine_ns_exec umount -l "$1" || true
-        fi
-        rm -rf "$1" 2>/dev/null || true
-    fi
+    # shellcheck disable=SC2016  # $1 is the inner sh's argument, not ours
+    engine_ns_exec sh -c 'umount -l "$1" 2>/dev/null; rm -rf "$1"' _ "$1" || true
 }
 
 # ── macOS launch preflight ────────────────────────────────────────
@@ -501,8 +320,6 @@ preflight_platform() {
 # shellcheck disable=SC2034
 KIB_CONFIG="${KIB_CONFIG:-$HOME/.keep-it-in-your-box/config}"
 KIB_CFG_BROKER=on
-KIB_CFG_VM=off   # opt-in until PLAN_VM_SECURITY.md lands: `vm = on`
-KIB_CFG_VM_SKIP= # more folder names the VM sync skips: `vm_skip = dist, .yarn`, one line or many
 
 read_kib_config() {
     [ -f "$KIB_CONFIG" ] || return 0
@@ -520,8 +337,6 @@ read_kib_config() {
         val="${val%"${val##*[![:space:]]}"}" # rtrim val
         case "$key" in
             broker) KIB_CFG_BROKER="$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" ;;
-            vm) KIB_CFG_VM="$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" ;;
-            vm_skip) KIB_CFG_VM_SKIP="$KIB_CFG_VM_SKIP $val" ;; # lines add up
         esac
     done <"$KIB_CONFIG"
 }

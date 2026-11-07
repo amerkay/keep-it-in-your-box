@@ -349,43 +349,6 @@ fi
 rm -rf "$sm_stub"
 unset sm_stub sm_out sm_rc
 
-# The clipboard notifier is a grep contract across the trust boundary: the guard writes
-# WLGUARD-<KIND> lines (kib/guest/wayland_guard.py) and start_wayland_notifier greps them out of
-# `docker logs`. Rename a kind on either side and NOTHING fails — the proxy keeps filtering, the
-# desktop just stops being told, which is exactly the failure nobody notices. Kinds are
-# discovered from both sources, so a new one is covered the day it is added.
-wg_emitted="$(grep -oE 'log\("[A-Z]+"' "$KIB_ROOT/kib/guest/wayland_guard.py" | sed 's/log("//; s/"//' | sort -u)"
-wg_watched="$(grep -oE 'WLGUARD-[A-Z]+\*' "$KIB_ROOT/host/desktop.sh" | sed 's/WLGUARD-//; s/\*//' | sort -u)"
-wg_missing=""
-for wg_k in $wg_watched; do
-    printf '%s\n' "$wg_emitted" | grep -qx "$wg_k" || wg_missing="$wg_missing $wg_k"
-done
-if [ -z "$wg_missing" ] && [ -n "$wg_watched" ]; then
-    pass "every WLGUARD kind the notifier greps is one the guard still emits"
-else
-    fail "the clipboard notifier greps a kind the guard never emits:${wg_missing:- (none watched)}" \
-        "a renamed log kind silently ends every clipboard desktop alert"
-fi
-unset wg_emitted wg_watched wg_missing wg_k
-
-# Every /dev/null varlink shadow must stay INSIDE add_resolv_sync_args' existence-guarded loop,
-# i.e. name the socket via the loop variable and never a literal. runc has to create the
-# mountpoint and cannot on a read-only bind, so a hardcoded name aborts the whole launch the
-# moment that socket is absent at create time (`make mountpoint …: read-only file system`) —
-# which is what the literal io.systemd.Resolve/.Monitor mounts this replaced would have done.
-# Nothing in the check suite can see a docker run, so the shape is pinned in the source instead.
-vl_body="$(sed -n '/^add_resolv_sync_args() {/,/^}/p' "$KIB_ROOT/host/net.sh")"
-vl_all="$(printf '%s\n' "$vl_body" | grep -c '/dev/null:' || true)"
-# shellcheck disable=SC2016  # a grep pattern matching the literal text ${_s##*/}, not an expansion
-vl_var="$(printf '%s\n' "$vl_body" | grep -c '/dev/null:.*\${_s##\*/}' || true)"
-if [ "$vl_all" -ge 1 ] && [ "$vl_all" = "$vl_var" ]; then
-    pass "every varlink /dev/null shadow is loop-derived, never a literal socket name"
-else
-    fail "add_resolv_sync_args hardcodes a varlink socket name ($vl_var/$vl_all loop-derived)" \
-        "runc cannot create a mountpoint on a :ro bind — an absent socket aborts every launch"
-fi
-unset vl_body vl_all vl_var
-
 # Build folders go on volumes (host/lifecycle.sh). local_dirs runs in the sidecar, so here a fake
 # `docker exec` runs its script on a scratch tree: /src is the raw project, the view hides one dir.
 ld_t="$(mktemp -d)"

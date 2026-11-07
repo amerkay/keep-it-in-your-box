@@ -27,10 +27,6 @@ kib_resolve_paths() {
     SLUG="$(printf '%s' "$PWD" | sed 's/[^a-zA-Z0-9]/-/g')"
     PROJ_STATE="$KIB_STATE_ROOT"
     TRANSCRIPTS_SRC="$CLAUDE_HOME/projects/$SLUG"
-    if engine_lima; then # the VM resolves binds itself, so name what it can see (vm_state)
-        PROJ_STATE="$VM_RW"
-        TRANSCRIPTS_SRC="$VM_RW/$SLUG/transcripts"
-    fi
     SESSION_BASE="$PROJ_STATE/$SLUG/session"
     SHARED_BASE="$PROJ_STATE/$SLUG/shared"
     EPHEMERAL=0

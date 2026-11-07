@@ -4,6 +4,7 @@
 //	fuse --src DIR --mnt DIR --patterns-file F --guard-file F [--uid N --gid N]
 //	fuse optouts GUARD RULES       project '!' rules that un-redact, one per line
 //	fuse tightens OLD NEW          exit 0 if NEW can only withhold more, else 5
+//	fuse match RULES               the NUL-separated paths on stdin that RULES covers, likewise
 //
 // A file argument of "-" reads stdin.
 package main
@@ -57,9 +58,9 @@ func main() {
 }
 
 func subcommand(cmd string, args []string) int {
-	need := map[string]int{"optouts": 2, "tightens": 2}[cmd]
+	need := map[string]int{"optouts": 2, "tightens": 2, "match": 1}[cmd]
 	if need == 0 || len(args) != need {
-		die(exitUsage, "usage: fuse optouts GUARD RULES | tightens OLD NEW")
+		die(exitUsage, "usage: fuse optouts GUARD RULES | tightens OLD NEW | match RULES")
 	}
 	switch cmd {
 	case "optouts":
@@ -69,6 +70,17 @@ func subcommand(cmd string, args []string) int {
 	case "tightens":
 		if !Tightens(load(args[0], false), load(args[1], false)) {
 			return exitRefused
+		}
+	case "match":
+		rules := load(args[0], false)
+		paths, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			die(1, "kib-fuse: %v", err)
+		}
+		for _, p := range strings.Split(string(paths), "\x00") {
+			if p != "" && Verdict(rules, p) != "" {
+				fmt.Print(p + "\x00")
+			}
 		}
 	}
 	return 0

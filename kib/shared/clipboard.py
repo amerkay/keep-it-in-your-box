@@ -4,12 +4,10 @@ A clipboard write is host code execution at the user's next terminal paste: an e
 `ESC[201~` ends bracketed paste and the rest is interpreted as typed input. That sequence, not
 the write itself, is the danger — so writes are allowed and the *content* is filtered.
 
-Two callers, deliberately one filter: `kib.guest.wayland_guard` cleans the bytes in flight
-through the compositor's pipe on Linux, and `host/clipboard-bridge.sh` cleans the spooled file
-before `pbcopy` on macOS. A second copy of this predicate would drift, and the drift is a
-platform where the escape survives.
+One caller, `host/clipboard-bridge.sh`: it cleans the spooled file before `pbcopy` or
+`wl-copy`, on both platforms.
 
-As a CLI it takes a PATH, not stdin, so it can open with `O_NOFOLLOW`: the macOS spool is
+As a CLI it takes a PATH, not stdin, so it can open with `O_NOFOLLOW`: the spool is
 bind-mounted read-write into the sandbox, and a symlink planted there would otherwise put a
 host file the box cannot read onto the clipboard, where `pbpaste` hands it straight back.
 

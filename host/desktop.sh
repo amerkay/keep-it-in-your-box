@@ -1,136 +1,28 @@
 #!/usr/bin/env bash
-# Clipboard mediation: a filtering Wayland proxy on Linux, a one-way pbpaste bridge on macOS.
+# Clipboard mediation: a spool bridge, no socket. A host-side watcher (host/clipboard-bridge.sh)
+# serves a spool dir bind-mounted at /kib-clip: the entrypoint's shims drop a request file and
+# read the response, the host answers reads with pbpaste or wl-paste, and a WRITE reaches the
+# host clipboard only through kib.shared.clipboard, which strips control characters. A verbatim
+# write is host code execution at your next terminal paste: an embedded ESC[201~ ends bracketed
+# paste early and the rest is typed input (audit H8).
 #
-# The socket is mounted for pasting an image *from* the host clipboard, but a raw socket also
-# grants clipboard WRITES, and a *verbatim* write is host code execution at your next terminal
-# paste: an embedded ESC[201~ ends bracketed paste early and the rest is interpreted as typed
-# input (audit H8). So the main container never sees the real socket. A sidecar runs
-# kib.guest.wayland_guard, which relays the protocol, forwards reads verbatim and strips
-# control characters out of every write in flight — the content is the boundary, since nothing
-# in here can tell the agent's own copy from a script's. Host-side select+copy is unaffected —
-# your terminal is a host client and never comes through here.
+# Fail-soft, unlike the FUSE sidecar: losing image paste is not a security hole.
 #
-# Fail-soft, unlike the FUSE sidecar: no Wayland or no proxy means no socket is mounted at all.
-# Losing image paste is not a security hole; falling back to the raw socket would be.
-#
-# Reads:  KIB_ROOT IMAGE_NAME WL_CNAME WL_ROOT CLIP_STATE PWD
+# Reads:  KIB_ROOT CLIP_STATE CLIP_HOST PWD
 # Writes: ARGS
 
-WL_HOST_SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/${WAYLAND_DISPLAY:-wayland-0}"
-
-host_has_wayland() { [ -S "$WL_HOST_SOCK" ]; }
-
-# Mount args for the main container — only the *proxied* socket, never the real one. Its dir,
-# not the file: the proxy re-binds it on every restart (start_wayland_guard).
-add_wayland_args() {
-    [ -S "$WL_ROOT/sock/wayland-0" ] || return 0
-    ARGS+=(
-        -e XDG_RUNTIME_DIR="/run/user/$(id -u)"
-        -e WAYLAND_DISPLAY=kib-wl/wayland-0
-        -v "$WL_ROOT/sock:/run/user/$(id -u)/kib-wl:ro"
-    )
-}
-
-# Raises a proxy event as a desktop notification — the sidecar has no desktop session of its
-# own. STRIP is the interesting one: an ordinary copy is silent, so a line here means the box
-# wrote something that CONTAINED a paste escape, which is worth seeing.
-#
-# setsid + a pid file so teardown kills the whole pipeline by process group (a plain kill
-# leaves `docker logs -f` running). One alert per 30s, so a wl-copy loop cannot spam the desktop.
-#
-# 200>&- 201>&- is LOAD-BEARING: this follower outlives the kib that started it, and inheriting
-# the project's shared lock would stop the last terminal out from ever taking it exclusively —
-# teardown never runs and the container is stranded. Shipped that way once.
-start_wayland_notifier() {
-    command -v notify-send >/dev/null 2>&1 || return 0
-    # shellcheck disable=SC2016  # the body is the inner sh's script — its $vars are its own
-    setsid sh -c '
-        last=0
-        # Loops because a follow ends when the proxy restarts.
-        while docker logs -f --since "$(date +%s)" "$1" 2>&1; do sleep 1; done | while IFS= read -r line; do
-            case "$line" in
-                WLGUARD-STRIP*) t="clipboard write cleaned"
-                    b="Control characters were stripped from a write by the sandbox — your next paste is safe." ;;
-                WLGUARD-DENY*)  t="clipboard write blocked"
-                    b="A clipboard write from the sandbox was refused — not plain text, too large, or an unrecognised clipboard protocol. Your clipboard is unchanged." ;;
-                *) continue ;;  # READY/ERROR: breadcrumbs, the proxy restarts itself
-            esac
-            now=$(date +%s)
-            [ $((now - last)) -lt 30 ] && continue
-            last=$now
-            notify-send -u critical -i dialog-error "kib · $t" "$b Project: $2" || true
-        done' _ "$WL_CNAME" "$(basename "$PWD")" \
-        >/dev/null 2>&1 200>&- 201>&- 205>&- &
-    echo $! >"$WL_ROOT/notify.pid"
-}
-
-_wl_socket_up() { [ -S "$WL_ROOT/sock/wayland-0" ]; }
-
-start_wayland_guard() {
-    if ! host_has_wayland; then
-        echo "ℹ️  clipboard: no Wayland socket on this host — image paste unavailable." >&2
-        return 0
-    fi
-    mkdir -p "$WL_ROOT/sock"
-    chmod 755 "$WL_ROOT" # the main container traverses this as root before gosu
-
-    # The real socket is mounted read-only: that does not stop a connect(), which is exactly
-    # what the proxy needs and all it gets. --network none because it speaks only AF_UNIX.
-    # A compositor restart leaves that bind on a dead inode; the proxy then exits and
-    # --restart re-binds the path, reaching the live socket. --mount, never -v: on a restart
-    # before the compositor is back, -v would create a root-owned dir where its socket goes.
-    if ! docker run -d --name "$WL_CNAME" --restart on-failure \
-        --cap-drop=ALL --security-opt no-new-privileges --network none \
-        --user "$(box_uid):$(box_gid)" --userns=host \
-        --mount "type=bind,src=$WL_HOST_SOCK,dst=/run/host-wayland.sock,readonly" \
-        -v "$WL_ROOT:$WL_ROOT" \
-        -v /etc/passwd:/etc/passwd:ro \
-        -v /etc/group:/etc/group:ro \
-        -v "$KIB_ROOT/kib:/usr/local/lib/kib:ro" \
-        --entrypoint /usr/local/bin/wayland-guard \
-        "$IMAGE_NAME" \
-        --upstream /run/host-wayland.sock \
-        --listen "$WL_ROOT/sock/wayland-0" >/dev/null 2>&1; then
-        warn "could not start the clipboard proxy — image paste is unavailable this session."
-        rm -rf "$WL_ROOT" 2>/dev/null || true
-        return 0
-    fi
-
-    if ! wait_until 100 0.05 _wl_socket_up; then # ≤5s for the proxy to bind
-        warn "the clipboard proxy never came up; image paste is unavailable. Logs:" \
-            "$(docker logs "$WL_CNAME" 2>&1 | tail -5)"
-        docker rm -f "$WL_CNAME" >/dev/null 2>&1 || true
-        rm -rf "$WL_ROOT" 2>/dev/null || true
-        return 0
-    fi
-    start_wayland_notifier
-    echo "📋 clipboard: mediated (reads pass; writes stripped of control chars; $WL_CNAME)" >&2
-}
-
-stop_wayland_guard() {
-    kill_pgrp "$WL_ROOT/notify.pid" # whole group: the notifier is a setsid'd pipeline
-    docker rm -f "$WL_CNAME" >/dev/null 2>&1 || true
-    rm -rf "$WL_ROOT" 2>/dev/null || true
-}
-
-# ── Clipboard for an engine VM (macOS, Lima): a spool bridge, no socket ──
-# No host socket reaches the VM, so instead of a protocol proxy a host-side watcher
-# (host/clipboard-bridge.sh) serves a spool dir bind-mounted at /kib-clip: the entrypoint's
-# shims drop a request file and read the response, the host answers reads with pbpaste or an
-# osascript PNG extraction, and a WRITE reaches pbcopy only through kib.shared.clipboard — the
-# same filter the Wayland guard applies in flight, so both platforms strip the same bytes.
 start_clipboard_bridge() {
-    engine_lima || return 0
     command -v pbpaste >/dev/null 2>&1 || command -v wl-paste >/dev/null 2>&1 || {
         echo "ℹ️  clipboard: no pbpaste or wl-paste (wl-clipboard) — host paste is unavailable." >&2
         return 0
     }
     mkdir -p "$CLIP_STATE"
     chmod 755 "$CLIP_STATE" # the container traverses this as root before gosu
-    # 200>&- 201>&- is LOAD-BEARING — see start_wayland_notifier.
+    # 200>&- 201>&- is LOAD-BEARING: it outlives kib, and holding the project lock would stop
+    # the last terminal out from ever tearing down.
     local s="$CLIP_STATE" p="$CLIP_HOST.priv"
     detach_pgrp "$KIB_ROOT/host/clipboard-bridge.sh" "$s" "${PWD##*/}" "$p" 200>&- 201>&- 205>&-
-    # The pid file is never in the spool, nor on VM_RW: $CLIP_STATE is bind-mounted rw, so
+    # The pid file is never in the spool: $CLIP_STATE is bind-mounted rw, so
     # a file there is sandbox-writable, and teardown `kill -TERM -<pid>`s whatever it reads —
     # a sandbox that could write 1 there would turn teardown into a host process-group kill.
     echo $! >"$CLIP_HOST.pid"
@@ -169,7 +61,6 @@ add_clipboard_bridge_args() {
 }
 
 stop_clipboard_bridge() {
-    engine_lima || return 0
     kill_pgrp "$CLIP_HOST.pid" # whole group: the bridge is its own (detach_pgrp)
     # .priv is the bridge's host-private staging dir (clipboard-bridge.sh). Its own EXIT trap
     # normally clears it; this covers the SIGKILL that skips the trap.

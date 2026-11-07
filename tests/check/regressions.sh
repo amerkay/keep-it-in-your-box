@@ -413,7 +413,8 @@ t_audit_gate_severity() {
         ) 2>&1
     }
 
-    # warn-class: a tracked path matching .kibignore is named, and the launch continues.
+    # warn-class: a tracked path matching .kibignore is named, and the launch continues. The
+    # match is the view's (`fuse match` in a container): a fake docker answers for it.
     (
         GIT_TEMPLATE_DIR='' git init -q "$dir/warn"
         cd "$dir/warn" || exit 1
@@ -421,8 +422,11 @@ t_audit_gate_severity() {
         printf 'v\n' >secret.txt
         git add -A
     ) >/dev/null 2>&1
+    mkdir "$dir/bin"
+    printf '#!/bin/sh\ncase "$*" in *"fuse match"*) printf "secret.txt\\0" ;; esac\n' >"$dir/bin/docker"
+    chmod +x "$dir/bin/docker"
     rc=0
-    out="$(_gate_in "$dir/warn")" || rc=$?
+    out="$(PATH="$dir/bin:$PATH" IMAGE_NAME=img _gate_in "$dir/warn")" || rc=$?
     if [ "$rc" = 0 ] && printf '%s' "$out" | grep -q 'GATE-RETURNED-OK' \
         && printf '%s' "$out" | grep -q 'secret.txt'; then
         pass "audit gate: a tracked hidden path warns and the launch continues"
@@ -491,46 +495,6 @@ t_audit_gate_severity() {
     rm -rf "$dir"
 }
 t_audit_gate_severity
-
-# DNS (broker): resolv-sync must PRESERVE Docker's embedded resolver (127.0.0.11) as the first
-# nameserver. When the container joins the broker's user-defined network its resolv.conf
-# becomes `nameserver 127.0.0.11`; if the sync overwrites that with the host upstreams, the
-# `kib-broker` alias stops resolving mid-session (the ENOTFOUND bug). Runs the REAL script.
-t_resolv_embedded() {
-    local dir first pid
-    dir="$(mktemp -d)"
-    # broker on: DST has the embedded resolver; host SRC has an upstream + the loopback stub.
-    printf 'search .\nnameserver 127.0.0.11\noptions ndots:0\n' >"$dir/dst"
-    printf '# host\nnameserver 192.168.18.250\nnameserver 127.0.0.53\nsearch lan\n' >"$dir/src"
-    KIB_RESOLV_DST="$dir/dst" KIB_RESOLV_SYNC_INTERVAL=1 \
-        sh "$KIB_ROOT/guest/bin/resolv-sync.sh" "$dir/src" 2>/dev/null &
-    pid=$!
-    sleep 0.5
-    kill "$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null || true
-    first="$(grep -m1 '^[[:space:]]*nameserver' "$dir/dst" 2>/dev/null | awk '{print $2}')"
-    is "resolv-sync: embedded DNS (127.0.0.11) kept FIRST — the broker alias survives" \
-        127.0.0.11 "$first"
-    if grep -q '192.168.18.250' "$dir/dst" && ! grep -q '127.0.0.53' "$dir/dst"; then
-        pass "resolv-sync: keeps the host upstream, strips the loopback stub"
-    else
-        fail "resolv-sync upstream/stub handling"
-    fi
-    # broker off: DST has no embedded resolver → output is upstreams only (unchanged).
-    printf 'nameserver 10.0.0.1\n' >"$dir/dst2"
-    KIB_RESOLV_DST="$dir/dst2" sh "$KIB_ROOT/guest/bin/resolv-sync.sh" "$dir/src" 2>/dev/null &
-    pid=$!
-    sleep 0.5
-    kill "$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null || true
-    if grep -q '127.0.0.11' "$dir/dst2"; then
-        fail "resolv-sync broker-off" "injected 127.0.0.11 where DST had none"
-    else
-        pass "resolv-sync: no embedded DNS present → upstreams only (broker off, unchanged)"
-    fi
-    rm -rf "$dir"
-}
-t_resolv_embedded
 
 # The HOST_HOME symlink is what makes Claude's absolute-path-keyed config resolve in the box.
 # Its parent may not exist: macOS homes are under /Users, which a debian image has no reason to

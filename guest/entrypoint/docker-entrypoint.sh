@@ -159,7 +159,7 @@ ensure_user_local_claude() {
 # macOS clipboard bridge (KIB_CLIP_BRIDGE=1): install container-side shims that talk to the
 # host pbpaste watcher over the /kib-clip spool. Reads (wl-paste / xclip -o) drop a request
 # and read the response; writes (wl-copy / pbcopy / xclip without -o) leave a deny marker
-# and fail — one-way by construction, mirroring the Wayland guard. Placed in /usr/local/bin
+# and fail — one-way by construction. Placed in /usr/local/bin
 # (ahead of /usr/bin), so they shadow the real wl-clipboard, which has no socket here anyway.
 install_clipboard_shims() {
     cat >/usr/local/bin/wl-paste <<'SHIM'
@@ -209,7 +209,7 @@ SHIM
         cat >"/usr/local/bin/$w" <<'SHIM'
 #!/bin/sh
 # kib clipboard bridge — WRITE, spooled. The host half strips control characters before it
-# calls pbcopy (kib.shared.clipboard, the same filter the Wayland guard applies in flight):
+# calls pbcopy or wl-copy (kib.shared.clipboard):
 # a VERBATIM write would be host code execution at the user's next terminal paste.
 #
 # Text only, like the Wayland side — the filter guarantees nothing about bytes it cannot read
@@ -248,19 +248,14 @@ SHIM
 }
 
 # Which pass is this? Container creation runs as root and builds the box; a session re-enters
-# through gosu (host/lifecycle.sh kib_run_session) already as the target user. Under rootless
-# Docker BOTH are uid 0 — HOST_UID is 0 because the host user maps there — so the uid alone no
-# longer tells them apart and KIB_SESSION_TAG, set per-exec, is the discriminator.
-if [ -n "${KIB_SESSION_TAG:-}" ] \
-    || { [ "$(id -u)" = "$HOST_UID" ] && [ "${KIB_ROOTLESS:-0}" != 1 ]; }; then
+# through gosu (host/lifecycle.sh kib_run_session) already as the target user.
+if [ -n "${KIB_SESSION_TAG:-}" ] || [ "$(id -u)" = "$HOST_UID" ]; then
     USER_HOME=$(getent passwd "$HOST_UID" | cut -d: -f6)
     if [ -z "$USER_HOME" ]; then
         echo "✗ Failed to resolve home directory for UID $HOST_UID" >&2
         exit 1
     fi
-    # Root is refused unless it is rootless Docker's root, where uid 0 inside IS the
-    # unprivileged host user and there is no more privilege here than a session ever had.
-    if [ "$HOST_UID" = "0" ] && [ "${KIB_ROOTLESS:-0}" != 1 ]; then
+    if [ "$HOST_UID" = "0" ]; then
         echo "✗ Refusing to run tool command as root" >&2
         exit 1
     fi
@@ -285,15 +280,6 @@ echo "▶ Setting up container user with UID:GID ${HOST_UID}:${HOST_GID}..." >/d
 # Create group if needed
 if ! getent group "$HOST_GID" >/dev/null 2>&1; then
     groupadd -g "$HOST_GID" hostgroup
-fi
-
-# Rootless: the target user IS root, which already exists with /root. Repoint its home at the one
-# spelling everything else here — and the sandbox policy text — assumes. Edited in place rather
-# than with usermod, which refuses outright while any process runs as the user ("user root is
-# currently used by process 1", exit 8) and so can never work on THIS user. Gated on ROOTLESS, not
-# on uid 0: a rootful `sudo kib` must keep being refused below, not have root's home rewritten.
-if [ "${KIB_ROOTLESS:-0}" = 1 ]; then
-    sed -i 's|^root:x:0:0:root:/root:|root:x:0:0:root:/home/hostuser:|' /etc/passwd
 fi
 
 # Handle user creation/modification
@@ -531,12 +517,7 @@ export PATH="$KIB_SHIM_DIR:$USER_HOME/.local/bin:${KIB_PREPEND_PATH:+$KIB_PREPEN
 # check here.
 cd "${HOST_PWD:-/workspace}"
 
-# exec gosu preserves the TTY properly (unlike su -c which wraps in a subshell). Skipped when
-# there is nobody to switch TO: gosu calls setgroups/setgid/setuid unconditionally, and those
-# need CAP_SETGID/CAP_SETUID even for the uid you already are — under rootless, where the target
-# user IS root and the container is capless, it dies with
-# `failed switching to "0:0": operation not permitted` and takes the whole container with it.
-if [ "$(id -u)" = "$HOST_UID" ]; then
-    exec "$@"
-fi
+# kib waits for this before its first `docker exec` (container_ready): setup is done.
+: >/run/kib-ready
+# exec gosu preserves the TTY properly (unlike su -c which wraps in a subshell).
 exec gosu "$HOST_UID:$HOST_GID" "$@"

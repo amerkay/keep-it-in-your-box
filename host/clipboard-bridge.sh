@@ -4,11 +4,10 @@
 # host clipboard, and serves WRITE requests through the sanitiser before pbcopy — never
 # verbatim, because a verbatim write is host code execution at the user's next terminal paste.
 #
-# The filter is kib.shared.clipboard, the SAME one the Wayland guard applies in flight on
-# Linux; a second copy in sh would drift, and the drift is a platform where the escape
-# survives. The spool is bind-mounted rw into the sandbox, so it opens O_NOFOLLOW — a symlink
-# planted there would otherwise put an unreadable host file onto the clipboard, which pbpaste
-# hands straight back into the box.
+# The filter is kib.shared.clipboard; a copy in sh would drift, and the drift is where the
+# escape survives. The spool is bind-mounted rw into the sandbox, so it opens O_NOFOLLOW — a
+# symlink planted there would otherwise put an unreadable host file onto the clipboard, which
+# pbpaste hands straight back into the box.
 #
 # POSIX sh; stock macOS tools, or wl-clipboard on Linux. Started via detach_pgrp with fds 200/201 CLOSED (load-bearing —
 # it outlives the kib that starts it); killed by process group at teardown.

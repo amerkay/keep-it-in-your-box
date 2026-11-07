@@ -1,3 +1,0 @@
-#!/bin/sh
-# Baked shim — the Dockerfile says why this is three lines and where the logic lives.
-exec env PYTHONPATH=/usr/local/lib python3 -m kib.guest.wayland_guard "$@"

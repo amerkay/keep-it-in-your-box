@@ -237,17 +237,17 @@ COPY guest/entrypoint/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # The kib package is COPIED here as a fallback, then bind-mounted over at run time from the
 # checkout — in the SIDECARS, which are the only containers that import it (the agent's runs no
 # kib code). So editing a Python sidecar takes effect on the next container with no rebuild;
-# the FUSE view is the Go binary above and needs one. The two shims in /usr/local/bin are baked
-# because they never change: each is one `exec` line that puts /usr/local/lib on sys.path for
-# that process only. PYTHONPATH is NOT an image ENV — it would leak into every process the
+# the FUSE view is the Go binary above and needs one. The broker shim in /usr/local/bin is baked
+# because it never changes: one `exec` line that puts /usr/local/lib on sys.path for that
+# process only. PYTHONPATH is NOT an image ENV — it would leak into every process the
 # agent later runs.
 COPY kib /usr/local/lib/kib
-COPY guest/bin/wayland-guard guest/bin/broker /usr/local/bin/
+COPY guest/bin/broker /usr/local/bin/
 COPY --from=fuse /fuse /usr/local/bin/fuse
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
-	/usr/local/bin/fuse /usr/local/bin/wayland-guard /usr/local/bin/broker \
+# 755, not +x: COPY keeps the checkout's modes, and a 700 script is unreadable to the box's uid.
+RUN chmod 755 /usr/local/bin/docker-entrypoint.sh /usr/local/bin/fuse /usr/local/bin/broker \
 	&& chmod -R a+rX /usr/local/lib/kib \
-	&& python3 -c "import sys; sys.path.insert(0, '/usr/local/lib'); import kib.shared.rules, kib.broker.cli; print('kib package OK')"
+	&& python3 -c "import sys; sys.path.insert(0, '/usr/local/lib'); import kib.broker.cli; print('kib package OK')"
 
 ENV SHELL=/bin/bash
 ENV TERM=xterm-256color

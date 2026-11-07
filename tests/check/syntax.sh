@@ -9,14 +9,14 @@
 . "${BASH_SOURCE%/*}/_guard.sh" # sourced by tests/check.sh, never run directly
 
 # Host-side (runs on the user's Mac/Linux): bash, under the portability contract.
-HOST_BASH=(bin/kib host/*.sh tools/*.sh dev.sh tests/check.sh tests/lib.sh tests/vm-check.sh tests/check/*.sh)
+HOST_BASH=(bin/kib host/*.sh tools/*.sh dev.sh tests/check.sh tests/lib.sh tests/check/*.sh)
 # Host-side POSIX sh.
 HOST_SH=(host/clipboard-bridge.sh)
 # Host-side but structurally Linux-only (reads /proc, drives systemd): syntax + shellcheck,
 # exempt from the portability contract by design — it may use declare -A and friends.
 LINUX_BASH=(host/sleep-monitor.sh)
 # Container-side (always Linux): syntax only, exempt from the portability contract.
-CONT_SH=(guest/entrypoint/*.sh guest/bin/resolv-sync.sh guest/bin/wayland-guard guest/bin/broker)
+CONT_SH=(guest/entrypoint/*.sh guest/bin/broker)
 CONT_BASH=(tests/security-test.sh)
 
 # host/clipboard-bridge.sh is POSIX sh, so drop it from the bash list it globbed into.

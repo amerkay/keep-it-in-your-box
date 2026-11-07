@@ -57,7 +57,6 @@ add_node_cache_args() {
 
 ensure_node_cached() {
     [ -n "${NODE_VERSION_LIST:-}" ] || return 0
-    resolve_box_ids # before the $(box_uid) below, which would memo into a dead subshell
     mkdir -p "$KIB_NODE_CACHE" || die "cannot create the Node cache at $KIB_NODE_CACHE"
 
     # Never unlinked: a lock file whose inode another process holds lets the next lock a fresh one.
@@ -73,7 +72,7 @@ ensure_node_cached() {
         # Sterile: no project, no credentials, no broker net, no caps. --entrypoint is
         # load-bearing — the image's ENTRYPOINT is the session setup, which would run instead and
         # die on the HOST_UID this deliberately withholds. The interpreter is named rather than
-        # trusted, as add_resolv_sync_args does: a bind carries the HOST file's mode.
+        # trusted: a bind carries the HOST file's mode.
         lock_fd -w 600 "$lock" \
             docker run --rm \
             --entrypoint bash \

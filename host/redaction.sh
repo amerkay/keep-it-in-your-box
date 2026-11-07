@@ -124,10 +124,6 @@ _reload_rules() { # <staged> <why>
     exec 204>&-
     [ "$rc" = 0 ] || return 1
     echo "🛡️  $KIB_RULE_FILE reloaded into the live redaction view — $2." >&2
-    # In the VM the sync must drop the newly redacted files too, or the volume keeps their values.
-    ! engine_lima || vm_sync_restage || warn "the VM sync could not take the new $KIB_RULE_FILE." \
-        "Newly redacted files stay in the VM until this project's last session closes."
-    return 0
 }
 
 # The one way the LOOSENING direction reaches a running view. `[ -t 0 ]`: a headless launch has
@@ -175,11 +171,6 @@ prepare_redaction() {
     # bind mount with no protection.
     _stage_patterns "$PATTERNS_STATE"
     _stage_passwd
-    local src="$PWD"
-    if engine_lima; then
-        vm_sync_start # Lima mounts no project: Mutagen syncs it into a volume
-        src="$CNAME-src"
-    fi
 
     # A view teardown could not unmount is still live over the real project. Refuse HERE rather
     # than stack a second mount on it — teardown only warns, so that it can never abort the exit
@@ -202,7 +193,7 @@ prepare_redaction() {
         --device /dev/fuse --security-opt apparmor=unconfined \
         --user "$(box_uid):$(box_gid)" --userns=host \
         --network none \
-        -v "$src:/src" \
+        -v "$PWD:/src" \
         -v "$PATTERNS_STATE:/kib-patterns:ro" \
         -v "$PASSWD_STATE:/etc/passwd:ro" \
         -v "$GROUP_STATE:/etc/group:ro" \
@@ -247,9 +238,7 @@ prepare_redaction() {
     # pidfile is in $STATE_DIR, NOT bind-mounted into the box: teardown kills whatever group it
     # names. The path stays a LITERAL — tests/check/wiring.sh finds exec'd scripts by grepping
     # this call shape, and a variable hides them from it.
-    local vm=""
-    ! engine_lima || vm=vm
-    detach_pgrp "$KIB_ROOT/host/rules-watch.sh" "$PATTERNS_STATE" "$FUSE_CNAME" $vm 200>&- 201>&- 205>&-
+    detach_pgrp "$KIB_ROOT/host/rules-watch.sh" "$PATTERNS_STATE" "$FUSE_CNAME" 200>&- 201>&- 205>&-
     echo $! >"$PATTERNS_STATE.watch.pid"
     disown 2>/dev/null || true
 }
@@ -281,22 +270,16 @@ local_dirs() {
 
 sidecar_running() { [ -n "$(docker ps -q -f "name=^${FUSE_CNAME}$" 2>/dev/null)" ]; }
 
-# Is there a fuse fs at <path>, as <container> sees it? One probe, two callers: readiness
-# polling in the SIDECAR, and the attach check in the AGENT's container. Written twice once,
-# which left the attach-time copy — the one keeping a second terminal out of a container whose
-# view was unmounted underneath it — free to go stale on its own.
-_fuse_mounted_in() { # <container> <path>
-    docker exec "$1" sh -c '
+# Is the view mounted, as the SIDECAR sees it? Polled for readiness.
+_sidecar_mounted() {
+    docker exec "$FUSE_CNAME" sh -c '
         p=$(readlink -f "$1" 2>/dev/null || echo "$1")
         while read -r _d _m _t _r; do
             [ "$_m" = "$p" ] || continue
             case "$_t" in fuse*) exit 0 ;; esac
         done </proc/self/mounts
-        exit 1' _ "$2" 2>/dev/null
+        exit 1' _ "$FUSE_ROOT/mnt" 2>/dev/null
 }
-
-# Zero-arg wrapper: `wait_until … _sidecar_mounted_or_gone` calls it by name.
-_sidecar_mounted() { _fuse_mounted_in "$FUSE_CNAME" "$FUSE_ROOT/mnt"; }
 
 # Mounted, or dead — either way waiting longer is pointless. A sidecar that exited on a bad
 # argument would otherwise cost 100 failing `docker exec`s before anyone said so.
@@ -308,11 +291,11 @@ _sidecar_mounted_or_gone() { _sidecar_mounted || ! sidecar_running; }
 # global.kibignore cannot go stale: it mounts :ro from the checkout, so the sidecar and this
 # process read the very same file.
 verify_redaction_attach() {
-    # A live sidecar says nothing about the agent's side: the propagated mount can be gone
-    # (unmounted underneath us) while its container still runs, leaving $PWD as the bare
-    # mountpoint. Asked in the AGENT's container, so it is the consuming end that answers, and
-    # `docker exec` costs the same on both platforms — unlike a probe of the root on macOS.
-    if ! sidecar_running || ! _fuse_mounted_in "$CNAME" "$PWD"; then
+    # A live sidecar says nothing about the agent's side: the view can be gone underneath it.
+    # gVisor shows the box a gofer mount, not the fuse one, so the VM's table answers for the
+    # mount and a listing from the box for its end.
+    if ! sidecar_running || ! fuse_mounted "$FUSE_ROOT/mnt" \
+        || ! docker exec "$CNAME" ls -A "$PWD" >/dev/null 2>&1; then
         die "this project's container has no live redaction view, so neither" \
             "$KIB_RULE_FILE nor the host-config guard is being enforced in it." \
             "Refusing to attach — close all kib sessions for this project and relaunch." \

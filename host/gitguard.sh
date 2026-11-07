@@ -13,6 +13,17 @@
 
 _git_toplevel() { git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true; }
 
+# Tracked paths .kibignore covers, NUL-separated, by the view's own matcher: git and the binary in
+# a throwaway container on a read-only bind (the VM mounts ~). Empty if the engine is not up.
+_tracked_matches() { # <top> <out>
+    : >"$2"
+    [ -f "$1/.kibignore" ] && [ -n "${IMAGE_NAME:-}" ] || return 0
+    # shellcheck disable=SC2016 # the container's own shell
+    docker run --rm --network none -v "$1:/p:ro" -w /p --entrypoint sh "$IMAGE_NAME" -c \
+        'git -c safe.directory="*" ls-files -z | /usr/local/bin/fuse match .kibignore' \
+        >"$2" 2>/dev/null || : >"$2"
+}
+
 # $1 = launch | teardown | report.
 #
 #   launch    a refuse-class finding exits 5, before anything is started
@@ -25,7 +36,7 @@ _git_toplevel() { git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true; }
 # returning 1 for a warn-class finding would turn "you are tracking a path you asked kib to
 # hide" into "the sandbox will not start". Report mode returns the code, so it is scriptable.
 kib_audit_gate() {
-    local mode="$1" top rc=0 what="" stamp="${STATE_DIR:-}/${SLUG:-x}.hooks.seen"
+    local mode="$1" top rc=0 what="" stamp="${STATE_DIR:-}/${SLUG:-x}.hooks.seen" tracked
     have_python || return 0
     top="$(_git_toplevel)"
     [ -n "$top" ] || return 0 # not a git repo — nothing to audit
@@ -36,8 +47,11 @@ kib_audit_gate() {
     # hooks already in a fresh clone are the user's own.
     # Capturing stdout only: the findings go to stderr, so the user still reads them as they
     # print. What comes back is one line naming which warn classes fired, for the alert below.
-    what="$(kib_py host.gitaudit --top "$top" --mode "$mode" \
+    tracked="$(mktemp)"
+    _tracked_matches "$top" "$tracked"
+    what="$(kib_py host.gitaudit --top "$top" --mode "$mode" --tracked "$tracked" \
         --hooks-stamp "$stamp" --host-claude "$(host_claude_path)")" || rc=$?
+    rm -f "$tracked"
     # AFTER the report, never before: refreshed first, the scan above always reads empty.
     if [ "$mode" != report ] && [ -d "${STATE_DIR:-}" ]; then
         : >"$stamp" 2>/dev/null || true
