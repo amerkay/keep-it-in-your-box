@@ -98,6 +98,10 @@ runc. The seams the 2026-10-04 review listed, and their answers:
 - **`docker top`:** gVisor cannot answer it → readiness is the entrypoint's `/run/kib-ready`.
 - **Wayland socket:** gone; the clipboard is the spool bridge on both OSes, so no
   `--host-uds`. Docker's seccomp profile is enforced inside (`--oci-seccomp`).
+- **macOS file owners:** Apple's virtiofs reports the asker as a file's owner (cached per inode),
+  so gVisor's root gofer saw kib's `700` dirs as root's → bindfs in the VM over each dir kib binds
+  into the box (`_vm_owners`). Not over all of `~`: the project's redaction view already reports
+  the box user, and a second FUSE hop there would slow every project read.
 - **Rootless Docker:** unsupported → the VM's rootful Docker only.
 
 ## If this is ever revisited

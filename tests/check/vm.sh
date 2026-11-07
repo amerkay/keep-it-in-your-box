@@ -24,6 +24,7 @@ case "\$1" in
         case "\$*" in
             *"runsc install"*) echo "\${@: -1}" >>"$_vm_dir/runtimes" && echo gvisor >>"$_vm_dir/installs" ;;
             *nameserver*) echo "nameserver 192.168.5.3" ;;
+            *bindfs*) echo "\$*" >>"$_vm_dir/bindfs" ;;
         esac
         ;;
 esac
@@ -70,6 +71,15 @@ is "gVisor is installed once per pin" "1" \
 case "$(cat "$_vm_dir/runtimes")" in
     kib-gvisor-*) pass "the runtime is named for its pin, so a bump installs beside the old one" ;;
     *) fail "unexpected gVisor runtime name" "$(cat "$_vm_dir/runtimes")" ;;
+esac
+is "Linux: no bindfs, virtiofsd passes the real owners" "no" \
+    "$([ -e "$_vm_dir/bindfs" ] && echo yes || echo no)"
+_vm_t_owners() { KIB_OS=darwin && vm_up >/dev/null; }
+_vm_run "$_vm_dir/bin:$PATH" _vm_t_owners
+case "$(cat "$_vm_dir/bindfs" 2>/dev/null)" in
+    *"$_vm_dir/home/.claude $_vm_dir/home/.local/state/kib $KIB_ROOT $_vm_dir/node") pass \
+        "macOS: bindfs gives the VM your owners on every dir kib binds into the box" ;;
+    *) fail "macOS: kib's bind sources lack bindfs" "$(cat "$_vm_dir/bindfs" 2>/dev/null)" ;;
 esac
 is "the box's resolv.conf is the VM's resolvers" "nameserver 192.168.5.3" \
     "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_resolv)"

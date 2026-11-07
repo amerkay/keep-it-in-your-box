@@ -8,7 +8,7 @@ never yours. Docker Desktop is not needed and not used.
 
 The first `kib` asks once to install what is missing into `~/.local`, no sudo: Lima, the `docker`
 command and `docker buildx`. Each download is checked against a checksum pinned in kib. Then it
-creates the VM, installs gVisor into it (also pinned), and builds the image there. That takes a
+creates the VM, installs gVisor into it (also pinned) and, on macOS, bindfs, and builds the image there. That takes a
 few minutes.
 
 Linux also needs QEMU, KVM and virtiofsd, once, with sudo:
@@ -43,6 +43,9 @@ If `/dev/kvm` is missing, turn on virtualization (VT-x / AMD-V) in your BIOS. If
   would need a gVisor bug and then a VM kernel bug.
 - **Small-file writes are ~1.6–2× slower** in the box than on the host. Installs stay fast
   because build folders are VM volumes.
+- **macOS reports every file as owned by whoever asks.** gVisor asks as root, so kib puts bindfs
+  over the folders it mounts into the box (`~/.claude`, its state, its checkout, the Node cache)
+  to report you as their owner.
 - **A kib update that changes the VM's mounts** restarts it once, and waits until no session is
   open.
 

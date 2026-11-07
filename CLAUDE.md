@@ -107,7 +107,8 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   (`microvm.md`)
 - **The box runs on gVisor, so it has no Docker DNS, no NIC hot-plug, no host inotify and no
   `docker top`** — the broker is an `--add-host`, the box is created → connected → started,
-  watchers poll, readiness is the entrypoint's `/run/kib-ready`. gVisor needs rootful Docker,
+  watchers poll, readiness is the entrypoint's `/run/kib-ready`. On macOS, Apple's virtiofs
+  reports the asker as owner, so kib's bind sources get bindfs in the VM — never the project. gVisor needs rootful Docker,
   which is why there is no native path. (`microvm.md`)
 - **Keep build folders off FUSE** (`local_dirs` volumes) — `node_modules` through the view is
   the whole install cost (pnpm 130 s vs 6 s). (`microvm.md`)
