@@ -101,7 +101,7 @@ fixture() { # fixture <name> [git-init-args…] — echoes its path, creating it
 }
 
 # gVisor answers from its own kernel: it reports none of the host's LSM or mount types.
-on_gvisor() { case "$(uname -r)" in *gvisor*) return 0 ;; *) return 1 ;; esac; }
+on_gvisor() { case "$(uname -r)" in *gvisor*) return 0 ;; *) return 1 ;; esac }
 
 # ═════════════════════════════════════════════════════════════════
 section "Container boundary — escape classes (info-tier controls)"
@@ -136,7 +136,8 @@ unset _lsm_label
 if on_gvisor; then
     # gVisor's /proc/sys is its own, not a mount: what matters is that no entry takes a write.
     is "no /proc/sys entry is writable" "" "$(for f in /proc/sys/*/* /proc/sys/*/*/*; do
-        [ -d "$f" ] || ! (printf '' >>"$f") 2>/dev/null || echo "$f"; done)"
+        [ -d "$f" ] || ! (printf '' >>"$f") 2>/dev/null || echo "$f"
+    done)"
 else
     is "/proc/sys mounted read-only" "ro" "$(awk '$5=="/proc/sys"{split($6,o,",");print o[1]}' /proc/self/mountinfo | head -1)"
 fi
