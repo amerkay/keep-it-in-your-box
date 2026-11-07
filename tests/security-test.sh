@@ -101,9 +101,7 @@ fixture() { # fixture <name> [git-init-args…] — echoes its path, creating it
 }
 
 # gVisor answers from its own kernel: it reports none of the host's LSM or mount types.
-on_gvisor() {
-    dmesg 2>/dev/null | grep -q gVisor || grep -q 'Jan 10 15:06:54 PST 2016' /proc/version
-}
+on_gvisor() { case "$(uname -r)" in *gvisor*) return 0 ;; *) return 1 ;; esac; }
 
 # ═════════════════════════════════════════════════════════════════
 section "Container boundary — escape classes (info-tier controls)"
@@ -135,11 +133,17 @@ else
     esac
 fi
 unset _lsm_label
-is "/proc/sys mounted read-only" "ro" "$(awk '$5=="/proc/sys"{split($6,o,",");print o[1]}' /proc/self/mountinfo | head -1)"
+if on_gvisor; then
+    # gVisor's /proc/sys is its own, not a mount: what matters is that no entry takes a write.
+    is "no /proc/sys entry is writable" "" "$(for f in /proc/sys/*/* /proc/sys/*/*/*; do
+        [ -d "$f" ] || ! (printf '' >>"$f") 2>/dev/null || echo "$f"; done)"
+else
+    is "/proc/sys mounted read-only" "ro" "$(awk '$5=="/proc/sys"{split($6,o,",");print o[1]}' /proc/self/mountinfo | head -1)"
+fi
 is "/sys mounted read-only" "ro" "$(awk '$5=="/sys"{split($6,o,",");print o[1]}' /proc/self/mountinfo | head -1)"
 is "no docker socket" "absent" "$([ -S /var/run/docker.sock ] && echo present || echo absent)"
 is "no docker binary" "absent" "$(command -v docker >/dev/null && echo present || echo absent)"
-deny "/proc/sys is not writable" bash -c 'echo 1 > /proc/sys/kernel/dmesg_restrict'
+deny "/proc/sys is not writable" bash -c 'echo kib > /proc/sys/kernel/hostname'
 
 syscall_errno() { # syscall_errno <mount|unshare>
     python3 -c "
@@ -178,8 +182,13 @@ is "no unredacted copy of the project in this container" "absent" \
 # FUSE server cannot run without /dev/fuse, so its absence proves the property outright. A
 # `pgrep -f fuse` cannot — it matches the command line of any process that merely
 # mentions the string, this suite's own shell included, and reads as a leak that is not there.
-is "no /dev/fuse, so no FUSE server can run in this container" "absent" \
-    "$([ -e /dev/fuse ] && echo present || echo absent)"
+if on_gvisor; then
+    # gVisor's own /dev/fuse, served by its kernel: useless without mount(2), refused above.
+    skip "no /dev/fuse in this container" "gVisor's own device; mount(2) is refused"
+else
+    is "no /dev/fuse, so no FUSE server can run in this container" "absent" \
+        "$([ -e /dev/fuse ] && echo present || echo absent)"
+fi
 
 # The server's syscalls run as ITS uid, not the caller's. default_permissions is what makes the
 # kernel re-check owner and mode against the CALLER — without it nothing inside the project is
