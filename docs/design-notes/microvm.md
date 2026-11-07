@@ -102,7 +102,9 @@ runc. The seams the 2026-10-04 review listed, and their answers:
   so gVisor's root gofer saw kib's `700` dirs as root's → bindfs in the VM over `~/.claude` and
   kib's state (`_vm_owners`). Never over a project: its redaction view reports the box user
   already, and bindfs over kib's own checkout hung the sidecar's `docker run` when kib was the
-  project. Kib's checkout and the Node cache are world-readable, so they need none.
+  project. Kib's checkout and the Node cache are world-readable, so they need none. Always
+  `--multithreaded`: single-threaded, bindfs hung on the first stat of a transcript, as root and
+  as the user (multithreaded: 240 files in 0.1 s).
 - **Rootless Docker:** unsupported → the VM's rootful Docker only.
 
 ## If this is ever revisited

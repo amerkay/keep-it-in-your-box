@@ -77,7 +77,7 @@ is "Linux: no bindfs, virtiofsd passes the real owners" "no" \
 _vm_t_owners() { KIB_OS=darwin && vm_up >/dev/null; }
 _vm_run "$_vm_dir/bin:$PATH" _vm_t_owners
 case "$(cat "$_vm_dir/bindfs" 2>/dev/null)" in
-    *"$_vm_dir/home/.claude $_vm_dir/home/.local/state/kib") pass \
+    *--multithreaded*"$_vm_dir/home/.claude $_vm_dir/home/.local/state/kib") pass \
         "macOS: bindfs gives the VM your owners on ~/.claude and kib's state, nothing else" ;;
     *) fail "macOS: kib's bind sources lack bindfs" "$(cat "$_vm_dir/bindfs" 2>/dev/null)" ;;
 esac
