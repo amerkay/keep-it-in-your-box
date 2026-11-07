@@ -121,3 +121,4 @@ sudo systemctl disable --now docker.service docker.socket containerd.service
 sudo apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 sudo rm -rf /var/lib/docker /var/lib/containerd
 ```
+- [ ] Dockerfile: drop `python3-yaml` and its smoke test (kib no longer uses it) the next time the apt layer changes anyway — editing it now costs a ~10 min rebuild.

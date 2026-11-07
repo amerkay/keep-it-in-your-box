@@ -1,5 +1,7 @@
 # Plan: VM isolation without exposing user files
 
+**Superseded 2026-11-07** by `TMP_PLAN_GVISOR.md`: the box runs on gVisor in the VM, which mounts `~` instead of syncing projects.
+
 A container escape must not reach your machine's kernel or files beyond what kib needs.
 kib on the host, Docker in a VM, and only **open** projects go into that VM.
 

@@ -47,30 +47,12 @@ that reference this.
 - **The `.kibignore` → `.gitignore` sync was removed (2026-08-03).** kib wrote a managed block into the repo's own `.gitignore` at every launch, translating the rules (bare names → match-anywhere, `/`-rules → root-anchored). It edited a tracked file the user owns for a benefit the audit gate already delivers better: the gate names **tracked** matches, which is the case `.gitignore` cannot fix anyway, while the block only covered untracked files the user could ignore in one line themselves. Removing it also deletes the emitter's whole class of edge cases — the `!.env` opt-out that must not be mirrored, the subdir-launch skip, the legacy `ccignore` marker strip. Existing blocks are left in place; they are inert and the user can delete them. **Don't reinstate it**: writing to a repo's `.gitignore` is the user's call, and the session can say which line to add.
 - **The authoring semantics are in the policy text, because the near-miss is silent.** An agent in an unrelated workspace wrote a `.kibignore` of `**/*.pem`-style rules to hide a dev MySQL data dir and its TLS keys. Every one of them was a no-op past depth 2: a `/`-bearing rule is EXACT-anchored, so `**` equalises to one segment (`_rule_matches`), and the bare name it should have written is already the match-anywhere form. Nothing reports this — `parse()` warns only on `/`-leading and `..` rules, and to the sidecar's stderr, which the box cannot read; the file looks like it worked. Hence the two sub-bullets under "Redacted" in `guest/policy/etc-CLAUDE.md`: the `**` trap, directory sealing (`dir` + `!dir/keep` cannot re-include), and that an edit does not reach the live layer for the rest of that session (the reload gate below). **Don't "fix" it by teaching the matcher a recursive glob** — gitignore-shaped is the contract the guard file depends on; the fix was telling the session what the syntax is.
 
-### In the VM: the guard is the sync's ignore list
+### In the VM: one view, no sync
 
-Under Lima no project is mounted; the sidecar serves `/src` from a VM volume Mutagen fills, so
-what never reaches the VM is decided by `rules.sync_ignores` — one last-match-wins list that
-rebuilds `verdict`'s tiers: `[redact]` guard rules, then the project's (a `!` there cancels a
-redact, as in the view), then `[protect]` and git's own config/hooks, out of a project's reach.
-Build dirs, caches and the user's `vm_skip` names come first, so a later guard rule always wins.
-
-- **Two hops, because Mutagen's host side trusts the VM's agent.** It never re-applies ignores to
-  the agent's snapshot and serves any path the agent asks for, so one hop lets VM root read and
-  write every guarded file. Project ⇄ a host-local shadow (both ends scanned on the host, guard
-  applied) ⇄ the volume (build dirs only): nothing guarded is ever in the shadow.
-- **Guarded files are seeded, one way** (`kib/host/vmseed.py`): redacted ones as their render,
-  protected ones as real bytes, because the box must read them. The sync ignores them, so a box
-  edit to one never flows back. Seeded once per container: a host edit shows at the next cold
-  start. **Never through a path:** the shadow is VM-writable (its hop syncs back), so a planted
-  symlink would carry a `tar -x` or `open()` onto any host file; `vmseed` writes through
-  `O_NOFOLLOW` directory fds and fails closed.
-- **A reloaded `.kibignore` re-filters the sync** (`vm_sync_restage`, from `_reload_rules`, so
-  the watcher and an attach share it): the host hop is recreated on the new ignores, and every
-  newly redacted file in the shadow becomes its render, which the VM hop carries into the volume.
-  Without it the FUSE view redacted the file while the volume kept its value.
-- **Mutagen config goes as a `-c` file**: `--ignore` splits on commas. Proven against a real
-  Mutagen on every rule shape (`test_real_mutagen_syncs_exactly_what_verdict_passes`).
+The VM mounts `~` and the sidecar serves `$PWD` off that mount, exactly as natively. The two-hop
+Mutagen sync that once filtered guarded files out of the VM (its ignore list rebuilt `verdict`'s
+tiers, its shadow seeded renders) is gone with it (2026-11-07, `microvm.md`). Its lesson stands:
+a sync's host side that trusts the VM's agent serves any path that agent asks for.
 
 ## Host-executed config guard
 

@@ -70,7 +70,7 @@ creation. What differs is only *where the propagation root lives*, and how it is
 
 | Behaviour | Ubuntu / Linux | macOS | Owner | Proven |
 |---|---|---|---|---|
-| `preflight_platform` | No-op | Fails fast on missing `perl`. The engine is `vm_use`'s: one prompt installs Lima, Mutagen, the `docker` CLI and buildx | `vm.md` | 🧪 |
+| `preflight_platform` | No-op | Fails fast on missing `perl`. The engine is `vm_use`'s: one prompt installs Lima, the `docker` CLI and buildx | `vm.md` | 🧪 |
 | Docker engine | Any; or kib's Lima VM with `vm = on` | kib's Lima VM only. Verified 2026-11-06 with Docker Desktop quit and its CLI off `PATH` | `microvm.md` | ✅ |
 | Host shell | bash 5, GNU userland used directly (`flock`, `setsid`, `sha256sum`) | bash 3.2 + BSD userland; `perl` shims for `lock_fd` / `detach_pgrp`, `shasum` for `hash8` | `macos.md` | 🧪 |
 | Empty-array expansion | Tolerant | Every array ever assigned `()` must expand as `${arr[@]+"${arr[@]}"}` or the launch aborts under `set -u` | `macos.md` | ✅ |
@@ -79,6 +79,9 @@ creation. What differs is only *where the propagation root lives*, and how it is
 | `~/.claude` bootstrap | Assembled per launch from canonical | Same; on a fresh Mac `ensure_claude_home` creates a minimal skeleton first | `container-lifecycle.md` | — |
 
 ## Rootless Docker (Linux)
+
+**Removed 2026-11-07:** gVisor needs rootful Docker, so kib always uses its VM's (`microvm.md`).
+Kept for the record.
 
 Supported, and it is an **engine** difference rather than an OS one — `is_rootless` sits beside
 `is_macos` in `host/portable.sh`, memoised off one `docker info` per launch. Measured by a

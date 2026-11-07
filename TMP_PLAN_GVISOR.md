@@ -1,6 +1,6 @@
 # TMP plan: Lima + gVisor on both OSes, mounts instead of sync (delete when done)
 
-Replaces the VM sync (`PLAN_VM_SECURITY.md`). Comes after `TMP_PLAN_GO_FUSE.md`. Decided 2026-11-06 from `tmp_gvisor_probe.sh` and
+Replaces the VM sync (`PLAN_VM_SECURITY.md`). Comes after `TMP_PLAN_GO_FUSE.md`. Phases 1–3 done 2026-11-07, awaiting tests on Linux and macOS. Decided 2026-11-06 from `tmp_gvisor_probe.sh` and
 `tmp_nm_probe.sh` runs on Linux and macOS.
 
 ## Target
@@ -29,43 +29,43 @@ One route. No sync, no copies, no skip lists. Linux needs `virtiofsd` (one `sudo
 
 ## Phase 1: the box on gVisor (in the VM)
 
-- [ ] Provision a pinned runsc (sha512) at VM creation: `runsc install -- --host-uds=open`
-- [ ] `start_container`: `docker create` → `connect_broker_network` → `docker start`
-- [ ] `--add-host kib-broker:<ip>` and one per MCP sidecar alias (Docker's DNS is unreachable)
-- [ ] Own `resolv.conf` bind (the VM's resolvers)
-- [ ] Readiness: entrypoint touches a marker before `exec sleep infinity`; kib polls
+- [x] Provision a pinned runsc (sha512) once per pin, at any launch: `runsc install -- --oci-seccomp` (no `--host-uds`: no socket crosses in)
+- [x] `start_container`: `docker create` → `connect_broker_network` → `docker start`
+- [x] `--add-host kib-broker:<ip>` (the only alias the box resolves; Docker's DNS is unreachable)
+- [x] Own `resolv.conf` bind (the VM's resolvers)
+- [x] Readiness: entrypoint touches a marker before `exec sleep infinity`; kib polls
       `docker exec test -e`. Drop `docker top` (rebuild)
-- [ ] Polling env: `CHOKIDAR_USEPOLLING=1 WATCHPACK_POLLING=true`; one line in etc-CLAUDE.md
-- [ ] `security-test.sh`: the box runs on gVisor
+- [x] Polling env: `CHOKIDAR_USEPOLLING=1 WATCHPACK_POLLING=true`; one line in etc-CLAUDE.md
+- [x] `security-test.sh`: the box runs on gVisor
 
 ## Phase 2: mounts instead of sync
 
-- [ ] VM mounts `~` writable (virtiofs) instead of the fixed set; projects outside `~` refused
-- [ ] Linux: no `virtiofsd` → print `sudo apt install virtiofsd`, refuse (9p is too slow)
-- [ ] FUSE sidecar serves `$PWD` (the mount), not a volume
+- [x] VM mounts `~` writable (virtiofs) instead of the fixed set; projects outside `~` refused
+- [x] Linux: no `virtiofsd` → print `sudo apt install virtiofsd`, refuse (9p is too slow)
+- [x] FUSE sidecar serves `$PWD` (the mount), not a volume
 
 ## Phase 3: delete
 
-- [ ] Mutagen and its install; `vm_sync_*`, `_vm_session`, `_vm_slow_hint`, sync cleanup in
+- [x] Mutagen and its install; `vm_sync_*`, `_vm_session`, `_vm_slow_hint`, sync cleanup in
       `_vm_linger_end`
-- [ ] `kib/host/vmseed.py`, what is left of `rules.py`/`render.py` (the sync's), `VM_LOCAL`, `vm_skip`
-- [ ] `vm_state`, `vm-rw`/`vm-ro`, the `-vm` Node cache split (all under `~` now)
-- [ ] The `vm` setting and the non-VM path (gVisor is mandatory, and only the VM has it)
-- [ ] Their tests (`tests/check/vm.sh` sync parts, `test_vmseed.py`), `tests/vm-check.sh`
-- [ ] `gitaudit`'s tracked-file match → a `fuse match` subcommand; then delete `rules.py`,
+- [x] `kib/host/vmseed.py`, what is left of `rules.py`/`render.py` (the sync's), `VM_LOCAL`, `vm_skip`
+- [x] `vm_state`, `vm-rw`/`vm-ro`, the `-vm` Node cache split (all under `~` now)
+- [x] The `vm` setting and the non-VM path (gVisor is mandatory, and only the VM has it)
+- [x] Their tests (`tests/check/vm.sh` sync parts, `test_vmseed.py`), `tests/vm-check.sh`
+- [x] `gitaudit`'s tracked-file match → a `fuse match` subcommand; then delete `rules.py`,
       `render.py`, `test_rules.py` and the rules/render parts of `test_redaction_fixtures.py`
-- [ ] Keep: Lima install pins, linger, `engine_ns_exec` over `limactl shell`, note replay,
+- [x] Keep: Lima install pins, linger, `engine_ns_exec` over `limactl shell`, note replay,
       the package cache volume
 
 ## Phase 4: docs
 
-- [ ] `microvm.md`: gVisor adopted; the old rejection's answers (DNS → host entries, NICs →
+- [x] `microvm.md`: gVisor adopted; the old rejection's answers (DNS → host entries, NICs →
       create/connect/start, inotify → polling); rootless blocks native gVisor
-- [ ] `CLAUDE.md` dead ends: drop the sync one; add "no Docker DNS in the box", "9p too slow",
+- [x] `CLAUDE.md` dead ends: drop the sync one; add "no Docker DNS in the box", "9p too slow",
       "node_modules through FUSE is the install cost"
-- [ ] `docs/vm.md`, `README.md`, `platform-matrix.md`, `etc-CLAUDE.md` (node_modules is
+- [x] `docs/vm.md`, `README.md`, `platform-matrix.md`, `etc-CLAUDE.md` (node_modules is
       box-only; host edits need polling)
-- [ ] Mark `PLAN_VM_SECURITY.md` superseded
+- [x] Mark `PLAN_VM_SECURITY.md` superseded
 
 ## Accepted costs
 

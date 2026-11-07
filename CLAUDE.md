@@ -33,8 +33,8 @@ A file's directory says which side of the trust boundary it is on. `kib/shared/`
   `kib/host/config_scope.py` (unit-tested by `tests/host/test_config_scope.py`).
 - **Edits take effect on the next *container*, not the next terminal.** One long-lived container
   serves every terminal on the project; it is recreated only after the *last* session exits. The
-  bind-mounted `kib/` package and `guest/bin/resolv-sync.sh` keep running their old code until
-  then, and `guest/entrypoint/*`, the two `guest/bin/` shims and the FUSE view (`guest/fuse`, Go)
+  bind-mounted `kib/` package keeps running its old code until
+  then, and `guest/entrypoint/*`, the `guest/bin/broker` shim and the FUSE view (`guest/fuse`, Go)
   are **baked into the image** — they need a rebuild, not a relaunch. Before believing a "no change" result, check the
   container's birth time: `ps -o lstart= -p 1` inside it.
 - **Editing a host script while a session is LIVE corrupts that running session.** `bash` reads a
@@ -100,14 +100,17 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   (virtiofs, 9p) has no mount namespace for the event to land in. In kib's VM the root is
   `/mnt/kib/…`: VM-local, and not `/run`, which Ubuntu's `fusermount3` AppArmor profile denies.
   (`macos.md`, `microvm.md`)
-- **VM: never mount a project, and never sync it in one hop** — per-project mounts restart the
-  VM, a parent-folder mount exposes siblings, and Mutagen's host side trusts the VM agent (it
-  serves and accepts any path), so guarded files go through a host-local shadow. Not kib inside
-  the VM (no `~/.claude.json`, ssh breaks the TUI), not reverse-sshfs, not Docker Desktop
-  narrowed (its shares are read-write only). (`microvm.md`, `redaction-config-guard.md`)
-- **VM: never put a file the host trusts on `vm-rw`** — pidfiles, the credential witness, the
-  sync config, the clipboard `.priv` go on `vm-ro`. Package caches are per project, never shared
-  (one box would plant a package another project's box installs). (`container-lifecycle.md`)
+- **VM: `~` is mounted once over virtiofs, never a project, never a sync** — per-project mounts
+  restart the VM; 9p writes ~6× slower (refused, not a fallback); the Mutagen sync was replaced.
+  Not kib inside the VM (no `~/.claude.json`, ssh breaks the TUI), not reverse-sshfs. Package
+  caches are per project, never shared (one box would plant a package another's installs).
+  (`microvm.md`)
+- **The box runs on gVisor, so it has no Docker DNS, no NIC hot-plug, no host inotify and no
+  `docker top`** — the broker is an `--add-host`, the box is created → connected → started,
+  watchers poll, readiness is the entrypoint's `/run/kib-ready`. gVisor needs rootful Docker,
+  which is why there is no native path. (`microvm.md`)
+- **Keep build folders off FUSE** (`local_dirs` volumes) — `node_modules` through the view is
+  the whole install cost (pnpm 130 s vs 6 s). (`microvm.md`)
 - **Don't re-split `~/.claude` into a shared + per-project pair** — the destructive migration it
   needs breaks the seamless host⇄box switch (same login, `--resume`, history). Keep canonical
   stock; isolate by per-launch assembly + subtree merge-out. Unknown `~/.claude` entries stay
@@ -122,23 +125,10 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   every provider. The broker is ON by default (`broker = off` or `KIB_BROKER=0` disables it); a
   first launch with no token auto-runs the login, else falls back to copying the real credential
   in (dir-backed, never a single-file bind — the rename footgun). (`credential-broker.md`)
-- **Never name a varlink socket literally in `add_resolv_sync_args`** — runc creates the
-  mountpoint and cannot on a `:ro` bind, so `-v /dev/null:<name>` aborts the entire launch the
-  moment that socket is absent at create time. Keep every shadow inside the `[ -e ]`-guarded
-  glob; the residual (one appearing after create is unshadowed) is caught by `security-test.sh`
-  from inside the box and is not fixable by unioning the names in. Regression-guarded.
-  (`clipboard-and-dns.md`)
 - **Don't collapse `start_broker`'s token-mount walk into `broker_enabled_providers`** — only the
   walk carries the host `basename`, and its output feeds `broker_config_hash`, so collapsing
   shifts the attach-refusal hash to save six lines. Drift is closed by `tests/check/mcp.sh`
   ("both walks agree") instead. (`credential-broker.md`)
-- **Under rootless Docker the FUSE root must be marked shared inside RootlessKit's namespace, not
-  the host's** — `_mount_is_shared` reads ours and wrongly passes, then the daemon refuses the
-  sidecar's `:rshared` bind. The host never sees that view either, so readiness/unmount go through
-  `engine_ns_exec`; and the box runs as container-root there, so every id comes from `box_uid`.
-  (`platform-matrix.md`)
-- **Don't "simplify" `resolv-sync.sh` to overwrite resolv.conf wholesale** — `127.0.0.11` must
-  stay first or the `kib-broker` alias breaks mid-session. (`clipboard-and-dns.md`)
 - **Never nest a bind inside another bind's destination** — Docker Desktop aborts the whole
   `docker run` (`mountpoint … is outside of rootfs`), and pre-creating the mountpoint does not
   help. Mount flat under `/run/kib/` via `bind_via_link`, or copy the file in. (`macos.md`)
@@ -148,8 +138,6 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   a dead dev server. (`container-lifecycle.md`)
 - **Don't drop the main container's dual-homing** (`connect_broker_network`) — host dev servers
   and LAN must stay reachable alongside the broker net. (`credential-broker.md`)
-- **Don't hide clipboard interfaces from the Wayland registry** — it broke `wl-paste`; sanitise
-  the write *content* at the `send` event instead. (`clipboard-and-dns.md`)
 - **Never stage the clipboard bridge's output in the spool** — it is bind-mounted rw, so a `>`
   there follows a symlink the box planted (any host file truncated and overwritten) and a re-open
   is a TOCTOU that lands unsanitised bytes on the real pasteboard. Build every answer in

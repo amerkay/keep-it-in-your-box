@@ -18,27 +18,25 @@ on the host** ([`../vm.md`](../vm.md), `host/vm.sh`, `PLAN_VM_SECURITY.md`). Alw
 (Docker Desktop dropped), opt-in on Linux. The CAP gate rules out a VM *per container*, not one VM
 holding the agent and the FUSE sidecar together. Three choices carry it:
 
-- **Projects are synced, never mounted.** Mutagen, in two hops: project ⇄ a host-local shadow
-  (guard ignores applied, both ends on the host) ⇄ a VM volume. Mutagen's host side trusts the
-  VM agent's snapshot and serves any path it asks for, so one hop would let VM root read and write
-  every guarded file. Per-project mounts restarted the VM; a parent-folder mount exposed siblings.
-- **Fixed mounts only**: kib's checkout read-only, the five shared `~/.claude` trees, a VM-only
-  Node cache, and kib's state as `vm-rw` (what the box writes) and `vm-ro` (read-only: rules,
-  in-use broker tokens, and every file the host trusts — pidfiles, witness, sync config). Never
-  put a host-trusted file beside a VM-writable one.
-- **Docker Desktop was not narrowed instead**: its file sharing has no read-only mode, so kib's
-  checkout and `vm-ro` would stay VM-writable.
+**Changed again 2026-11-07: the box runs on gVisor inside that VM, and the VM mounts `~`**
+(`TMP_PLAN_GVISOR.md`). The two-hop Mutagen sync, `vm-rw`/`vm-ro` and the native Linux path are
+gone. Measured on Linux and macOS (`sn-frontend`):
+
+- **virtiofs, not 9p:** 9p wrote ~6× slower than a VM disk, virtiofs ~1.5×. Linux needs
+  `virtiofsd`; without it kib refuses rather than fall back.
+- **Build folders on VM volumes:** `pnpm install` through FUSE over virtiofs took 130 s plain and
+  280 s on gVisor; with `node_modules` on a volume, 6 s and 13 s. FUSE was the cost.
+- **gVisor's cost:** `git status` ×0.8, `find` ×1.2–1.5, small-file writes ×1.6–2.0.
+- **No native gVisor:** it does not support rootless Docker (google/gvisor#12575), so one route:
+  the VM, rootful inside, on both OSes.
 
 A shared lock on fd 205 counts sessions. The last one out starts a 10-minute timer; it stops the
 VM only if no session holds fd 205 by then and no later close has replaced it. The FUSE root is
-`/mnt/kib` (Ubuntu's `fusermount3` AppArmor profile denies `/run`). 9p mounts run `cache=none`:
-the default write-back cache truncated `.claude.json` at 4096 bytes.
+`/mnt/kib` (Ubuntu's `fusermount3` AppArmor profile denies `/run`).
 
 **Running all of kib inside the VM was tried first and abandoned the same day.** The guest's own
 `$HOME` left it with no `~/.claude`, no login and no broker. `~/.claude.json` is a file directly in
 `$HOME`, and Lima mounts only directories. The ssh hop also corrupted the TUI.
-
-gVisor stays rejected: it gives a weaker boundary than the VM and breaks host→box inotify.
 
 ## Why it is overkill
 
@@ -88,32 +86,19 @@ re-platforming, not a flag.
 
 ## gVisor
 
-Reviewed 2026-10-04, unprobed. Not a hypervisor: a user-space kernel, so no KVM, and the FUSE
-sidecar stays on runc. It still costs these seams:
+Adopted 2026-11-07, probed first (`tmp_gvisor_probe.sh`). The FUSE sidecar and broker stay on
+runc. The seams the 2026-10-04 review listed, and their answers:
 
-- **Broker net:** runsc wires NICs only at start, so `connect_broker_network`'s post-run
-  `docker network connect` never lands — fail-hard, no launch. Fix: `create` → `connect` → `start`.
-- **Embedded DNS (`127.0.0.11`):** Docker's DNAT lives in the netns iptables, which gVisor's
-  netstack may bypass — `kib-broker` and `resolv-sync` depend on it.
-- **inotify:** host-side edits raise no events inside the sandbox, so dev-server HMR goes stale.
-  No fix.
-- **FUSE view:** no mount propagation; works only because the mount exists before start.
-- **Wayland socket:** needs `--host-uds=open`.
-- **Rootless Docker:** runsc support is experimental.
-- **Speed:** every syscall is trapped and every file op adds a gofer hop on top of FUSE.
-- **macOS / Docker Desktop WSL2:** runsc would live in the vendor VM, wiped on update.
-
-First probe, host-side with runsc registered — if it fails, stop:
-
-```
-docker network create kib-probe
-docker create --runtime=runsc --name gv alpine sleep 60
-docker network connect kib-probe gv
-docker start gv
-docker exec gv nslookup gv 127.0.0.11
-docker rm -f gv
-docker network rm kib-probe
-```
+- **Broker net:** runsc wires NICs only at start → `docker create`, `network connect`, `start`.
+- **Embedded DNS (`127.0.0.11`):** unreachable → the broker is an `--add-host` entry and the box
+  gets the VM's resolvers as its `resolv.conf` (`vm_resolv`).
+- **inotify:** host edits raise no event → `CHOKIDAR_USEPOLLING`, `WATCHPACK_POLLING`.
+- **FUSE view:** works because the mount exists before start. The box sees a gofer mount, so the
+  attach check asks the VM's mount table and lists `$PWD` from the box.
+- **`docker top`:** gVisor cannot answer it → readiness is the entrypoint's `/run/kib-ready`.
+- **Wayland socket:** gone; the clipboard is the spool bridge on both OSes, so no
+  `--host-uds`. Docker's seccomp profile is enforced inside (`--oci-seccomp`).
+- **Rootless Docker:** unsupported → the VM's rootful Docker only.
 
 ## If this is ever revisited
 

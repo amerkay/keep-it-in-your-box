@@ -36,7 +36,7 @@ Five shims carry the entire divergence — `fuse_root_path`, `fuse_root_create`,
 ## First contact: the engine the user does not have yet
 
 There is no engine to choose. The first launch asks once to install what kib's VM needs into
-`~/.local`, no sudo: Lima, Mutagen, the static `docker` CLI and buildx, each pinned by checksum
+`~/.local`, no sudo: Lima, the static `docker` CLI and buildx, each pinned by checksum
 (`_tool` in `host/vm.sh`). kib's docker calls use `DOCKER_CONFIG=~/.local/docker`: Docker
 Desktop's `credsStore: desktop` in `~/.docker` breaks every pull once it is uninstalled, and
 without buildx the legacy builder prints every line and has no BuildKit cache.

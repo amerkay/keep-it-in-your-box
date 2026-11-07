@@ -2,23 +2,22 @@
 
 ## The box
 
-- Docker container, no `docker` binary or socket, no host processes. Normally non-root with **no
-  `sudo`**; under rootless Docker you are the container's root, which maps to the user's
-  unprivileged host account — no host privilege, and every guard below still holds.
-  Nothing installed outside the project tree or `$CLAUDE_CONFIG_DIR` survives — the container is
-  recreated once the last session for this project exits.
+- Docker container on gVisor, in a VM: no `docker` binary or socket, no host processes.
+  Non-root with **no `sudo`**. Nothing installed outside the project tree or
+  `$CLAUDE_CONFIG_DIR` survives — the container is recreated once the last session for this
+  project exits.
 - `HOME` is `/home/hostuser`, but the project is at its **host** path, outside `$HOME`. Writes
-  there land on the host for real: directly, or within about a second when kib runs a VM (always
-  on macOS), where the project is a synced copy. There **the host wins a conflict**: a file the
-  user edits while you do keeps their version. Re-read before editing, and redo a lost edit
-  yourself. `node_modules`, `.pnpm-store`, `.venv`, `venv`, `target`, `.next`, `.nuxt`, `.turbo`
-  and `.terraform` (any depth) are this box's own volumes, built for Linux: the host never sees
-  them and keeps its own. One created mid-session is a plain project folder until the next
-  container; reinstall once then. Python caches (`__pycache__`, mypy, ruff, pytest) go to
-  `~/.cache`.
+  there land on the host for real, at once. `node_modules`, `.pnpm-store`, `.venv`, `venv`,
+  `target`, `.next`, `.nuxt`, `.turbo` and `.terraform` (any depth) are this box's own volumes,
+  built for Linux: the host never sees them and keeps its own. One created mid-session is a
+  plain project folder until the next container; reinstall once then. Python caches
+  (`__pycache__`, mypy, ruff, pytest) go to `~/.cache`.
+- **A host edit raises no file-watch event in here**, so dev servers watch by polling
+  (`CHOKIDAR_USEPOLLING`, `WATCHPACK_POLLING` are set). A watcher that ignores both misses the
+  user's edits: turn polling on in its own config.
 - `~/.cache` is this project's package cache (pnpm store, npm, uv, pip, …) and outlives the
   container, so reinstalls are fast. Never point a repo's config at a cache inside the project
-  (`store-dir`, `cache-dir`): the VM never syncs it and loses it on close.
+  (`store-dir`, `cache-dir`): it would land on the host, built for the wrong OS.
 - Host-side work (docker, `kib`, systemd, package installs) is the user's to run in a **host
   terminal**. `!` runs in *this container* and never reaches the host. Hand them a fenced block
   they can paste whole: no `!`, no `$` prompts, real paths, each command short and on its own
@@ -148,8 +147,8 @@ legitimate need is a conversation, not a workaround.
 
 ## Reaching a dev server from the host browser
 
-- **The box publishes no ports unless the user asked for it**, and on macOS the host cannot reach
-  the container's bridge IP by any route. So a server you start here is invisible to their
+- **The box publishes no ports unless the user asked for it**, and the host cannot reach the
+  container's bridge IP by any route (it is inside a VM). So a server you start here is invisible to their
   browser until they run, in a **host terminal**: `kib --publish=3000` (a comma list for two,
   `3000,5173`). It binds `127.0.0.1` only, is remembered for this project, and `=none` undoes it.
 - **Ports are fixed when the container is created**, so say this when you hand over the command:

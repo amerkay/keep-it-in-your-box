@@ -101,7 +101,7 @@ Now `cd` into any project and run `cc`. The image builds itself on first run, an
 
 Nothing to set up and nothing to migrate: your `~/.claude` stays exactly as it is, and each project's session is assembled from it per launch and merged back on exit — so a host `claude` and a boxed `cc` share one login, one `--resume` list and one history, while no project's box can see another's.
 
-**Requirements:** `git`, `bash`, `python3` and `perl` (stock macOS has them all, no Homebrew). On macOS that is all: the first launch offers to install [Lima](https://lima-vm.io), Mutagen and the `docker` command into `~/.local`, no sudo and no Docker Desktop, and every box runs in a VM. On Linux, any Docker engine, or a VM the same way ([`docs/vm.md`](docs/vm.md)). A Wayland session on Linux is optional; without one you just lose clipboard paste.
+**Requirements:** `git`, `bash`, `python3` and `perl` (stock macOS has them all, no Homebrew). The first launch offers to install [Lima](https://lima-vm.io) and the `docker` command into `~/.local`, no sudo and no Docker Desktop, and every box runs on gVisor in a VM. Linux also needs QEMU, KVM and virtiofsd, once ([`docs/vm.md`](docs/vm.md)). Projects must live under your home folder. `wl-clipboard` on Linux is optional; without it you just lose clipboard paste.
 
 <h2 id="use"><img src="docs/assets/readme/section-use.svg" width="100%" alt="Everyday use"></h2>
 
@@ -144,7 +144,7 @@ No project here does everything. `kib` is the only one that **validates `.git/co
 
 - **One long-lived container per project**, `sleep infinity` as PID 1. Every terminal `docker exec`s into the same one, so `/resume`, prompt history and background jobs are shared across tabs for free; it's torn down when the last session exits.
 - **A FUSE sidecar serves the redacted view**, which the sandbox sees over your project path by mount propagation. Only the sidecar gets `CAP_SYS_ADMIN` and `/dev/fuse` — the sandbox is created without them and has no unredacted path to your project. Same topology on Linux and macOS.
-- **A Wayland proxy sidecar holds the only real compositor socket.** Clipboard *reads* pass through, so image paste works; a *write* arrives as plain text with control characters stripped, because verbatim it would be host code execution at your next paste. macOS gets the same filter via its `pbpaste` bridge.
+- **The clipboard is a one-file-at-a-time bridge, not a socket.** *Reads* pass through, so image paste works; a *write* arrives as plain text with control characters stripped, because verbatim it would be host code execution at your next paste.
 - **Host-side at every launch:** a `settings.json` validator that rejects inline `hooks[].command`, an audit gate that refuses to start a session into a poisoned git config, and — on Linux — a DNS watcher that keeps the container following your wifi and VPN changes.
 
 Every decision and its rationale, including the dead ends, lives in [`docs/design-notes/`](docs/design-notes/README.md).
@@ -157,8 +157,8 @@ This is a real boundary, but not a perfect one. What kib does **not** close:
 - **Decline the broker login and the real credential is copied in**, with a warning — rotate it if an untrusted session has run that way.
 - **`host.docker.internal` is routable** to your host network stack.
 - **Your project directory is writable**, by design: editing your code is the agent's job.
-- **Shared kernel on Linux, unless you turn the VM on.** A hardened container (`--cap-drop=ALL`, `no-new-privileges`, seccomp, AppArmor, empty `CapEff`, no Docker socket, no host block devices) still shares your kernel. On macOS every box runs in kib's Lima VM; on Linux, [`vm = on`](docs/vm.md) does the same. The VM sees only open projects (synced, without their redacted files), never your home folder.
-- **In the VM, the host wins a conflict.** A file you and the agent edit at the same moment keeps your version; the agent is told to re-read and redo its edit.
+- **gVisor, then a VM, then your kernel.** The box (`--cap-drop=ALL`, `no-new-privileges`, seccomp, empty `CapEff`, no Docker socket) runs on gVisor inside kib's Lima VM, so a kernel exploit needs a gVisor bug and then a VM kernel bug. The VM mounts your home folder; the box sees the project only through the redaction view ([`docs/vm.md`](docs/vm.md)).
+- **Dev servers watch by polling.** gVisor sees no file-watch event for a host edit, so kib sets `CHOKIDAR_USEPOLLING` and `WATCHPACK_POLLING`.
 
 The full audit, including the controls that **are** closed, is in [`docs/security/audit.md`](docs/security/audit.md).
 

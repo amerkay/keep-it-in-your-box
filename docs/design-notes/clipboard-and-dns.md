@@ -4,6 +4,10 @@ Part of the Keep It in Your Box design notes (`docs/design-notes/`). See `CLAUDE
 that reference this. Both subsystems mediate a host resource through a sidecar rather than handing
 the raw resource to the agent.
 
+**2026-11-07: the Wayland guard and the DNS sync are gone.** Every box runs in kib's VM
+(`microvm.md`), where the clipboard is the spool bridge on Linux too (`wl-paste`/`wl-copy` on the
+host side) and DNS is the VM's resolvers. The sections below keep their dead ends for the record.
+
 ## Clipboard
 
 The raw Wayland socket grants clipboard **writes**, and a *verbatim* write is host code execution at the next terminal paste (`ESC[201~` ends bracketed paste; the rest is typed input). `kib/guest/wayland_guard.py` runs in a sidecar (`${CNAME}-wl`, `--network none`) that alone holds the real socket, relaying the wire protocol:
