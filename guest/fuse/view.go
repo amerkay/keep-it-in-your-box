@@ -312,6 +312,10 @@ func (v *view) plantsGitdir(rel string) bool {
 	if !found {
 		return false
 	}
+	// Replacing a marker (git's HEAD.lock rename) completes nothing: d already was a git dir.
+	if _, err := v.lstatAt(rel); err == nil {
+		return false
+	}
 	if fd, err := v.at(filepath.Join(d, "hooks"), unix.O_RDONLY|unix.O_DIRECTORY, 0); err == nil {
 		f := os.NewFile(uintptr(fd), "hooks")
 		names, _ := f.Readdirnames(1)
@@ -499,11 +503,46 @@ func (n *node) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) 
 }
 
 func (n *node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	ds, errno := n.list()
+	if errno != 0 {
+		return nil, errno
+	}
+	return &freshDir{DirStream: ds, relist: n.list}, 0
+}
+
+// freshDir re-lists on a rewind. gVisor keeps a directory open and seeks back to 0 to list it
+// again; go-fuse's stream replays its first read, which froze every listing in the box.
+type freshDir struct {
+	fs.DirStream
+	relist func() (fs.DirStream, syscall.Errno)
+}
+
+func (d *freshDir) Seekdir(ctx context.Context, off uint64) syscall.Errno {
+	if off == 0 {
+		ds, errno := d.relist()
+		if errno == 0 {
+			d.DirStream.Close()
+			d.DirStream = ds
+		}
+		return errno
+	}
+	if sd, ok := d.DirStream.(fs.FileSeekdirer); ok {
+		return sd.Seekdir(ctx, off)
+	}
+	return syscall.ENOTSUP
+}
+
+// list reads the directory now. With . and .., so a finished read ends past offset 0 and
+// go-fuse calls Seekdir(0) on a rewind even when the directory is empty.
+func (n *node) list() (fs.DirStream, syscall.Errno) {
+	list := []fuse.DirEntry{{Name: ".", Mode: syscall.S_IFDIR, Ino: fuse.FUSE_UNKNOWN_INO},
+		{Name: "..", Mode: syscall.S_IFDIR, Ino: fuse.FUSE_UNKNOWN_INO}}
 	switch k, _ := n.v.classify(n.rel()); k {
 	case dir:
-		return fs.NewListDirStream([]fuse.DirEntry{{Name: redactedName, Mode: syscall.S_IFREG}}), 0
+		return fs.NewListDirStream(append(list, fuse.DirEntry{Name: redactedName,
+			Mode: syscall.S_IFREG})), 0
 	case file, inside:
-		return fs.NewListDirStream(nil), 0
+		return fs.NewListDirStream(list), 0
 	}
 	fd, err := n.v.at(n.rel(), unix.O_RDONLY|unix.O_DIRECTORY, 0)
 	if err != nil {
@@ -515,7 +554,6 @@ func (n *node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	if err != nil {
 		return nil, fs.ToErrno(err)
 	}
-	list := make([]fuse.DirEntry, 0, len(ents))
 	for _, e := range ents {
 		mode := uint32(syscall.S_IFREG)
 		if e.IsDir() {

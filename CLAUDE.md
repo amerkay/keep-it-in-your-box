@@ -168,7 +168,9 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   behaviour there first; `go test` runs in `kib build` (no Go in the image; `./dev.sh` runs it
   where `go` is on PATH). I/O is `pread`/`pwrite` (a shared fd offset truncates reads), the page
   cache is kept only while mtime+size hold (never `kernel_cache`: the host edits this tree), only
-  the RULE verdict is memoised (existence stays live), and `Flush` never fsyncs.
+  the RULE verdict is memoised (existence stays live), `Flush` never fsyncs, and a listing
+  re-reads on `Seekdir(0)` and carries `.`/`..` (gVisor rewinds one open dir fd; a replayed
+  snapshot froze every listing in the box).
   Regression-guarded. (`redaction-config-guard.md`)
 - **No FUSE passthrough, no writeback cache — both measured.** Passthrough needs a root daemon and
   speeds reads only; writeback never showed the box a host edit that changed a file's size.

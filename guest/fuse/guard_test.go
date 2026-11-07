@@ -67,6 +67,7 @@ func TestPlantsGitdir(t *testing.T) {
 		{[]string{"d/objects/", "d/hooks/x"}, "d/HEAD", false},           // refs still missing
 		{[]string{"d/objects/", "d/refs/", "d/hooks/x"}, "d/head", true}, // folded
 		{[]string{"d/objects/", "d/refs/", "d/hooks/x"}, "d/README", false},
+		{[]string{"d/HEAD", "d/objects/", "d/refs/", "d/hooks/x"}, "d/HEAD", false}, // git switch
 	} {
 		v := scratchView(t, "", c.files...)
 		if got := v.plantsGitdir(c.add); got != c.refused {
