@@ -4,9 +4,12 @@
 # on the host. Config lives in pyproject.toml / .editorconfig; versions in
 # requirements-dev.txt (python) and the Dockerfile / CI (shfmt, shellcheck binaries).
 #
-#   ./dev.sh format   rewrite: ruff format + ruff --fix, shfmt -w
-#   ./dev.sh lint      verify: ruff, mypy --strict, shfmt -d          (what CI runs, via check)
-#   ./dev.sh check      lint + tests/check.sh (syntax, shellcheck, portability, pytest)
+#   ./dev.sh format   rewrite: ruff format + ruff --fix, shfmt -w, gofmt -w
+#   ./dev.sh lint      verify: ruff, mypy --strict, shfmt -d, gofmt + go vet  (CI, via check)
+#   ./dev.sh check      lint + tests/check.sh + go test (syntax, shellcheck, portability, pytest)
+#
+# The Go steps (guest/fuse) run where `go` is on PATH: CI, and anywhere you install it. The
+# image has no Go; `kib build` runs the same tests in its Go stage.
 #
 # Host-side, so bash-3.2/BSD-clean per the portability contract. Nothing here needs a
 # host/portable.sh shim, so it deliberately does not source one.
@@ -47,6 +50,14 @@ step() {
     shift
     printf '\n\033[1m== %s\033[0m\n' "$label"
     "$bin" "$@" || FAILED="$FAILED $label"
+}
+
+gofmt_clean() { [ -z "$(gofmt -l . | tee /dev/stderr)" ]; }
+
+# One Go step, run in the module (guest/fuse).
+gostep() {
+    printf '\n\033[1m== %s\033[0m\n' "$1"
+    (cd guest/fuse && "${@:2}") || FAILED="$FAILED $1"
 }
 
 # Tracked files plus new-but-not-ignored ones, so a file is linted before its first commit.
@@ -100,17 +111,25 @@ case "${1:-}" in
         step "ruff format" ruff format "${PY[@]}"
         step "ruff check --fix" ruff check --fix "${PY[@]}"
         step "shfmt -w" shfmt -w "${SH[@]}"
+        ! command -v go >/dev/null || step "gofmt -w" gofmt -w guest/fuse
         ;;
     lint)
         step "ruff format --check" ruff format --check "${PY[@]}"
         step "ruff check" ruff check "${PY[@]}"
         step "mypy --strict" mypy "${PY[@]}"
         step "shfmt -d" shfmt -d "${SH[@]}"
+        if command -v go >/dev/null; then
+            gostep "gofmt -l" gofmt_clean
+            gostep "go vet" go vet ./...
+        else
+            printf '\n(no go on PATH: guest/fuse is linted by CI and kib build)\n'
+        fi
         ;;
     check)
         "$0" lint || FAILED="$FAILED lint"
         printf '\n\033[1m== tests/check.sh\033[0m\n'
         ./tests/check.sh || FAILED="$FAILED tests/check.sh"
+        ! command -v go >/dev/null || gostep "go test" go test ./...
         ;;
     "" | -h | --help | help) usage ;;
     *)

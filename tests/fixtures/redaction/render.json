@@ -1,0 +1,228 @@
+{
+ "stub": "# REDACTED BY .kibignore — hidden from this Claude Code Docker sandbox by user policy.\n# Intentional, not an error. All access paths return this stub; writes return EPERM.\n# Ask the user directly if you need the contents — don't try to work around it.\n",
+ "redacted": "<redacted>",
+ "cases": {
+  "dotenv-basic": {
+   "shape": "dotenv",
+   "keys": [
+    "API_KEY",
+    "DB_URL"
+   ]
+  },
+  "dotenv-quoted": {
+   "shape": "dotenv",
+   "keys": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  "dotenv-bom": {
+   "shape": "dotenv",
+   "keys": [
+    "API_KEY"
+   ]
+  },
+  "dotenv-crlf": {
+   "shape": "dotenv",
+   "keys": [
+    "A",
+    "B"
+   ]
+  },
+  "dotenv-lone-cr": {
+   "shape": "dotenv",
+   "keys": [
+    "A",
+    "B"
+   ],
+   "note": "Python's text mode reads a lone CR as a newline; Go may stub instead"
+  },
+  "dotenv-colon-value": {
+   "shape": "dotenv",
+   "keys": [
+    "URL"
+   ]
+  },
+  "dotenv-export-lower": {
+   "shape": "dotenv",
+   "keys": [
+    "a_b"
+   ]
+  },
+  "dotenv-multiline": {
+   "shape": "stub"
+  },
+  "dotenv-escaped-close": {
+   "shape": "stub"
+  },
+  "dotenv-comment-only": {
+   "shape": "stub"
+  },
+  "prose-one-assignment": {
+   "shape": "stub"
+  },
+  "no-assignment": {
+   "shape": "stub"
+  },
+  "empty": {
+   "shape": "stub"
+  },
+  "json-basic": {
+   "shape": "json",
+   "tree": {
+    "tok": "<redacted>",
+    "n": {
+     "list": [
+      "<redacted>",
+      "<redacted>"
+     ]
+    },
+    "ok": "<redacted>"
+   }
+  },
+  "json-bom": {
+   "shape": "json",
+   "tree": {
+    "a": "<redacted>"
+   }
+  },
+  "json-array-top": {
+   "shape": "json",
+   "tree": [
+    "<redacted>",
+    {
+     "a": "<redacted>"
+    }
+   ]
+  },
+  "json-scalar-top": {
+   "shape": "json",
+   "tree": "<redacted>"
+  },
+  "json-nan": {
+   "shape": "json",
+   "tree": {
+    "a": "<redacted>"
+   },
+   "note": "Python's json accepts NaN; Go may render it as YAML instead, same keys"
+  },
+  "json-dup-keys": {
+   "shape": "json",
+   "tree": {
+    "a": "<redacted>",
+    "b": "<redacted>"
+   }
+  },
+  "json-unterminated": {
+   "shape": "stub"
+  },
+  "json-deep": {
+   "shape": "stub"
+  },
+  "yaml-basic": {
+   "shape": "yaml",
+   "docs": [
+    {
+     "provider": {
+      "env": {
+       "API_KEY": "<redacted>"
+      },
+      "stage": "<redacted>"
+     },
+     "regions": [
+      "<redacted>"
+     ]
+    }
+   ]
+  },
+  "yaml-multidoc": {
+   "shape": "yaml",
+   "docs": [
+    {
+     "a": "<redacted>"
+    },
+    {
+     "b": "<redacted>"
+    }
+   ]
+  },
+  "yaml-anchor-no-alias": {
+   "shape": "yaml",
+   "docs": [
+    {
+     "a": "<redacted>"
+    }
+   ]
+  },
+  "yaml-star-in-value": {
+   "shape": "yaml",
+   "docs": [
+    {
+     "a": "<redacted>"
+    }
+   ]
+  },
+  "yaml-alias": {
+   "shape": "stub"
+  },
+  "yaml-flow-alias": {
+   "shape": "stub"
+  },
+  "yaml-recursive-alias": {
+   "shape": "stub"
+  },
+  "yaml-bomb": {
+   "shape": "stub"
+  },
+  "yaml-scalar": {
+   "shape": "stub"
+  },
+  "yaml-list-top": {
+   "shape": "stub"
+  },
+  "yaml-1.1-keys": {
+   "shape": "yaml",
+   "docs": [
+    {
+     "true": "<redacted>",
+     "key": "<redacted>"
+    }
+   ],
+   "note": "PyYAML reads on/yes as true (YAML 1.1); Go may keep the names"
+  },
+  "yaml-int-keys": {
+   "shape": "yaml",
+   "docs": [
+    {
+     "1": "<redacted>",
+     "2": "<redacted>"
+    }
+   ]
+  },
+  "yaml-null-value": {
+   "shape": "yaml",
+   "docs": [
+    {
+     "a": "<redacted>",
+     "b": "<redacted>"
+    }
+   ]
+  },
+  "pem": {
+   "shape": "stub"
+  },
+  "oversize": {
+   "shape": "stub"
+  },
+  "at-limit": {
+   "shape": "dotenv",
+   "keys": [
+    "K"
+   ]
+  },
+  "undecodable": {
+   "shape": "stub"
+  }
+ }
+}

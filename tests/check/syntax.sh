@@ -16,7 +16,7 @@ HOST_SH=(host/clipboard-bridge.sh)
 # exempt from the portability contract by design — it may use declare -A and friends.
 LINUX_BASH=(host/sleep-monitor.sh)
 # Container-side (always Linux): syntax only, exempt from the portability contract.
-CONT_SH=(guest/entrypoint/*.sh guest/bin/resolv-sync.sh guest/bin/fuse guest/bin/wayland-guard guest/bin/broker)
+CONT_SH=(guest/entrypoint/*.sh guest/bin/broker)
 CONT_BASH=(tests/security-test.sh)
 
 # host/clipboard-bridge.sh is POSIX sh, so drop it from the bash list it globbed into.

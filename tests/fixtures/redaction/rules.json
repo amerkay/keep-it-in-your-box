@@ -1,0 +1,670 @@
+{
+ "guard_file": "guest/policy/global.kibignore",
+ "verdict": [
+  {
+   "project": "",
+   "path": ".env.example",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "",
+   "path": ".env.sample",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "",
+   "path": ".env.template",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "",
+   "path": "newd/.env.example",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "",
+   "path": "a/b/c/.env.sample",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "",
+   "path": ".env.example.tmp.170.e4cc80fbd4d5",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "",
+   "path": ".env.example~",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "",
+   "path": ".env.sample.tmp.4.beef",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "",
+   "path": "a/b/.env.template~",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "",
+   "path": ".env",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "",
+   "path": ".env.local",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "",
+   "path": ".env.production",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "",
+   "path": "newd/.env",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "",
+   "path": ".env.example.local",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "",
+   "path": ".env.tmp.170.abc",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "",
+   "path": ".env.local.tmp.170.abc",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "",
+   "path": ".env.local~",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "",
+   "path": ".env.examples",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "",
+   "path": ".env.example.bak",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "",
+   "path": ".env.defaults",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "",
+   "path": ".env.dist",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "!.vscode",
+   "path": ".vscode/tasks.json",
+   "guard": true,
+   "want": "protect"
+  },
+  {
+   "project": "!.vscode/tasks.json",
+   "path": ".vscode/tasks.json",
+   "guard": true,
+   "want": "protect"
+  },
+  {
+   "project": "!.envrc",
+   "path": ".envrc",
+   "guard": true,
+   "want": "protect"
+  },
+  {
+   "project": "!.gitmodules",
+   "path": ".gitmodules",
+   "guard": true,
+   "want": "protect"
+  },
+  {
+   "project": "!.env",
+   "path": ".env",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "!.env.local",
+   "path": ".env.local",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "!.env.*",
+   "path": ".env.production",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "!config/.env",
+   "path": "config/.env",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "!.env",
+   "path": ".env.local",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "!.env.local",
+   "path": ".env",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "!secrets",
+   "path": "secrets/.env",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "!config",
+   "path": "config/.env",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": ".env.example",
+   "path": ".env.example",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "",
+   "path": ".vscode/tasks.json",
+   "guard": true,
+   "want": "protect"
+  },
+  {
+   "project": "",
+   "path": "deep/.vscode/settings.json",
+   "guard": true,
+   "want": "protect"
+  },
+  {
+   "project": "",
+   "path": ".envrc",
+   "guard": true,
+   "want": "protect"
+  },
+  {
+   "project": "",
+   "path": "a/b/.devcontainer/devcontainer.json",
+   "guard": true,
+   "want": "protect"
+  },
+  {
+   "project": "",
+   "path": ".claude/hooks/pre.sh",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "",
+   "path": ".idea/workspace.xml",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "",
+   "path": "src/main.py",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "",
+   "path": "README.md",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "",
+   "path": "envrc",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "",
+   "path": ".github/workflows/ci.yml",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "",
+   "path": ".git/config",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "",
+   "path": ".git/hooks/pre-commit",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "",
+   "path": ".cursor/mcp.json",
+   "guard": true,
+   "want": "protect"
+  },
+  {
+   "project": "",
+   "path": ".cursor/rules/r.md",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "",
+   "path": "x/.zed/tasks.json",
+   "guard": true,
+   "want": "protect"
+  },
+  {
+   "project": "dir/*\n!dir/keep",
+   "path": "dir/secret",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "dir/*\n!dir/keep",
+   "path": "dir/keep",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "secrets",
+   "path": "secrets/a/b",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "secrets\n!secrets/README.md",
+   "path": "secrets/README.md",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "secrets/*\n!secrets/README.md",
+   "path": "secrets/README.md",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "secrets/*\n!secrets/README.md",
+   "path": "secrets/key",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "build",
+   "path": ".git/build",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "build",
+   "path": "sub/.git/build",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "build",
+   "path": "a/build",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "*.pem",
+   "path": "certs/server.pem",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "*.pem",
+   "path": ".pem",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "a/*",
+   "path": "a/b/c",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "a/*.txt",
+   "path": "a/b/c.txt",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "**/*.pem",
+   "path": "k.pem",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "**/*.pem",
+   "path": "a/k.pem",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "**/*.pem",
+   "path": "a/b/k.pem",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "/etc",
+   "path": "etc",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "../x",
+   "path": "x",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "a/../b",
+   "path": "b",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "[protect]\n.vscode",
+   "path": "[protect]",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "[redact]",
+   "path": "[redact]",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "we[!i]d.txt",
+   "path": "weid.txt",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "we[!i]d.txt",
+   "path": "wexd.txt",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "b{1,2}.txt",
+   "path": "b{1,2}.txt",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "b{1,2}.txt",
+   "path": "b1.txt",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "back\\slash.txt",
+   "path": "back\\slash.txt",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "a[b",
+   "path": "a[b",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "a[]]b",
+   "path": "a]b",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "a[!]]b",
+   "path": "a]b",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "f?o",
+   "path": "foo",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "f?o",
+   "path": "f/o",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "*",
+   "path": ".hidden",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "x # comment",
+   "path": "x",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "dir/",
+   "path": "dir/f",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "!",
+   "path": "!",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "docs\n!docs\nREADME.md\n!README.md\nREADME.md",
+   "path": "README.md",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "docs\n!docs\nREADME.md\n!README.md\nREADME.md",
+   "path": "docs/a.md",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "!*",
+   "path": ".env",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": "!*",
+   "path": ".vscode/x",
+   "guard": true,
+   "want": "protect"
+  },
+  {
+   "project": ".*\n!.claude",
+   "path": ".claude/settings.json",
+   "guard": true,
+   "want": null
+  },
+  {
+   "project": ".*\n!.claude",
+   "path": ".hidden/x",
+   "guard": true,
+   "want": "redact"
+  },
+  {
+   "project": "Secrets",
+   "path": "secrets",
+   "guard": true,
+   "want": null,
+   "note": "case-sensitive here; Go matches case-insensitively (macOS disks are)"
+  },
+  {
+   "project": "",
+   "path": ".ENV",
+   "guard": true,
+   "want": null,
+   "note": "case-sensitive here, so a case-insensitive disk opens the real file; Go must guard it"
+  },
+  {
+   "project": "",
+   "path": ".Env.local",
+   "guard": true,
+   "want": null,
+   "note": "case-sensitive here, so a case-insensitive disk opens the real file; Go must guard it"
+  },
+  {
+   "project": "",
+   "path": ".VSCode/tasks.json",
+   "guard": true,
+   "want": null,
+   "note": "case-sensitive here, so a case-insensitive disk opens the real file; Go must guard it"
+  },
+  {
+   "project": "",
+   "path": ".ENVRC",
+   "guard": true,
+   "want": null,
+   "note": "case-sensitive here, so a case-insensitive disk opens the real file; Go must guard it"
+  },
+  {
+   "project": "!foo\nfoo",
+   "path": "foo",
+   "guard": false,
+   "want": "redact"
+  },
+  {
+   "project": "foo\n!foo",
+   "path": "foo",
+   "guard": false,
+   "want": null
+  },
+  {
+   "project": "secrets\n!secrets/ok",
+   "path": "secrets",
+   "guard": false,
+   "want": "redact"
+  },
+  {
+   "project": "secrets\n!secrets/ok",
+   "path": "other",
+   "guard": false,
+   "want": null
+  }
+ ],
+ "optouts": [
+  {
+   "project": "!.env\n!.vscode\n!build\nsecrets",
+   "want": [
+    ".env"
+   ]
+  },
+  {
+   "project": "!.env.*\n!config/.env",
+   "want": [
+    ".env.*",
+    "config/.env"
+   ]
+  },
+  {
+   "project": "",
+   "want": []
+  },
+  {
+   "project": "!*",
+   "want": [],
+   "note": "un-redacts every .env yet is not reported; Go must report it"
+  }
+ ],
+ "tightens": [
+  {
+   "old": "*.pem",
+   "new": "*.pem\nsecrets",
+   "want": true
+  },
+  {
+   "old": "*.pem",
+   "new": "*.pem\n!.env",
+   "want": false
+  },
+  {
+   "old": "*.pem\nsecrets",
+   "new": "secrets",
+   "want": false
+  },
+  {
+   "old": "!foo\nfoo",
+   "new": "foo\n!foo",
+   "want": false
+  },
+  {
+   "old": "",
+   "new": "secrets",
+   "want": true
+  },
+  {
+   "old": "",
+   "new": "!.env",
+   "want": false
+  },
+  {
+   "old": "a\n!b",
+   "new": "x\na\ny\n!b",
+   "want": true
+  },
+  {
+   "old": "a",
+   "new": "a\na",
+   "want": true
+  }
+ ]
+}

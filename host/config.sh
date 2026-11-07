@@ -8,8 +8,8 @@
 # and locking. (docs/design-notes/container-lifecycle.md)
 #
 # Reads:  KIB_ROOT KIB_STATE_ROOT PWD
-# Writes: CLAUDE_HOME CLAUDE_JSON SLUG SESSION_BASE SHARED_BASE LOCK_DIR
-#         LOCK_FILE BOOT_LOCK STATE_DIR EPHEMERAL SCRATCH_SUFFIX
+# Writes: CLAUDE_HOME CLAUDE_JSON SLUG SESSION_BASE SHARED_BASE PROJ_STATE TRANSCRIPTS_SRC
+#         LOCK_DIR LOCK_FILE BOOT_LOCK STATE_DIR EPHEMERAL SCRATCH_SUFFIX
 #         KIB_ASSETS_OPEN KIB_ASSETS_PROMPT
 # shellcheck disable=SC2034  # the globals above are read in bin/kib and the other units
 
@@ -25,8 +25,10 @@ kib_resolve_paths() {
     CLAUDE_HOME="$HOME/.claude"
     CLAUDE_JSON="$HOME/.claude.json"
     SLUG="$(printf '%s' "$PWD" | sed 's/[^a-zA-Z0-9]/-/g')"
-    SESSION_BASE="$KIB_STATE_ROOT/$SLUG/session"
-    SHARED_BASE="$KIB_STATE_ROOT/$SLUG/shared"
+    PROJ_STATE="$KIB_STATE_ROOT"
+    TRANSCRIPTS_SRC="$CLAUDE_HOME/projects/$SLUG"
+    SESSION_BASE="$PROJ_STATE/$SLUG/session"
+    SHARED_BASE="$PROJ_STATE/$SLUG/shared"
     EPHEMERAL=0
     SCRATCH_SUFFIX=""
 
@@ -416,11 +418,26 @@ assemble_session_dir() {
     stage_shared_settings
     # Silent-log drift canary: note any top-level ~/.claude entry kib does not recognise.
     check_claude_home_drift
+    warn_private_asset_trees
 
     # This project's transcripts are shared host<->box via a nested bind, so --resume lists
     # the same sessions on both sides. Both ends must exist for the bind. NOT for an
     # ephemeral session: it must persist nothing to canonical.
     [ "$EPHEMERAL" = 1 ] || mkdir -p "$CLAUDE_HOME/projects/$SLUG" 2>/dev/null || true
+}
+
+# The entrypoint keeps a pre-share per-project tree rather than link over it, which hides every
+# shared install from this project. Say so: nothing migrates it.
+warn_private_asset_trees() {
+    local d
+    for d in skills agents commands plugins hooks; do
+        if [ -d "$SESSION_BASE/$d" ] && [ ! -L "$SESSION_BASE/$d" ]; then
+            warn "this project keeps its own $d/ from before kib shared it, so it misses what" \
+                "other projects install. To share it, close this project's sessions, then run:" \
+                "  mv '$SESSION_BASE/$d' '$SESSION_BASE/$d.old'" \
+                "and reinstall what it had (its old copy stays in $d.old)."
+        fi
+    done
 }
 
 # Diff canonical ~/.claude's top-level entries against the versioned manifest; LOG ONLY.

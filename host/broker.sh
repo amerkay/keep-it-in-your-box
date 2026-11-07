@@ -23,8 +23,8 @@
 # Writes: KIB_DIR BROKER_TOKEN_FILE PROVIDERS_DIR BROKER_ENABLED ARGS
 # shellcheck disable=SC2034  # BROKER_ENABLED is read across the boundary
 
-# The in-container DNS alias for the broker. Load-bearing mid-session: guest/bin/resolv-sync.sh
-# keeps 127.0.0.11 first so this keeps resolving, and brokered base_url values embed it.
+# The broker's name in the box, a host entry (gVisor cannot reach Docker's DNS). Brokered
+# base_url values embed it.
 BROKER_ALIAS="kib-broker"
 
 # Host-only token store, never bind-mounted into the agent — what governs the agent's
@@ -121,7 +121,7 @@ _broker_host_config() {
 # config.json the broker reads: enabled providers + each token's in-broker path. Host-only,
 # never mounted into the AGENT.
 _write_broker_config() {
-    mkdir -p "$BROKER_OUT" && chmod 700 "$BROKER_DIR" "$BROKER_OUT"
+    mkdir -p "$BROKER_DIR" "$BROKER_OUT" && chmod 700 "$BROKER_DIR" "$BROKER_OUT"
     # Same source as broker_config_hash, so the config and the attach-hash cannot disagree.
     local id enabled_json="" token_json="" sep=""
     for id in $(broker_enabled_providers); do
@@ -202,7 +202,9 @@ start_broker() {
     while IFS='|' read -r id delivery kind basename; do
         [ -n "$id" ] || continue
         [ -s "$KIB_DIR/$basename" ] || continue
-        tok_mounts+=(-v "$KIB_DIR/$basename:/run/broker/token/$id:ro")
+        # A copy: under Lima the VM then sees this container's tokens, never $KIB_DIR.
+        cp "$KIB_DIR/$basename" "$BROKER_DIR/$id.token"
+        tok_mounts+=(-v "$BROKER_DIR/$id.token:/run/broker/token/$id:ro")
     done <<EOF
 $(_broker_list_providers)
 EOF
@@ -210,8 +212,8 @@ EOF
     # cap-drop=ALL, no devices. Tokens are mounted here only and READ-ONLY, so the broker has
     # no write path to any credential by construction rather than by discipline.
     local -a prov_mount=()
-    [ -d "$PROVIDERS_DIR" ] && prov_mount=(
-        -v "$PROVIDERS_DIR:/run/broker/providers.d:ro"
+    [ -d "$PROVIDERS_DIR" ] && cp -R "$PROVIDERS_DIR" "$BROKER_DIR/providers.d" && prov_mount=(
+        -v "$BROKER_DIR/providers.d:/run/broker/providers.d:ro"
         -e KIB_PROVIDERS_DIR=/run/broker/providers.d)
 
     local -a broker_run=(
@@ -296,6 +298,11 @@ inject_brokered_mcps() {
 #      not a mode bit, is what makes it read-only.
 add_broker_env_args() {
     [ "$BROKER_ENABLED" = 1 ] || return 0
+    local ip
+    ip="$(docker inspect -f "{{(index .NetworkSettings.Networks \"$BROKER_NET\").IPAddress}}" \
+        "$BROKER_CNAME" 2>/dev/null)" || ip=""
+    [ -n "$ip" ] || _broker_abort "could not read the broker's address on $BROKER_NET."
+    ARGS+=(--add-host "$BROKER_ALIAS:$ip")
     # reverse_proxy_mcp rows need nothing here — the agent reaches them via the .claude.json
     # URL, not an env var.
     local id
@@ -385,9 +392,9 @@ merge_out_credential() {
 }
 
 # ── Container-level broker wiring ────────────────────────────────
-# Dual-home the main container onto the broker net AFTER its docker run: a single --network at
-# run time would REPLACE the default bridge, whereas connecting a second net keeps both and
-# adds Docker's embedded resolver so `kib-broker` resolves. Fail-hard — no route means no auth.
+# Dual-home the main container onto the broker net between create and start (gVisor wires its
+# NICs at start): a single --network would REPLACE the default bridge, connecting keeps both.
+# Fail-hard — no route means no auth.
 connect_broker_network() {
     [ "$BROKER_ENABLED" = 1 ] || return 0
     docker network connect "$BROKER_NET" "$CNAME" >/dev/null 2>&1 \
@@ -417,7 +424,7 @@ stop_broker() {
     # The main container must be gone first (teardown_container stops it before calling this),
     # or the network still has an endpoint and rm fails — harmless, it is retried next time.
     docker network rm "$BROKER_NET" >/dev/null 2>&1 || true
-    rm -rf "$BROKER_DIR" 2>/dev/null || true
+    rm -rf "$BROKER_DIR" "$BROKER_OUT" 2>/dev/null || true
 }
 
 # ── Credential lifecycle: kib broker login|logout|status|probe ───

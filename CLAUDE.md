@@ -11,7 +11,7 @@ ends.
 ```
 bin/kib     host entry: verb dispatch and nothing else
 host/       runs as YOU, on the host. One file per subsystem, loaded by host/_load.sh
-guest/      crosses into a container: baked entrypoints, 3-line shims, policy files
+guest/      crosses into a container: baked entrypoints, 3-line shims, the Go FUSE view, policy
 kib/        the one importable package — shared/ (both sides) host/ guest/ broker/
 tools/      build-image.sh
 tests/      lib.sh + check.sh runner + check/*.sh sections + the pytest suites
@@ -33,9 +33,9 @@ A file's directory says which side of the trust boundary it is on. `kib/shared/`
   `kib/host/config_scope.py` (unit-tested by `tests/host/test_config_scope.py`).
 - **Edits take effect on the next *container*, not the next terminal.** One long-lived container
   serves every terminal on the project; it is recreated only after the *last* session exits. The
-  bind-mounted `kib/` package and `guest/bin/resolv-sync.sh` keep running their old code until
-  then, and `guest/entrypoint/*` plus the three `guest/bin/` shims are **baked into the image** —
-  they need a rebuild, not a relaunch. Before believing a "no change" result, check the
+  bind-mounted `kib/` package keeps running its old code until
+  then, and `guest/entrypoint/*`, the `guest/bin/broker` shim and the FUSE view (`guest/fuse`, Go)
+  are **baked into the image** — they need a rebuild, not a relaunch. Before believing a "no change" result, check the
   container's birth time: `ps -o lstart= -p 1` inside it.
 - **Editing a host script while a session is LIVE corrupts that running session.** `bash` reads a
   script incrementally by byte offset, so shortening `bin/kib` or a `host/*.sh` under a running
@@ -96,11 +96,22 @@ Bash reaches Python one way only: `kib_py <module> <args…>` (host/core.sh). Pa
 
 One line each; the full story is in the `docs/design-notes/` file in parentheses.
 
-- **Never root mount propagation at a path the engine serves as a host file share** — on macOS
-  `/tmp`, `/Users`, `/Volumes` and `/private` are virtiofs views of the Mac, and virtiofs has no
-  mount namespace for the event to land in. That, not the kernel count, is why kib's old `/tmp`
-  root failed there; both containers share the LinuxKit kernel. The root goes inside the engine
-  VM (`/run/kib/…`), never `/var` — a symlink to the shared `/private/var`. (`macos.md`)
+- **Never root mount propagation at a path the engine serves as a host file share** — a share
+  (virtiofs, 9p) has no mount namespace for the event to land in. In kib's VM the root is
+  `/mnt/kib/…`: VM-local, and not `/run`, which Ubuntu's `fusermount3` AppArmor profile denies.
+  (`macos.md`, `microvm.md`)
+- **VM: `~` is mounted once over virtiofs, never a project, never a sync** — per-project mounts
+  restart the VM; 9p writes ~6× slower (refused, not a fallback); the Mutagen sync was replaced.
+  Not kib inside the VM (no `~/.claude.json`, ssh breaks the TUI), not reverse-sshfs. Package
+  caches are per project, never shared (one box would plant a package another's installs).
+  (`microvm.md`)
+- **The box runs on gVisor, so it has no Docker DNS, no NIC hot-plug, no host inotify and no
+  `docker top`** — the broker is an `--add-host`, the box is created → connected → started,
+  watchers poll, readiness is the entrypoint's `/run/kib-ready`. On macOS, Apple's virtiofs
+  reports the asker as owner, so kib's bind sources get bindfs in the VM — never the project. gVisor needs rootful Docker,
+  which is why there is no native path. (`microvm.md`)
+- **Keep build folders off FUSE** (`local_dirs` volumes) — `node_modules` through the view is
+  the whole install cost (pnpm 130 s vs 6 s). (`microvm.md`)
 - **Don't re-split `~/.claude` into a shared + per-project pair** — the destructive migration it
   needs breaks the seamless host⇄box switch (same login, `--resume`, history). Keep canonical
   stock; isolate by per-launch assembly + subtree merge-out. Unknown `~/.claude` entries stay
@@ -115,23 +126,10 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   every provider. The broker is ON by default (`broker = off` or `KIB_BROKER=0` disables it); a
   first launch with no token auto-runs the login, else falls back to copying the real credential
   in (dir-backed, never a single-file bind — the rename footgun). (`credential-broker.md`)
-- **Never name a varlink socket literally in `add_resolv_sync_args`** — runc creates the
-  mountpoint and cannot on a `:ro` bind, so `-v /dev/null:<name>` aborts the entire launch the
-  moment that socket is absent at create time. Keep every shadow inside the `[ -e ]`-guarded
-  glob; the residual (one appearing after create is unshadowed) is caught by `security-test.sh`
-  from inside the box and is not fixable by unioning the names in. Regression-guarded.
-  (`clipboard-and-dns.md`)
 - **Don't collapse `start_broker`'s token-mount walk into `broker_enabled_providers`** — only the
   walk carries the host `basename`, and its output feeds `broker_config_hash`, so collapsing
   shifts the attach-refusal hash to save six lines. Drift is closed by `tests/check/mcp.sh`
   ("both walks agree") instead. (`credential-broker.md`)
-- **Under rootless Docker the FUSE root must be marked shared inside RootlessKit's namespace, not
-  the host's** — `_mount_is_shared` reads ours and wrongly passes, then the daemon refuses the
-  sidecar's `:rshared` bind. The host never sees that view either, so readiness/unmount go through
-  `engine_ns_exec`; and the box runs as container-root there, so every id comes from `box_uid`.
-  (`platform-matrix.md`)
-- **Don't "simplify" `resolv-sync.sh` to overwrite resolv.conf wholesale** — `127.0.0.11` must
-  stay first or the `kib-broker` alias breaks mid-session. (`clipboard-and-dns.md`)
 - **Never nest a bind inside another bind's destination** — Docker Desktop aborts the whole
   `docker run` (`mountpoint … is outside of rootfs`), and pre-creating the mountpoint does not
   help. Mount flat under `/run/kib/` via `bind_via_link`, or copy the file in. (`macos.md`)
@@ -141,8 +139,6 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   a dead dev server. (`container-lifecycle.md`)
 - **Don't drop the main container's dual-homing** (`connect_broker_network`) — host dev servers
   and LAN must stay reachable alongside the broker net. (`credential-broker.md`)
-- **Don't hide clipboard interfaces from the Wayland registry** — it broke `wl-paste`; sanitise
-  the write *content* at the `send` event instead. (`clipboard-and-dns.md`)
 - **Never stage the clipboard bridge's output in the spool** — it is bind-mounted rw, so a `>`
   there follows a symlink the box planted (any host file truncated and overwritten) and a re-open
   is a TOCTOU that lands unsanitised bytes on the real pasteboard. Build every answer in
@@ -168,16 +164,16 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   translating per field instead was tried and thrown away. (`redaction-config-guard.md`)
 - **No `tput reset`** (regression-guarded); keep `|| true` on `tput cols`/`lines` and `read`.
   (`terminal-and-security.md`)
-- **FUSE passthrough I/O is `os.pread`/`os.pwrite`, never `lseek`+`read`** — the shared fd offset
-  truncates reads at a chunk boundary, and it surfaces as unexplained lint/test flakiness rather
-  than an I/O error. Regression-guarded. (`redaction-config-guard.md`)
-- **The FUSE view's speed rests on three things — don't undo one:** `auto_cache` (never
-  `kernel_cache`: the host edits this tree), the memoised `_verdict` (the RULE verdict only —
-  `_classify`'s `lexists` must stay live), and a `flush()` that does not `fsync`. Regression-guarded.
-  `FUSE_PASSTHROUGH` is not the next step: needs kernel 6.9+ and libfuse 3.17 low-level, and fusepy
-  is ctypes over libfuse **2**. (`redaction-config-guard.md`)
-- **The sidecar raises its own `RLIMIT_NOFILE` at startup — don't delete it, and don't add
-  `--ulimit` alongside it.** Its fd table is the container-global ceiling on concurrently-open
+- **The FUSE view (`guest/fuse`, Go) is specced by `tests/fixtures/redaction`** — change a
+  behaviour there first; `go test` runs in `kib build` (no Go in the image; `./dev.sh` runs it
+  where `go` is on PATH). I/O is `pread`/`pwrite` (a shared fd offset truncates reads), the page
+  cache is kept only while mtime+size hold (never `kernel_cache`: the host edits this tree), only
+  the RULE verdict is memoised (existence stays live), and `Flush` never fsyncs.
+  Regression-guarded. (`redaction-config-guard.md`)
+- **No FUSE passthrough, no writeback cache — both measured.** Passthrough needs a root daemon and
+  speeds reads only; writeback never showed the box a host edit that changed a file's size.
+- **The sidecar's `RLIMIT_NOFILE` soft limit is raised at startup (the Go runtime does it) — don't
+  add `--ulimit` alongside it.** Its fd table is the container-global ceiling on concurrently-open
   project files, and containerd's 1024 soft default killed parallel JS builds with `EMFILE` naming
   project paths. In-box `ulimit -n` hides this — Node raises its own soft limit, so every shell
   reads 524288; `/proc/1/limits` is the honest one. (`redaction-config-guard.md`)
@@ -189,7 +185,7 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
 - **Never unlink lock files**, and every backgrounded host process must close fds 200/201
   (`200>&- 201>&-`) — one miss strands every project's containers. Lock fds are allocated, not
   picked: 200/201 project + boot, 202 teardown's exclusive re-take, 203 canonical `.claude.json`,
-  204 the rule restage. Reusing one that is held higher up the call stack releases it.
+  204 the rule restage, 205 the Lima VM's session count, 206 its boot. Reusing one that is held higher up the call stack releases it.
   (`container-lifecycle.md`)
 - **The host-executed-config guard is two tiers, split by WHEN a file fires — ambient trigger vs
   deliberate `claude` launch.** `[protect]` refuses the write, so it is only worth it where no

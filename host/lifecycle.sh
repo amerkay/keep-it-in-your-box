@@ -9,8 +9,8 @@
 # (docs/design-notes/container-lifecycle.md)
 #
 # Reads:  KIB_ROOT IMAGE_NAME and the globals host/config.sh sets
-# Writes: PROJ_HASH CNAME FUSE_CNAME FUSE_ROOT WL_CNAME WL_ROOT PATTERNS_STATE PASSWD_STATE
-#         GROUP_STATE CLIP_STATE SLEEP_STATE SLEEP_STATE_CPATH
+# Writes: PROJ_HASH CNAME FUSE_CNAME FUSE_ROOT PATTERNS_STATE PASSWD_STATE
+#         GROUP_STATE RESOLV_STATE CLIP_STATE CLIP_HOST SLEEP_STATE SLEEP_STATE_CPATH
 #         CRED_WITNESS SESSION_CDIR SHARED_CDIR SHARED_ASSET_CDIR
 #         TRANSCRIPTS_CPATH BROKER_CNAME BROKER_NET BROKER_DIR BROKER_OUT
 #         BROKER_HASH BROKER_ENABLED REDACTION_ARGS ARGS
@@ -23,11 +23,12 @@
 kib_identity() {
     PROJ_HASH="$(hash8 "$PWD")"
     CNAME="kib-$(basename "$PWD" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | cut -c1-40)-$PROJ_HASH"
+    PKG_CACHE="$CNAME-cache" # before the scratch suffix: an ephemeral session shares it
 
     if [ "${KIB_FORCE_NEW_SESSION:-0}" = "1" ]; then
         # Clean slate: its own container and config dirs, so its daemon cannot collide with
         # the project's. Discarded on exit, merge-out disabled.
-        EPH_ROOT="$KIB_STATE_ROOT/$SLUG.ephemeral.$$"
+        EPH_ROOT="$PROJ_STATE/$SLUG.ephemeral.$$"
         SESSION_BASE="$EPH_ROOT/session"
         SHARED_BASE="$EPH_ROOT/shared"
         CNAME="$CNAME-eph-$$"
@@ -41,32 +42,34 @@ kib_identity() {
     # Platform-sensitive: on macOS the propagation root must live inside the engine VM, not on
     # a virtiofs share of the Mac. host/portable.sh owns that choice.
     FUSE_ROOT="$(fuse_root_path "${PROJ_HASH}${SCRATCH_SUFFIX}")"
-    WL_CNAME="${CNAME}-wl"
-    WL_ROOT="/tmp/kib-wl.${PROJ_HASH}${SCRATCH_SUFFIX}"
-    PATTERNS_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.patterns"
+    # Per-container files.
+    local st="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}"
+    PATTERNS_STATE="$st.patterns"
+    RESOLV_STATE="$st.resolv"
     # The sidecar's /etc/passwd + /etc/group, synthesised so fusermount3 can resolve its own uid
     # without the host's user table crossing the boundary (see _stage_passwd). Host-side state,
     # never inside FUSE_ROOT: on macOS that root is VM-internal and the Mac cannot write to it.
-    PASSWD_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.passwd"
-    GROUP_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.group"
-    CLIP_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.clip"
+    PASSWD_STATE="$st.passwd"
+    GROUP_STATE="$st.group"
+    CLIP_STATE="$st.clip"
+    CLIP_HOST="$st.clip" # the bridge's pidfile and staging dir
     # The sleep guard's marker tree: written by the in-box hook, read by host/sleep-guard.sh.
     # Host-side state like the rest here, NOT under a bind the session already owns — but this
     # one is bind-mounted rw (the hook has to write it), so the guard only ever tests EXISTENCE
     # of a marker, never reads content. (sleep-guard.md)
-    SLEEP_STATE="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.sleep"
+    SLEEP_STATE="$st.sleep"
     # Written at creation when the box got the REAL credential. A host-side FILE, not a shell
     # variable: the last terminal out often merely ATTACHED and never ran stage_credential, so
     # a per-process flag would skip merge_out_credential and leave canonical holding a token
     # the box has already rotated away — which logs the account out.
-    CRED_WITNESS="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.credfallback"
+    CRED_WITNESS="$st.credfallback"
 
     # Always defined so teardown/attach can reference them unconditionally. The network name
     # maps the ephemeral suffix's dots to dashes to stay inside docker's charset.
     BROKER_CNAME="${CNAME}-broker"
     BROKER_NET="kib-broker-net-${PROJ_HASH}$(printf '%s' "$SCRATCH_SUFFIX" | tr '.' '-')"
-    BROKER_DIR="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}.broker"
-    BROKER_OUT="$BROKER_DIR/out"
+    BROKER_DIR="$st.broker"
+    BROKER_OUT="$st.broker-out"
     BROKER_HASH="$BROKER_DIR/hash"
     BROKER_ENABLED=0
 
@@ -132,37 +135,16 @@ _bind_shared_asset() { # <asset name> <mount opts>
     fi
 }
 
-# `docker run -d` returns as soon as PID 1 exists, but the entrypoint still has real work to
-# do as root — useradd, the shared-asset symlink farm, chown of the session dir — before it
-# execs `gosu … sleep infinity`. An immediate `docker exec` would land mid-setup: no home dir
-# yet, no symlinks, a chown walking the tree under us.
-#
-# Readiness is therefore a process whose command line is *exactly* `sleep infinity`, which
-# only exists once the entrypoint has exec'd. The exactness is load-bearing: while the
-# entrypoint is still working its own argv is `/bin/sh …/docker-entrypoint.sh sleep infinity`,
-# and PID 1 (docker-init) carries `… -- …docker-entrypoint.sh sleep infinity` forever — a
-# substring match would call a half-set-up container ready.
-#
-# Docker Desktop refuses the ps args, so the `-o args` form fails on every poll and the whole
-# wait pays two engine round-trips per iteration instead of one. Latch the refusal.
-_TOP_ARGS_OK=1
-container_ready() {
-    local args
-    if [ "$_TOP_ARGS_OK" = 1 ] && args="$(docker top "$CNAME" -o args 2>/dev/null)"; then
-        :
-    else
-        _TOP_ARGS_OK=0
-        args="$(docker top "$CNAME" 2>/dev/null \
-            | awk 'NR>1 { $1=$2=$3=$4=$5=$6=$7=""; sub(/^ +/,""); print }')"
-    fi
-    printf '%s\n' "$args" | grep -qx 'sleep infinity'
-}
+# The entrypoint touches this as its last root step, just before it execs `sleep infinity`: an
+# exec any sooner lands mid-setup (no home dir yet, a chown walking the tree under us). Not
+# `docker top`, which gVisor cannot answer.
+container_ready() { docker exec "$CNAME" test -e /run/kib-ready 2>/dev/null; }
 
 # Ready, or gone — either way there is no point waiting longer. The caller decides which.
 _container_ready_or_gone() { container_ready || ! container_running; }
 
 wait_for_container_ready() {
-    wait_until 120 0.5 _container_ready_or_gone # ≤60s; a cold entrypoint is ~1s
+    wait_until 600 0.1 _container_ready_or_gone # ≤60s; a cold entrypoint is ~1s
     container_ready && return 0
     if container_running; then
         echo "❌ kib: the project container never finished starting up (60s)." >&2
@@ -186,28 +168,18 @@ teardown_container() {
 
     # After the container, so its :rslave view of the mount is gone before we unmount it.
     teardown_redaction
-
-    # Each no-ops on the platform that does not use it.
-    stop_wayland_guard
     stop_clipboard_bridge
 
     # After the main container is stopped, so its network has no endpoint and `network rm`
-    # succeeds. (The resolv.conf watcher needs nothing: it died with the container.)
+    # succeeds.
     stop_broker
 }
 
 start_container() {
-    # One engine probe, in THIS shell, before anything expands $(box_uid) in a subshell where the
-    # memo would die. (host/portable.sh)
-    resolve_box_ids
     # Stages the rule file and pushes the mount flags onto REDACTION_ARGS below.
     prepare_redaction
-    # Must precede the mounts below, which bind the proxy socket / spool dir.
-    if is_macos; then
-        start_clipboard_bridge
-    else
-        start_wayland_guard
-    fi
+    # Must precede the mounts below, which bind its spool dir.
+    start_clipboard_bridge
 
     # Must precede the ARGS below, which add its base-URL env and placeholder shadow.
     start_broker
@@ -218,8 +190,10 @@ start_container() {
     # --init: PID 1 is `sleep infinity`, which would never reap the zombies left behind by
     # exec'd sessions. Docker's init does.
     ARGS=(
-        -d --init
+        --init
         --name "$CNAME"
+        # gVisor: the box's syscalls meet its own kernel, not the VM's.
+        --runtime="$GVISOR_RUNTIME"
 
         # This project's private state: daemon, sessions, jobs, and the three files assembled
         # from canonical (.claude.json, history.jsonl, CLAUDE.md). No other project mounts it.
@@ -261,40 +235,16 @@ start_container() {
         # things, and it keeps docker-default's `deny mount,`.
 
         # Bridge network + Claude's own domain allowlist. --add-host so a dev server on the
-        # host stays reachable.
-        --add-host=host.docker.internal:host-gateway
+        # host stays reachable. host/vm.sh swaps in Lima's host address.
+        --add-host="host.docker.internal:${KIB_HOST_GATEWAY:-host-gateway}"
 
         -e DISABLE_TELEMETRY=1
         -e DISABLE_ERROR_REPORTING=1
     )
 
-    # The entrypoint refuses to run a session as root, and under rootless HOST_UID is 0 — so it
-    # has to be able to tell that 0 from real root. (guest/entrypoint/docker-entrypoint.sh)
-    #
-    # IS_SANDBOX: Claude's own root check is `getuid() === 0 && IS_SANDBOX !== "1"`, named
-    # isRootOutsideDeliberateSandbox() in the binary — and without it `kib` dies after the whole
-    # launch succeeds, on "--dangerously-skip-permissions cannot be used with root/sudo". This is
-    # the sanctioned switch for exactly this case: uid 0 here is confined to RootlessKit's user
-    # namespace and maps to the host's unprivileged account, so it carries LESS privilege than
-    # the rootful box's uid. Set only under rootless — rootful never trips the check, and the
-    # flag also softens a repeated-529 retry we want left alone.
-    if is_rootless; then
-        ARGS+=(-e KIB_ROOTLESS=1 -e IS_SANDBOX=1)
-    else
-        # useradd + gosu into hostuser. Rootless needs neither — the target user is root, already
-        # exists, and owns every bind (our uid maps to 0), so the USER-CREATION step is skipped
-        # (the rest of the entrypoint's root pass still runs, and its chowns target ids it already
-        # owns, which needs no capability). Granting them anyway would be worse than pointless:
-        # the session runs AS root there, so they land in CapEff instead of staying inert at a
-        # non-root uid, and security-test.sh asserts CapEff=0.
-        ARGS+=(
-            --cap-add=SETUID
-            --cap-add=SETGID
-            --cap-add=CHOWN
-            --cap-add=DAC_OVERRIDE
-            --cap-add=FOWNER
-        )
-    fi
+    # useradd + gosu into hostuser, inert at a non-root uid under no-new-privileges.
+    ARGS+=(--cap-add=SETUID --cap-add=SETGID --cap-add=CHOWN --cap-add=DAC_OVERRIDE
+        --cap-add=FOWNER)
 
     # The project comes in here and ONLY here: prepare_redaction binds the sidecar's redacted
     # view over $PWD (:rslave). There is no second, unredacted path to it.
@@ -303,23 +253,41 @@ start_container() {
     # The sandbox rules, read-only at Claude's managed-policy path (host/config.sh has the why).
     add_policy_args
 
-    # Clipboard mounts: the mediated Wayland socket on Linux (reads pass, writes refused), or
-    # the pbpaste bridge spool on macOS. Both no-op if their sidecar/bridge didn't come up.
-    if is_macos; then
-        add_clipboard_bridge_args
-    else
-        add_wayland_args
-    fi
+    # The clipboard bridge's spool; a no-op if it did not come up.
+    add_clipboard_bridge_args
 
-    # Follow the host's live DNS. Linux only — on macOS the engine VM already tracks the host
-    # resolver, so there is nothing to sync.
-    is_macos || add_resolv_sync_args
+    # The VM's resolvers: Docker's embedded DNS is unreachable under gVisor.
+    vm_resolv "$RESOLV_STATE"
+    ARGS+=(-v "$RESOLV_STATE:/etc/resolv.conf:ro")
+    # gVisor sees no inotify event for a host edit, so dev servers watch by polling.
+    ARGS+=(-e CHOKIDAR_USEPOLLING=1 -e WATCHPACK_POLLING=true)
 
     # An empty template dir, so `git init`/`clone` create no .git/hooks at all. Git copies the
     # sample hooks from /usr/share/git-core/templates otherwise, and the guard rightly refuses
     # to let the box create a directory the host executes — which failed the whole clone. The
     # samples are all disabled examples, so nothing is lost. (redaction-config-guard.md)
     ARGS+=(-e GIT_TEMPLATE_DIR=)
+
+    # Package caches outlive the container, per project: a shared one would let one box plant a
+    # package another project's box installs. XDG tools (uv, pip, yarn, …) land here unasked.
+    local c=/home/hostuser/.cache
+    ARGS+=(-v "$PKG_CACHE:$c" -e XDG_CACHE_HOME="$c")
+    # Both store names: pnpm ≤ 11 reads npm_config_, 12 reads pnpm_config_ (a repo pins either).
+    ARGS+=(-e pnpm_config_store_dir="$c/pnpm-store" -e npm_config_store_dir="$c/pnpm-store")
+    ARGS+=(-e npm_config_cache="$c/npm")
+    # Python's caches would sit in every package folder: moved into the cache, not mounted.
+    ARGS+=(-e PYTHONPYCACHEPREFIX="$c/pycache" -e MYPY_CACHE_DIR="$c/mypy"
+        -e RUFF_CACHE_DIR="$c/ruff" -e PYTEST_ADDOPTS="-o cache_dir=$c/pytest")
+    # Build and install folders live on volumes: off FUSE (installs are ×5 faster) and off the
+    # host, built for Linux. Kept like the cache; one made mid-session is on FUSE until the next
+    # container. The entrypoint gives each root to the user.
+    local d dirs=""
+    while IFS= read -r d; do
+        ARGS+=(-v "$CNAME-local-$(hash8 "$d"):$PWD/$d")
+        dirs="$dirs$PWD/$d
+"
+    done < <(local_dirs)
+    ARGS+=(-e KIB_LOCAL_DIRS="$dirs")
 
     local git_name git_email
     git_name="$(git config --global user.name 2>/dev/null || true)"
@@ -385,8 +353,8 @@ start_container() {
     # Skipped for an ephemeral session — it must persist nothing to canonical. A link left
     # DANGLING would be worse than none: Claude cannot create its transcript dir over one,
     # which is why the sweep above drops ours whenever canonical has lost the directory.
-    if [ "$_bt_ok" = 1 ] && [ "$EPHEMERAL" != 1 ] && [ -d "$CLAUDE_HOME/projects/$SLUG" ]; then
-        bind_via_link "$CLAUDE_HOME/projects/$SLUG" "$TRANSCRIPTS_CPATH" \
+    if [ "$_bt_ok" = 1 ] && [ "$EPHEMERAL" != 1 ] && [ -d "$TRANSCRIPTS_SRC" ]; then
+        bind_via_link "$TRANSCRIPTS_SRC" "$TRANSCRIPTS_CPATH" \
             "$SESSION_BASE/projects/$SLUG"
     fi
     unset _bt _bt_ok _bt_this _f
@@ -423,8 +391,11 @@ start_container() {
     add_broker_env_args
 
     # The container just idles; the real work runs in `docker exec` sessions, so it survives
-    # any one terminal closing.
-    if ! docker run "${ARGS[@]}" "$IMAGE_NAME" sleep infinity >/dev/null; then
+    # any one terminal closing. Created, networked, then started: gVisor wires NICs at start.
+    docker create "${ARGS[@]}" "$IMAGE_NAME" sleep infinity >/dev/null \
+        || die "could not create the project container."
+    connect_broker_network
+    if ! docker start "$CNAME" >/dev/null; then
         # A published port already bound on the host is the one failure here a user can act on,
         # and docker's own message is swallowed above.
         [ -n "${PUBLISH_LIST:-}" ] && die "failed to start the project container." \
@@ -433,12 +404,6 @@ start_container() {
             "    kib --publish=<port>        kib --publish=none"
         die "failed to start the project container."
     fi
-
-    # Dual-home onto the broker net AFTER the run (a second --network at run time would
-    # replace the default bridge; connecting keeps both + enables embedded DNS for the
-    # broker alias). host-gateway + default-bridge/LAN reachability are preserved.
-    connect_broker_network
-
 }
 
 # ── Session preparation ──────────────────────────────────────────
@@ -454,8 +419,6 @@ kib_prepare_session() {
     report_shared_asset_writes
     warn_host_claude
 
-    mkdir -p "$SESSION_BASE" && chmod 700 "$SESSION_BASE"
-    mkdir -p "$SHARED_BASE" && chmod 700 "$SHARED_BASE" # holds the real credential when the broker is off
     if [ "$EPHEMERAL" = 1 ]; then
         # Reap it even if we bail out below (e.g. the broker fails): the real cleanup() trap
         # is not installed until just before the container starts.
@@ -468,6 +431,8 @@ kib_prepare_session() {
         exec 200>"$LOCK_FILE"
         lock_fd -w 60 -s 200 || die "timed out waiting for the project lock ($LOCK_FILE)."
     fi
+    mkdir -p "$SESSION_BASE" && chmod 700 "$SESSION_BASE"
+    mkdir -p "$SHARED_BASE" && chmod 700 "$SHARED_BASE" # holds the real credential when the broker is off
 }
 
 # ── Create or attach ─────────────────────────────────────────────
@@ -505,13 +470,6 @@ kib_bring_up() {
         pin_global_config "$SESSION_BASE/.claude.json"
         start_container
         wait_for_container_ready
-        # Linux only: macOS's engine VM already tracks the host resolver. One info line, and
-        # deliberately no desktop notification.
-        if is_macos; then
-            echo "ℹ️  DNS: handled by the Docker engine VM — follows the host resolver." >&2
-        else
-            start_resolv_sync
-        fi
     fi
     lock_fd -u 201
     exec 201>&-
@@ -526,6 +484,7 @@ kib_cleanup() {
     # SIG_IGN survives fork+exec, so every `docker` child below is covered too, and a handler that
     # `exit`s would abort this trap exactly like the default did. (container-lifecycle.md)
     trap '' INT HUP TERM
+    local notes="${_KIB_NOTES:-}" # the launch's, not teardown's own
 
     kill "$SLEEP_GUARD_PID" 2>/dev/null || true
 
@@ -553,19 +512,18 @@ kib_cleanup() {
         fi
         exec 202>&-
     fi
+    vm_down # after the containers are gone: the last kib out stops the VM
 
     # NO `tput reset` here or before the exec below: it wipes the terminal AND its scrollback,
     # erasing a short command's output the instant it exits. Claude's TUI manages its own
     # screen, as it does on the host, so kib leaves the terminal alone. Regression-guarded.
-    :
+    [ -z "$notes" ] || printf '\n🛡️  kib: said before the session:\n%s' "$notes" >&2
 }
 
 # ── Run this terminal's session inside the project container ─────
 # Re-entering through the entrypoint (rather than calling claude directly) reuses its
 # "already the target user" branch, which sets HOME and PATH correctly.
 kib_run_session() {
-    # Also reached on an ATTACH, which never runs start_container — so the ids resolve here too.
-    resolve_box_ids
     # Stamps this terminal's processes so the sleep guard reads only the state that is ours —
     # without it, one working session makes every terminal's guard inhibit. The in-box hook
     # inherits this from the session's environ and names its marker dir after it.
@@ -581,7 +539,7 @@ kib_run_session() {
 
     # 200>&- / 201>&-: the guard must not inherit our lock fds. A guard outliving kib would
     # keep holding the project's shared lock and stop the container from ever being torn down.
-    "$KIB_ROOT/host/sleep-guard.sh" "$CNAME" "$SESSION_TAG" "$SLEEP_STATE" 200>&- 201>&- &
+    "$KIB_ROOT/host/sleep-guard.sh" "$CNAME" "$SESSION_TAG" "$SLEEP_STATE" 200>&- 201>&- 205>&- &
     SLEEP_GUARD_PID=$!
 
     trap kib_cleanup EXIT
@@ -600,13 +558,7 @@ kib_run_session() {
     # harmless: that set is the entrypoint's own add-backs (0xcb:
     # CHOWN/DAC_OVERRIDE/FOWNER/SETGID/SETUID), inert under no-new-privileges at a non-root uid.
     # security-test.sh asserts CapEff=0 and that SYS_ADMIN is absent from the bounding set.
-    # No gosu under rootless: the exec already lands as the target user (uid 0 there), and gosu
-    # would still try to setuid to it — which needs CAP_SETUID that this container deliberately
-    # does not have. Same reasoning as the entrypoint's own tail.
-    local -a incmd=(/usr/local/bin/docker-entrypoint.sh "$@")
-    if ! is_rootless; then
-        incmd=(gosu "$(box_uid):$(box_gid)" "${incmd[@]}")
-    fi
+    local -a incmd=(gosu "$(box_uid):$(box_gid)" /usr/local/bin/docker-entrypoint.sh "$@")
 
     # Same reasoning as the tag below: --node-version rides the exec, so two terminals can run
     # two Node versions against ONE container and no attach has to be refused over it. Empty

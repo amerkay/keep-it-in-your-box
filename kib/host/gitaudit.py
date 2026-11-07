@@ -36,7 +36,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from kib.host import asset_scan
-from kib.shared import cli, dangerous, rules
+from kib.shared import cli, dangerous
 
 # Directories a project keeps large and boring. Walking them costs seconds and can hold no
 # git dir of interest.
@@ -73,7 +73,7 @@ class Findings:
         """
         parts = []
         if self.tracked:
-            parts.append(f"tracked paths match {rules.RULE_FILE}")
+            parts.append("tracked paths match .kibignore")
         if self.project:
             parts.append("project config the host runs")
         return " + ".join(parts)
@@ -153,20 +153,18 @@ def audit_nested_hooks(top: str) -> list[str]:
     return found
 
 
-def audit_tracked(top: str) -> list[str]:
+def audit_tracked(matches_file: str) -> list[str]:
     """Tracked paths that match `.kibignore` — hidden from the sandbox, but in git anyway.
 
     Committing them leaks their real host contents into history and diffs, which is exactly
-    what hiding them from the agent was for.
+    what hiding them from the agent was for. The matching is the view's own (`fuse match`, run
+    by host/gitguard.sh): this reads its NUL-separated answer.
     """
-    rule_file = os.path.join(top, rules.RULE_FILE)
-    if not os.path.exists(rule_file):
+    try:
+        with open(matches_file, encoding="utf-8", errors="replace") as fh:
+            return [p for p in fh.read().split("\0") if p]
+    except OSError:
         return []
-    rule_list = rules.load(rule_file)
-    if not rule_list:
-        return []
-    out = _git(["ls-files", "-z"], top)
-    return [p for p in out.split("\0") if p and rules.matches(rule_list, p)]
 
 
 # ── mixed-use project config ─────────────────────────────────────
@@ -417,12 +415,12 @@ def audit_project_configs(top: str, stamp: str | None = None) -> list[str]:
     return found
 
 
-def audit(top: str, stamp: str | None = None) -> Findings:
+def audit(top: str, stamp: str | None = None, tracked: str = "") -> Findings:
     """Every check, against one repository root."""
     return Findings(
         config=audit_git_config(top) + audit_nested_gitdirs(top),
         hooks=audit_nested_hooks(top),
-        tracked=audit_tracked(top),
+        tracked=audit_tracked(tracked),
         project=audit_project_configs(top, stamp),
     )
 
@@ -452,7 +450,7 @@ def report(findings: Findings, refusing: bool, host_claude: str = "") -> None:
             w(f"    {p}\n")
         w("\nInspect, then remove or chmod -x them.\n")
     if findings.tracked:
-        w(f"\n⚠️  kib: these tracked paths match {rules.RULE_FILE}:\n")
+        w("\n⚠️  kib: these tracked paths match .kibignore:\n")
         for p in findings.tracked:
             w(f"    {p}\n")
         w(
@@ -492,12 +490,15 @@ def main(argv: list[str]) -> int:
     ap.add_argument(
         "--host-claude", default="", help="path to a native claude, for the report's wording only"
     )
+    ap.add_argument(
+        "--tracked", default="", help="file of NUL-separated tracked paths .kibignore matches"
+    )
     args = ap.parse_args(argv)
 
     if not os.path.isdir(os.path.join(args.top, ".git")) and not os.path.isdir(args.top):
         return cli.OK  # not a repo (or gone) — nothing to audit, silently
 
-    findings = audit(args.top, args.hooks_stamp)
+    findings = audit(args.top, args.hooks_stamp, args.tracked)
     if not findings.any:
         return cli.OK
     report(

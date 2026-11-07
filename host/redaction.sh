@@ -10,23 +10,39 @@
 KIB_RULE_FILE=".kibignore"
 KIB_GUARD_FILE_HOST="$KIB_ROOT/guest/policy/global.kibignore"
 
+# The rule checks are the redaction view's own binary (guest/fuse), so `.kibignore` has one
+# matcher. In the running sidecar, else a throwaway container of the image; the project's rule
+# file goes in on stdin, where the arguments say `-`. `tightens` needs the sidecar's staged copy.
+_rules() { # <fuse subcommand args…>
+    local f="$PWD/$KIB_RULE_FILE"
+    [ -f "$f" ] || f=/dev/null
+    if sidecar_running; then
+        docker exec -i "$FUSE_CNAME" /usr/local/bin/fuse "$@" <"$f"
+    elif [ "$1" = optouts ]; then
+        docker run --rm -i --network none --entrypoint /usr/local/bin/fuse \
+            -v "$KIB_GUARD_FILE_HOST:/usr/local/share/global.kibignore:ro" "$IMAGE_NAME" "$@" <"$f"
+    else
+        return 1
+    fi
+}
+_optouts() { _rules optouts /usr/local/share/global.kibignore -; }
+
 # ── The [redact] opt-out, named at every launch ──────────────────
-# `!.env` in a project .kibignore cancels the guard's redaction (kib.shared.rules), so the
-# session reads that file in full. The box can write .kibignore, so the user seeing the rule is
-# the only control there is — but keep it to one line per rule: this is a deliberate setting on
-# the projects that use it, and an alarm printed at every launch stops being read.
+# `!.env` in a project .kibignore cancels the guard's redaction, and so does a wildcard `!*`, so
+# the session reads that file in full. The box can write .kibignore, so the user seeing the rule
+# is the only control there is — but keep it to one line per rule: this is a deliberate setting
+# on the projects that use it, and an alarm printed at every launch stops being read.
 report_kibignore_optouts() {
     [ -f "$PWD/$KIB_RULE_FILE" ] || return 0
-    have_python || return 0
     local optouts
-    optouts="$(kib_py shared.rules optouts "$KIB_GUARD_FILE_HOST" "$PWD/$KIB_RULE_FILE")" || return 0
+    optouts="$(_optouts)" || return 0
     [ -n "$optouts" ] || return 0
-    echo "ℹ️  $KIB_RULE_FILE un-redacts these for the sandbox — Claude reads them in full:" >&2
-    printf '%s\n' "$optouts" | sed 's/^/   !/' >&2
+    note "ℹ️  $KIB_RULE_FILE un-redacts these for the sandbox — Claude reads them in full:
+$(printf '%s\n' "$optouts" | sed 's/^/   !/')"
 }
 
 # ── The redaction layer ──────────────────────────────────────────
-# kib.guest.fuse runs in its OWN container — the sidecar — and the agent's container consumes
+# The view (guest/fuse, a Go binary in the image) runs in its OWN container — the sidecar — and the agent's container consumes
 # the view by shared-mount propagation. Matched paths refuse writes, including files created
 # AFTER launch, which no bind mount can cover and which a nested `git init` or a mid-session
 # clone relies on.
@@ -106,8 +122,8 @@ _reload_rules() { # <staged> <why>
         rm -f "$staged.prev"
     fi
     exec 204>&-
-    [ "$rc" = 0 ] && echo "🛡️  $KIB_RULE_FILE reloaded into the live redaction view — $2." >&2
-    return "$rc"
+    [ "$rc" = 0 ] || return 1
+    echo "🛡️  $KIB_RULE_FILE reloaded into the live redaction view — $2." >&2
 }
 
 # The one way the LOOSENING direction reaches a running view. `[ -t 0 ]`: a headless launch has
@@ -117,7 +133,7 @@ _confirm_looser_rules() {
     [ -t 0 ] || return 1
     warn "$KIB_RULE_FILE changed, and the new rules withhold LESS than the running view."
     diff -u "$staged" "$PWD/$KIB_RULE_FILE" | head -40 | sed 's/^/   /' >&2
-    optouts="$(kib_py shared.rules optouts "$KIB_GUARD_FILE_HOST" "$PWD/$KIB_RULE_FILE")" || true
+    optouts="$(_optouts)" || true
     [ -n "$optouts" ] && printf '%s\n' "$optouts" | sed 's/^/   hands the session: !/' >&2
     echo "   A session in the box can write $KIB_RULE_FILE, so an edit nobody made by hand is" >&2
     echo "   expected here. Applying it is what makes those files readable." >&2
@@ -129,12 +145,12 @@ _confirm_looser_rules() {
 # The rule file changed since the container started, so the running layer is on the OLD rules. A
 # change that can only redact MORE is swapped in without asking; anything that could hand the
 # session a path it could not read before is the user's call, because the box can write this
-# file. Without python the gate fails and every edit falls to the prompt — the safe direction.
+# file. If the check cannot run, every edit falls to the prompt — the safe direction.
 _reload_or_refuse_stale_rules() {
     local staged="$1"
     cmp -s "$PWD/$KIB_RULE_FILE" "$staged" 2>/dev/null && return 0
     [ ! -f "$PWD/$KIB_RULE_FILE" ] && [ ! -s "$staged" ] && return 0
-    if kib_py shared.rules tightens "$staged" "$PWD/$KIB_RULE_FILE"; then
+    if _rules tightens /kib-patterns - >/dev/null 2>&1; then
         _reload_rules "$staged" "it redacts strictly more" && return 0
     elif _confirm_looser_rules "$staged"; then
         _reload_rules "$staged" "you confirmed it" && return 0
@@ -182,7 +198,6 @@ prepare_redaction() {
         -v "$PASSWD_STATE:/etc/passwd:ro" \
         -v "$GROUP_STATE:/etc/group:ro" \
         -v "$FUSE_ROOT:$FUSE_ROOT:rshared" \
-        -v "$KIB_ROOT/kib:/usr/local/lib/kib:ro" \
         -v "$KIB_GUARD_FILE_HOST:/usr/local/share/global.kibignore:ro" \
         --entrypoint /usr/local/bin/fuse \
         "$IMAGE_NAME" \
@@ -223,29 +238,48 @@ prepare_redaction() {
     # pidfile is in $STATE_DIR, NOT bind-mounted into the box: teardown kills whatever group it
     # names. The path stays a LITERAL — tests/check/wiring.sh finds exec'd scripts by grepping
     # this call shape, and a variable hides them from it.
-    detach_pgrp "$KIB_ROOT/host/rules-watch.sh" "$PATTERNS_STATE" "$FUSE_CNAME" 200>&- 201>&-
+    detach_pgrp "$KIB_ROOT/host/rules-watch.sh" "$PATTERNS_STATE" "$FUSE_CNAME" 200>&- 201>&- 205>&-
     echo $! >"$PATTERNS_STATE.watch.pid"
     disown 2>/dev/null || true
 }
 
+# Build and install folders (host/lifecycle.sh mounts each on a volume), relative to the project,
+# one per line: found in the raw source, fast, then kept only if the VIEW has it too, so none is
+# ever inside a redacted folder (that mountpoint would fail the launch). Never descends into
+# one. A root node_modules or .venv the manifest implies counts before the first install.
+LOCAL_DIR_NAMES="node_modules .pnpm-store .next .nuxt .turbo target .terraform .venv venv"
+local_dirs() {
+    # shellcheck disable=SC2086 # one argument per name
+    docker exec "$FUSE_CNAME" sh -c '
+        view="$1"
+        shift
+        cd /src || exit 0
+        names=""
+        for n; do names="$names -o -name $n"; done
+        {
+            find . -mindepth 1 -maxdepth 6 -name .git -prune -o -type d \( ${names# -o } \) \
+                -print -prune
+            [ ! -f package.json ] || [ -e node_modules ] || echo ./node_modules
+            if [ -f pyproject.toml ] || [ -f requirements.txt ]; then
+                [ -e .venv ] || echo ./.venv
+            fi
+        } | while IFS= read -r d; do
+            [ -d "$view/${d%/*}" ] && printf "%s\n" "${d#./}"
+        done' _ "$FUSE_ROOT/mnt" $LOCAL_DIR_NAMES 2>/dev/null
+}
+
 sidecar_running() { [ -n "$(docker ps -q -f "name=^${FUSE_CNAME}$" 2>/dev/null)" ]; }
 
-# Is there a fuse fs at <path>, as <container> sees it? One probe, two callers: readiness
-# polling in the SIDECAR, and the attach check in the AGENT's container. Written twice once,
-# which left the attach-time copy — the one keeping a second terminal out of a container whose
-# view was unmounted underneath it — free to go stale on its own.
-_fuse_mounted_in() { # <container> <path>
-    docker exec "$1" sh -c '
+# Is the view mounted, as the SIDECAR sees it? Polled for readiness.
+_sidecar_mounted() {
+    docker exec "$FUSE_CNAME" sh -c '
         p=$(readlink -f "$1" 2>/dev/null || echo "$1")
         while read -r _d _m _t _r; do
             [ "$_m" = "$p" ] || continue
             case "$_t" in fuse*) exit 0 ;; esac
         done </proc/self/mounts
-        exit 1' _ "$2" 2>/dev/null
+        exit 1' _ "$FUSE_ROOT/mnt" 2>/dev/null
 }
-
-# Zero-arg wrapper: `wait_until … _sidecar_mounted_or_gone` calls it by name.
-_sidecar_mounted() { _fuse_mounted_in "$FUSE_CNAME" "$FUSE_ROOT/mnt"; }
 
 # Mounted, or dead — either way waiting longer is pointless. A sidecar that exited on a bad
 # argument would otherwise cost 100 failing `docker exec`s before anyone said so.
@@ -257,11 +291,11 @@ _sidecar_mounted_or_gone() { _sidecar_mounted || ! sidecar_running; }
 # global.kibignore cannot go stale: it mounts :ro from the checkout, so the sidecar and this
 # process read the very same file.
 verify_redaction_attach() {
-    # A live sidecar says nothing about the agent's side: the propagated mount can be gone
-    # (unmounted underneath us) while its container still runs, leaving $PWD as the bare
-    # mountpoint. Asked in the AGENT's container, so it is the consuming end that answers, and
-    # `docker exec` costs the same on both platforms — unlike a probe of the root on macOS.
-    if ! sidecar_running || ! _fuse_mounted_in "$CNAME" "$PWD"; then
+    # A live sidecar says nothing about the agent's side: the view can be gone underneath it.
+    # gVisor shows the box a gofer mount, not the fuse one, so the VM's table answers for the
+    # mount and a listing from the box for its end.
+    if ! sidecar_running || ! fuse_mounted "$FUSE_ROOT/mnt" \
+        || ! docker exec "$CNAME" ls -A "$PWD" >/dev/null 2>&1; then
         die "this project's container has no live redaction view, so neither" \
             "$KIB_RULE_FILE nor the host-config guard is being enforced in it." \
             "Refusing to attach — close all kib sessions for this project and relaunch." \

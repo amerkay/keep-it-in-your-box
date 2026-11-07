@@ -1,0 +1,3 @@
+base: &a
+  k: s3cr3t
+prod: *a

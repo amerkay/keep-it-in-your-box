@@ -13,7 +13,10 @@
 # on every launch — create and attach — since a user may add one between sessions.
 warn_inline_mcp_secrets() {
     have_python || return 0
-    kib_py host.mcp warn --claude-json "$CLAUDE_JSON" --mcp-json "$PWD/.mcp.json" || true
+    local m
+    m="$(kib_py host.mcp warn --claude-json "$CLAUDE_JSON" --mcp-json "$PWD/.mcp.json" 2>&1)" \
+        || true
+    [ -z "$m" ] || note "$m"
 }
 
 # Migrate an inline-credential MCP into the broker. Touches the project (.mcp.json), so it

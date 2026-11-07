@@ -900,11 +900,11 @@ def test_bind_returns_none_instead_of_raising(upstream: int, token_file: Path) -
     handler = proxy.make_handler(
         proxy.Route("x", prov, credential.Credential("x", prov, str(token_file)))
     )
-    taken = listen(handler)
+    # On 0.0.0.0 like `_bind`: gVisor (the dev box) lets 0.0.0.0 share a port with 127.0.0.1.
+    taken = ThreadingHTTPServer(("0.0.0.0", 0), handler)
     try:
         assert proxy._bind(int(taken.server_address[1]), handler, "x") is None
     finally:
-        taken.shutdown()
         taken.server_close()
 
 

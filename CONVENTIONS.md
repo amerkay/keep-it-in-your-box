@@ -23,6 +23,7 @@ the kib container, a CLI on the host) — never duplicate a setting into an edit
 | Line length, charset, EOL, final newline | `.editorconfig` | **100 columns**, everywhere, prose included |
 | Python tool versions | `requirements-dev.txt` | exact `==` pins (ruff, mypy, pytest) |
 | Shell tool versions | `Dockerfile` `ARG SHFMT_VERSION` / `ARG SHELLCHECK_VERSION` | pinned release binaries; keep in step with `.github/workflows/lint.yml` |
+| Go (guest/fuse) | `guest/fuse/go.mod` `go` line, Dockerfile `FROM golang:…` | keep the two in step; CI reads `go.mod`, and `go.sum` pins the modules |
 
 Bump a pin deliberately and in every place it appears. A floating version means the same code
 passes in one environment and fails in another.
@@ -47,7 +48,7 @@ config above — is in [`DEVELOP.md`](DEVELOP.md#editor-setup-vs-code)'s editor 
 - **Stdlib, or apt, in anything the container runs — never pip.** Everything under `kib/` runs
   off the image's bare `python3`, where a pip install is a PEP 668 refusal and breaks the launch
   path. A third-party module has to arrive as a Debian package in the Dockerfile
-  (`python3-fusepy`, `python3-cryptography`, `python3-yaml`) and gets a smoke-test line there.
+  (`python3-cryptography`, `python3-yaml`) and gets a smoke-test line there.
   `requirements-dev.txt` is the lint and test toolchain; a runtime module appears in it only so
   the suites can import one on a host that has never built the image.
 - **`kib/shared/` may not import `kib.host` or `kib.guest`.** It is the layer both sides share;

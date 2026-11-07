@@ -100,6 +100,9 @@ fixture() { # fixture <name> [git-init-args…] — echoes its path, creating it
     printf '%s' "$path"
 }
 
+# gVisor answers from its own kernel: it reports none of the host's LSM or mount types.
+on_gvisor() { case "$(uname -r)" in *gvisor*) return 0 ;; *) return 1 ;; esac }
+
 # ═════════════════════════════════════════════════════════════════
 section "Container boundary — escape classes (info-tier controls)"
 
@@ -111,18 +114,16 @@ is "CAP_SYS_ADMIN was never granted (bounding set)" "0" "$((0x$(awk '/^CapBnd:/{
 is "CAP_SETPCAP was never granted either" "0" "$((0x$(awk '/^CapBnd:/{print $2}' /proc/self/status) & 0x100 ? 1 : 0))"
 is "no-new-privileges set" "1" "$(awk '/^NoNewPrivs:/{print $2}' /proc/self/status)"
 is "seccomp in filter mode" "2" "$(awk '/^Seccomp:/{print $2}' /proc/self/status)"
-_lsm_label="$(tr -d '\0' </proc/self/attr/current 2>/dev/null)"
-if [ -z "$_lsm_label" ]; then
+_lsm_label="$(tr -d '\0' 2>/dev/null </proc/self/attr/current)"
+if on_gvisor; then
+    # Docker's AppArmor profile confines gVisor's own Sentry, not this process; the Sentry's
+    # syscall filter is the boundary (and seccomp above is Docker's, enforced inside it).
+    skip "AppArmor label" "gVisor: the profile confines the Sentry, not the box's processes"
+elif [ -z "$_lsm_label" ]; then
     # Docker Desktop's LinuxKit kernel ships no AppArmor, so the label is not achievable and
     # asserting one is a guaranteed failure that says nothing. Skipped rather than relaxed:
     # the caps, seccomp and no-new-privs assertions above carry the same weight and still run.
     skip "AppArmor label" "no AppArmor in this kernel (LinuxKit / Docker Desktop)"
-elif [ "${KIB_ROOTLESS:-0}" = 1 ]; then
-    # Rootless Docker loads no profile at all — the label reads `runc (unconfined)` — and cannot:
-    # applying one needs privilege the daemon does not have. Skipped on the same grounds as the
-    # LinuxKit case, never relaxed: the caps, seccomp and no-new-privs assertions above carry the
-    # same weight and still run, and the userns is an extra boundary rootful does not have.
-    skip "AppArmor label" "rootless Docker applies no profile ($_lsm_label)"
 else
     # docker-default, NOT unconfined. Its `deny mount,` is incompatible with mounting inside
     # this container — which is exactly why the FUSE server lives in the sidecar instead.
@@ -132,11 +133,18 @@ else
     esac
 fi
 unset _lsm_label
-is "/proc/sys mounted read-only" "ro" "$(awk '$5=="/proc/sys"{split($6,o,",");print o[1]}' /proc/self/mountinfo | head -1)"
+if on_gvisor; then
+    # gVisor's /proc/sys is its own, not a mount: what matters is that no entry takes a write.
+    is "no /proc/sys entry is writable" "" "$(for f in /proc/sys/*/* /proc/sys/*/*/*; do
+        [ -d "$f" ] || ! (printf '' >>"$f") 2>/dev/null || echo "$f"
+    done)"
+else
+    is "/proc/sys mounted read-only" "ro" "$(awk '$5=="/proc/sys"{split($6,o,",");print o[1]}' /proc/self/mountinfo | head -1)"
+fi
 is "/sys mounted read-only" "ro" "$(awk '$5=="/sys"{split($6,o,",");print o[1]}' /proc/self/mountinfo | head -1)"
 is "no docker socket" "absent" "$([ -S /var/run/docker.sock ] && echo present || echo absent)"
 is "no docker binary" "absent" "$(command -v docker >/dev/null && echo present || echo absent)"
-deny "/proc/sys is not writable" bash -c 'echo 1 > /proc/sys/kernel/dmesg_restrict'
+deny "/proc/sys is not writable" bash -c 'echo kib > /proc/sys/kernel/hostname'
 
 syscall_errno() { # syscall_errno <mount|unshare>
     python3 -c "
@@ -158,7 +166,12 @@ fuse_at_pwd() {
     p="$(readlink -f "$PWD")"
     awk -v p="$p" '$2==p && $3 ~ /^fuse/ {print "fuse"; exit}' /proc/self/mounts
 }
-is "redaction is a FUSE mount at the project root" "fuse" "$(fuse_at_pwd)"
+if on_gvisor; then
+    # The box sees gVisor's gofer mount; the guard checks below prove the view behind it.
+    skip "redaction is a FUSE mount at the project root" "gVisor shows its own mount type"
+else
+    is "redaction is a FUSE mount at the project root" "fuse" "$(fuse_at_pwd)"
+fi
 
 # There is no second, unredacted path to the project here. The sidecar topology means the real
 # tree is only ever mounted in the OTHER container, so nothing to fence off and nothing to
@@ -168,17 +181,26 @@ is "no unredacted copy of the project in this container" "absent" \
 
 # …and no FUSE server beside the agent to pivot into. Asserted STRUCTURALLY, on the device: a
 # FUSE server cannot run without /dev/fuse, so its absence proves the property outright. A
-# `pgrep -f kib.guest.fuse` cannot — it matches the command line of any process that merely
+# `pgrep -f fuse` cannot — it matches the command line of any process that merely
 # mentions the string, this suite's own shell included, and reads as a leak that is not there.
-is "no /dev/fuse, so no FUSE server can run in this container" "absent" \
-    "$([ -e /dev/fuse ] && echo present || echo absent)"
+if on_gvisor; then
+    # gVisor's own /dev/fuse, served by its kernel: useless without mount(2), refused above.
+    skip "no /dev/fuse in this container" "gVisor's own device; mount(2) is refused"
+else
+    is "no /dev/fuse, so no FUSE server can run in this container" "absent" \
+        "$([ -e /dev/fuse ] && echo present || echo absent)"
+fi
 
 # The server's syscalls run as ITS uid, not the caller's. default_permissions is what makes the
 # kernel re-check owner and mode against the CALLER — without it nothing inside the project is
 # permission-checked at all.
-is "the view is mounted default_permissions (POSIX perms are enforced)" "yes" \
-    "$(awk -v p="$(readlink -f "$PWD")" '$2==p && $4 ~ /(^|,)default_permissions(,|$)/ {
-        print "yes"; exit }' /proc/self/mounts)"
+if on_gvisor; then
+    skip "the view is mounted default_permissions" "gVisor shows its own mount options"
+else
+    is "the view is mounted default_permissions (POSIX perms are enforced)" "yes" \
+        "$(awk -v p="$(readlink -f "$PWD")" '$2==p && $4 ~ /(^|,)default_permissions(,|$)/ {
+            print "yes"; exit }' /proc/self/mounts)"
+fi
 
 # Proven live, not just by the mount flag: a mode on a file the agent owns must gate it. A
 # chmod that silently failed leaves the file MORE permissive, so each deny still fails loudly.
@@ -405,7 +427,7 @@ section "Redaction — .env and .kibignore"
 (printf 'SECRET=redacted-probe-value\n' >"$ARTIFACTS/.env") 2>/dev/null || true
 deny "write .env is refused" bash -c "echo x > '$ARTIFACTS/.env' 2>/dev/null"
 
-# A redacted file reads as its KEY NAMES with every value replaced (kib.guest.fuse.render).
+# A redacted file reads as its KEY NAMES with every value replaced (kib.shared.render).
 # Both halves matter: hiding the names is what used to send the agent to ask the user, who
 # then pasted the secret into the transcript — the leak the redaction existed to prevent.
 # Compare without printing: no real value may reach the terminal or a log.
@@ -722,8 +744,8 @@ section "Clipboard mediation (H8)"
 
 if [ "$DO_CLIPBOARD" = 0 ]; then
     skip "clipboard writes are sanitised" "--no-clipboard"
-elif ! command -v wl-copy >/dev/null || [ ! -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/${WAYLAND_DISPLAY:-wayland-0}" ]; then
-    skip "clipboard writes are sanitised" "no Wayland socket in this container"
+elif [ ! -d /kib-clip ]; then
+    skip "clipboard writes are sanitised" "no clipboard bridge in this container"
 else
     # A write is ALLOWED — refusing it is what broke the fullscreen TUI's select-to-copy — but
     # never verbatim. The probe carries the sequence that would end bracketed paste and run the
@@ -739,9 +761,8 @@ else
     allow "clipboard WRITE is allowed (select-to-copy)" \
         bash -c "printf 'kib-sectest-plain' | timeout 5 wl-copy >/dev/null 2>&1"
 
-    # --type is explicit HERE only because wl-copy infers the flavour from the content, and
-    # content carrying an ESC infers as binary — which the guard refuses outright. Without it
-    # the escape never reaches the sanitiser this check exists to exercise.
+    # --type is explicit HERE so the write is plainly text, reaching the sanitiser this check
+    # exists to exercise.
     bash -c "printf 'kib-sectest\033[201~probe' | timeout 5 wl-copy --type text/plain >/dev/null 2>&1"
     # Compared without printing, so a clipboard that did NOT take the probe never enters a log.
     if timeout 5 wl-paste 2>/dev/null | grep -qxF 'kib-sectest[201~probe'; then
@@ -755,7 +776,7 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════
-section "macOS clipboard bridge transport (MAC-C1)"
+section "Clipboard bridge transport (MAC-C1)"
 
 # The Linux guard sanitises in flight through the compositor's pipe, so it has no staging file
 # and this class cannot exist there. The macOS bridge has to spool — and the spool is bind-
@@ -787,11 +808,11 @@ _clip_symlink_probe() { # $1 = the spool name to pre-plant as a symlink
 }
 
 if [ ! -d /kib-clip ]; then
-    skip "the bridge never stages in the spool" "no /kib-clip (Linux hosts use the Wayland guard)"
+    skip "the bridge never stages in the spool" "no /kib-clip (no host clipboard tool)"
 elif [ "$DO_CLIPBOARD" = 0 ]; then
     skip "the bridge never stages in the spool" "--no-clipboard"
 else
-    # NOTE: like the Wayland probe above, this leaves a benign marker on the real clipboard.
+    # NOTE: like the probe above, this leaves a benign marker on the real clipboard.
     allow "a pre-planted clean.<id> symlink is not followed" _clip_symlink_probe clean
     allow "a pre-planted err.<id> symlink is not followed" _clip_symlink_probe err
     allow "regression: an ordinary clipboard write still reaches the host" \
@@ -799,28 +820,15 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════
-section "Host resolver reach (live-DNS mount)"
+section "Engine VM and gVisor"
 
-if [ -d /run/host-resolve ]; then
-    # DISCOVERED, not enumerated — matching add_resolv_sync_args. Naming the two sockets that
-    # shipped meant a third one a future systemd added would be probed by nobody. If the glob
-    # finds none at all that is itself the regression: the dir mount is there, so the shadows
-    # should be too.
-    _vl=0
-    for s in /run/host-resolve/io.systemd.*; do
-        [ -e "$s" ] || continue
-        [ -d "$s" ] && continue
-        _vl=$((_vl + 1))
-        deny "connect() to ${s##*/} is refused" \
-            python3 -c "import socket,sys; s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect('$s')"
-    done
-    is "every io.systemd.* control socket in the live-DNS mount is shadowed" "yes" \
-        "$([ "$_vl" -gt 0 ] && echo yes || echo 'none found ***')"
-    unset _vl
-    allow "regression: resolv.conf is readable" test -r /run/host-resolve/resolv.conf
-else
-    skip "host resolver sockets shadowed" "no live-DNS mount in this container"
-fi
+allow "the box's ~/.cache is the project's own package-cache volume" \
+    grep -q " $HOME/.cache " /proc/self/mountinfo
+# A kernel exploit here meets gVisor's kernel first, then the VM's — never the host's.
+allow "the box runs on gVisor" on_gvisor
+allow "host.docker.internal resolves (the host, through the VM)" getent hosts host.docker.internal
+is "dev servers watch by polling (gVisor sees no host edit's inotify event)" "1 true" \
+    "${CHOKIDAR_USEPOLLING:-} ${WATCHPACK_POLLING:-}"
 
 # ═════════════════════════════════════════════════════════════════
 section "Credential broker (H3/H4 — real OAuth token kept out of the sandbox)"
@@ -892,13 +900,8 @@ PY
         python3 -c "import socket; socket.gethostbyname('kib-broker')"
     allow "regression: host.docker.internal still resolves (host/LAN reach preserved)" \
         python3 -c "import socket; socket.gethostbyname('host.docker.internal')"
-    # Root-cause guard for the ENOTFOUND bug: resolv-sync must keep Docker's embedded
-    # resolver (127.0.0.11) in resolv.conf, or `kib-broker` stops resolving mid-session.
-    if grep -q '127\.0\.0\.11' /etc/resolv.conf 2>/dev/null; then
-        pass "embedded DNS 127.0.0.11 kept in resolv.conf (survives resolv-sync — no mid-session ENOTFOUND)"
-    else
-        fail "embedded DNS 127.0.0.11 kept in resolv.conf" "resolv-sync dropped it — kib-broker will ENOTFOUND"
-    fi
+    # A host entry: gVisor cannot reach Docker's embedded DNS, so nothing may depend on it.
+    allow "the broker alias is a host entry, not a Docker DNS name" grep -qw kib-broker /etc/hosts
 else
     skip "credential broker" "not enabled in this container (on by default — 'broker = off', KIB_BROKER=0, or no stored token)"
 fi

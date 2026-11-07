@@ -1,0 +1,6 @@
+provider:
+  stage: s3cr3t
+  env:
+    API_KEY: s3cr3t
+regions:
+  - s3cr3t

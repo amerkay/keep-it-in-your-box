@@ -20,10 +20,16 @@ die() {
 }
 
 warn() {
-    printf '⚠️  kib: %s\n' "$1" >&2
+    local m="⚠️  kib: $1"
     shift
-    [ $# -gt 0 ] && printf '   %s\n' "$@" >&2
-    return 0
+    [ $# -eq 0 ] || m="$m$(printf '\n   %s' "$@")"
+    note "$m"
+}
+
+# Printed now and again after the session (kib_cleanup): Claude's full screen hides what came first.
+note() {
+    printf '%s\n' "$1" >&2
+    _KIB_NOTES="${_KIB_NOTES:-}$1"$'\n'
 }
 
 # ── Python bridge ────────────────────────────────────────────────

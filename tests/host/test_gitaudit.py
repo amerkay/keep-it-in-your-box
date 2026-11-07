@@ -16,7 +16,8 @@ import pytest
 
 from kib.host import gitaudit
 from kib.shared import cli
-from kib.shared.rules import RULE_FILE
+
+RULE_FILE = ".kibignore"
 
 
 def git(repo: Path, *args: str) -> None:
@@ -120,22 +121,21 @@ def test_sample_hooks_are_ignored(git_repo: Callable[..., Path]) -> None:
     assert gitaudit.audit_nested_hooks(str(top)) == []
 
 
-def test_a_tracked_hidden_path_is_warn_class_not_refuse(git_repo: Callable[..., Path]) -> None:
-    """Your own hygiene — naming it is right, blocking a session over it would be hostile."""
+def test_a_tracked_hidden_path_is_warn_class_not_refuse(
+    git_repo: Callable[..., Path], tmp_path: Path
+) -> None:
+    """Your own hygiene — naming it is right, blocking a session over it would be hostile. The
+    matches come from `fuse match` (host/gitguard.sh), NUL-separated."""
     repo = git_repo("tracked")
-    (repo / ".kibignore").write_text("secrets.txt\n")
-    (repo / "secrets.txt").write_text("value\n")
-    git(repo, "add", "-A")
-    findings = gitaudit.audit(str(repo))
-    assert findings.tracked == ["secrets.txt"]
+    matches = tmp_path / "matches"
+    matches.write_text("secrets.txt\0a b/c.pem\0")
+    findings = gitaudit.audit(str(repo), tracked=str(matches))
+    assert findings.tracked == ["secrets.txt", "a b/c.pem"]
     assert not findings.refuse
 
 
-def test_no_rule_file_means_no_tracked_findings(git_repo: Callable[..., Path]) -> None:
-    repo = git_repo("norules")
-    (repo / "secrets.txt").write_text("value\n")
-    git(repo, "add", "-A")
-    assert gitaudit.audit_tracked(str(repo)) == []
+def test_no_matches_file_means_no_tracked_findings() -> None:
+    assert gitaudit.audit_tracked("") == []
 
 
 # ── mixed-use project config: warn on change, never refuse ───────
@@ -282,12 +282,13 @@ def test_report_mode_also_returns_refused_but_the_caller_does_not_die(
     assert gitaudit.main(["--top", str(repo), "--mode", "report"]) == cli.REFUSED
 
 
-def test_warn_only_findings_exit_fail_not_refused(git_repo: Callable[..., Path]) -> None:
+def test_warn_only_findings_exit_fail_not_refused(
+    git_repo: Callable[..., Path], tmp_path: Path
+) -> None:
     repo = git_repo("warnonly")
-    (repo / ".kibignore").write_text("secrets.txt\n")
-    (repo / "secrets.txt").write_text("v\n")
-    git(repo, "add", "-A")
-    assert gitaudit.main(["--top", str(repo), "--mode", "launch"]) == cli.FAIL
+    (tmp_path / "m").write_text("secrets.txt\0")
+    argv = ["--top", str(repo), "--mode", "launch", "--tracked", str(tmp_path / "m")]
+    assert gitaudit.main(argv) == cli.FAIL
 
 
 def test_clean_repo_exits_ok(git_repo: Callable[..., Path]) -> None:

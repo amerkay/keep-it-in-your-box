@@ -128,10 +128,10 @@ fi
 _pb_run="$(sed -n '/^start_container()/,/^}/p' "$KIB_ROOT/host/lifecycle.sh")"
 if printf '%s\n' "$_pb_run" | grep -q 'add_publish_args' \
     && [ "$(printf '%s\n' "$_pb_run" | grep -n 'add_publish_args' | cut -d: -f1)" \
-        -lt "$(printf '%s\n' "$_pb_run" | grep -n 'docker run' | cut -d: -f1)" ]; then
-    pass "the ports are added before docker run, not after"
+        -lt "$(printf '%s\n' "$_pb_run" | grep -n 'docker create' | cut -d: -f1)" ]; then
+    pass "the ports are added before docker create, not after"
 else
-    fail "add_publish_args does not run before docker run" "the -p flags would never be passed"
+    fail "add_publish_args does not run before docker create" "the -p flags would never be passed"
 fi
 
 # The pin must follow the container coming up: a port already bound on the host fails the run, and

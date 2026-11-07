@@ -3,6 +3,10 @@
 Part of the Keep It in Your Box design notes (`docs/design-notes/`). One row per behaviour that
 differs by host OS, with the file that owns it.
 
+**Since 2026-11 the macOS column is kib's Lima VM** (`host/vm.sh`; Docker Desktop is dropped, see
+`microvm.md`). Linux with `vm = on` takes the same VM paths. Rows naming Docker Desktop
+(`fakeowner`, LinuxKit) are what it measured; their Lima answers are in the TODO.
+
 **This file carries no rationale.** Every "why" lives in the note named in the row — follow the
 pointer rather than restating it here. `host/portable.sh` is the only file that branches on OS;
 everything else calls its shims or tests `is_macos`.
@@ -25,18 +29,18 @@ creation. What differs is only *where the propagation root lives*, and how it is
 
 | Behaviour | Ubuntu / Linux | macOS | Owner | Proven |
 |---|---|---|---|---|
-| Propagation root | `$KIB_STATE_ROOT/fuse.<hash>` — systemd makes `/` rshared, so it propagates already | `/run/kib/fuse.<hash>` — must be VM-internal; a virtiofs share of the Mac has no mount namespace for the event. Never `/var` (a symlink to the shared `/private/var`) | `macos.md` | ✅ |
-| Preparing / destroying that root, and unmounting | Plain `mkdir`/`rm` as you; a `/proc/self/mounts` read and `fusermount3` | A throwaway `--privileged --pid=host` container `nsenter`ing the engine VM — the Mac cannot see the path at all. Deliberately **not** used on Linux, where it would target the real machine | `macos.md` | ✅ |
+| Propagation root | `$KIB_STATE_ROOT/fuse.<hash>` — systemd makes `/` rshared, so it propagates already | `/mnt/kib/fuse.<hash>` inside kib's VM — VM-internal, never a Lima mount; not `/run`, which Ubuntu's `fusermount3` AppArmor profile denies | `microvm.md` | ✅ |
+| Preparing / destroying that root, and unmounting | Plain `mkdir`/`rm` as you; a `/proc/self/mounts` read and `fusermount3` | `limactl shell` as root in the VM — the Mac cannot see the path at all. Deliberately **not** used on Linux, where it would target the real machine | `macos.md` | ✅ |
 | Mode bits inside the project view | **Enforced** — the mount carries `default_permissions`, so the kernel checks owner/mode against the caller rather than the server | **Enforced the same way**, and this is the *only* place mode bits bite on macOS: outside the view `fakeowner` records a mode but ignores it in `access(2)` | `macos.md` | ✅ |
 | Ownership in the backing store | Already the agent's, so the remap is identity | `fakeowner` reports every bind as `root:root`; without the remap git refuses the whole tree as "dubious ownership" | `macos.md` | ✅ |
-| AppArmor | `docker-default` on the agent's container — its `deny mount,` costs nothing now the sidecar holds the mount | Absent — Docker Desktop's LinuxKit kernel ships no AppArmor, so the suite skips the label assertion rather than failing it | `macos.md` | ✅ |
+| AppArmor | `docker-default` on the agent's container — its `deny mount,` costs nothing now the sidecar holds the mount | Lima's Ubuntu VM has AppArmor, so `docker-default` should apply (Docker Desktop's LinuxKit had none; the suite skips the label assertion when the kernel has no AppArmor) | `macos.md` | ⏳ |
 | Sidecars per project | Up to 3 (FUSE, Wayland guard, broker) + main | Up to 2 (FUSE, broker) + main | `container-lifecycle.md` | — |
 
 ## Clipboard
 
 | Behaviour | Ubuntu / Linux | macOS | Owner | Proven |
 |---|---|---|---|---|
-| Transport | Wayland proxy sidecar holds the only real compositor socket | Host watcher (`host/clipboard-bridge.sh`) over a spool dir bind-mounted at `/kib-clip` | `clipboard-and-dns.md` | — |
+| Transport | Wayland proxy sidecar holds the only real compositor socket (in the VM: the macOS bridge, `pbpaste` → `wl-paste`) | Host watcher (`host/clipboard-bridge.sh`) over a spool dir bind-mounted at `/kib-clip` | `clipboard-and-dns.md` | — |
 | Reads | Relayed verbatim by the proxy | Answered host-side with `pbpaste` / osascript PNG extraction | `clipboard-and-dns.md`, `macos.md` | — |
 | Writes | Sanitised in flight at the `send` event — control characters stripped, non-text flavours refused (`WLGUARD-STRIP` / `WLGUARD-DENY`) | Sanitised host-side through `kib.shared.clipboard`, then `pbcopy`; non-text refused at the shim | `clipboard-and-dns.md` | ✅ |
 | Write alert (strip or refusal) | `notify-send`, one per 30 s | `notify_clip` (`terminal-notifier`, else `osascript`), one per 30 s | `clipboard-and-dns.md`, `macos.md` | — |
@@ -66,8 +70,8 @@ creation. What differs is only *where the propagation root lives*, and how it is
 
 | Behaviour | Ubuntu / Linux | macOS | Owner | Proven |
 |---|---|---|---|---|
-| `preflight_platform` | No-op | Fails fast on: no reachable Docker engine (naming Desktop / OrbStack / Colima), missing `perl`, and an engine not sharing `$PWD` | `macos.md` | 🧪 |
-| Docker engine | Any | Docker Desktop, OrbStack, or Colima | `architecture.md` | ⏳ |
+| `preflight_platform` | No-op | Fails fast on missing `perl`. The engine is `vm_use`'s: one prompt installs Lima, the `docker` CLI and buildx | `vm.md` | 🧪 |
+| Docker engine | Any; or kib's Lima VM with `vm = on` | kib's Lima VM only. Verified 2026-11-06 with Docker Desktop quit and its CLI off `PATH` | `microvm.md` | ✅ |
 | Host shell | bash 5, GNU userland used directly (`flock`, `setsid`, `sha256sum`) | bash 3.2 + BSD userland; `perl` shims for `lock_fd` / `detach_pgrp`, `shasum` for `hash8` | `macos.md` | 🧪 |
 | Empty-array expansion | Tolerant | Every array ever assigned `()` must expand as `${arr[@]+"${arr[@]}"}` or the launch aborts under `set -u` | `macos.md` | ✅ |
 | Host python | Modern `python3` | Stock 3.9 — `kib/host`, `kib/shared`, `kib/broker` stay 3.9-clean (enforced on **both**) | `macos.md` | ✅ |
@@ -75,6 +79,9 @@ creation. What differs is only *where the propagation root lives*, and how it is
 | `~/.claude` bootstrap | Assembled per launch from canonical | Same; on a fresh Mac `ensure_claude_home` creates a minimal skeleton first | `container-lifecycle.md` | — |
 
 ## Rootless Docker (Linux)
+
+**Removed 2026-11-07:** gVisor needs rootful Docker, so kib always uses its VM's (`microvm.md`).
+Kept for the record.
 
 Supported, and it is an **engine** difference rather than an OS one — `is_rootless` sits beside
 `is_macos` in `host/portable.sh`, memoised off one `docker info` per launch. Measured by a
@@ -85,7 +92,7 @@ throwaway probe before any code was written — on docker 29.2.1 / rootlesskit 2
 |---|---|---|
 | `:rshared` bind **refused** — "path … is mounted on / but it is not a shared mount" | dockerd lives in RootlessKit's mount namespace, where `/` is `rslave`. `_mount_is_shared` reads *our* namespace and wrongly passes, so the root must be bind-mounted to itself and marked `--make-rshared` **inside the daemon's namespace** | `fuse_root_create` |
 | After that: a mount made in one container reaches the next (`shared:847 master:1`) | the sidecar topology is unchanged — the agent's container stays capless, `/dev/fuse` passes through to the sidecar only | `fuse_root_create` |
-| The host never sees the view (`master:1`, one-way) | readiness, staleness and unmount must be asked **in that namespace**, so `fuse_mounted` / `unmount_fuse` / `fuse_root_destroy` route through `engine_ns_exec` — the same shim macOS uses, with an unprivileged `nsenter` instead of a privileged container | `engine_ns_exec` |
+| The host never sees the view (`master:1`, one-way) | readiness, staleness and unmount must be asked **in that namespace**, so `fuse_mounted` / `unmount_fuse` / `fuse_root_destroy` route through `engine_ns_exec` — the same shim macOS uses, with an unprivileged `nsenter` instead of `limactl shell` | `engine_ns_exec` |
 | A bind of the project reports **uid 0** inside | the host user maps to container 0 and the subuid range (100000+) reaches nothing kib mounts, so every `--user`, `HOST_UID`, `gosu` and FUSE id remap goes through `box_uid`/`box_gid`, which answer 0 there. Guarded by `tests/check/regressions.sh` | `box_uid` |
 | Both the container-setup and session passes are uid 0 | the entrypoint can no longer tell them apart by uid; `KIB_SESSION_TAG` (already set per-exec) is the discriminator, and the root refusal is lifted only for `KIB_ROOTLESS=1` | `docker-entrypoint.sh` |
 | Claude itself refuses `--dangerously-skip-permissions` at uid 0 — **after** a fully successful launch | its check is `getuid() === 0 && IS_SANDBOX !== "1"`, `isRootOutsideDeliberateSandbox()` in the binary, so the box gets `-e IS_SANDBOX=1` under rootless only. Found the hard way: every sidecar came up, the banner printed, then the CLI exited 1 | `lifecycle.sh` |
@@ -144,6 +151,10 @@ AppArmor at all (LinuxKit).
 ## TODO — checks not yet run
 
 Tracked in `macos.md` § "Still open".
+
+- [ ] **Under Lima (vz + virtiofs):** git in the box does not report "dubious ownership"; mode
+      bits enforce in the view; `security-test.sh` passes including the AppArmor label; image
+      paste works through the bridge.
 
 - [ ] **Image paste end-to-end (Mac hardware).** Confirmed broken on the first Mac run, three
       causes fixed (dropped `xclip` args, a 2 s budget against `osascript`, and only one trigger
