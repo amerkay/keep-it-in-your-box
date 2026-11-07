@@ -102,10 +102,10 @@ vm_up() {
 
 # Apple's virtiofs reports a file as owned by whoever asks, so gVisor (root) sees kib's private
 # dirs as root's and the box user is locked out. bindfs over each reports the host user instead.
-# The project needs none: its redaction view reports the box user itself.
+# Never over a project, kib's checkout included: under the redaction sidecar it hung `docker run`.
 _vm_owners() {
     is_macos || return 0
-    local log="$KIB_STATE_ROOT/vm.log" d set=("$HOME/.claude" "$KIB_STATE_ROOT" "$KIB_ROOT" "$KIB_NODE_CACHE")
+    local log="$KIB_STATE_ROOT/vm.log" d set=("$HOME/.claude" "$KIB_STATE_ROOT")
     for d in "${set[@]}"; do mkdir -p "$d"; done
     # shellcheck disable=SC2016 # the VM's shell expands them
     vm_root sh -c 'u=$1 g=$2 && shift 2

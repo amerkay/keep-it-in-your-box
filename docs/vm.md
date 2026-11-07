@@ -44,8 +44,7 @@ If `/dev/kvm` is missing, turn on virtualization (VT-x / AMD-V) in your BIOS. If
 - **Small-file writes are ~1.6–2× slower** in the box than on the host. Installs stay fast
   because build folders are VM volumes.
 - **macOS reports every file as owned by whoever asks.** gVisor asks as root, so kib puts bindfs
-  over the folders it mounts into the box (`~/.claude`, its state, its checkout, the Node cache)
-  to report you as their owner.
+  over `~/.claude` and its own state folder to report you as their owner.
 - **A kib update that changes the VM's mounts** restarts it once, and waits until no session is
   open.
 

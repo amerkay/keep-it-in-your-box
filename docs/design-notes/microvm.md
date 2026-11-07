@@ -99,9 +99,10 @@ runc. The seams the 2026-10-04 review listed, and their answers:
 - **Wayland socket:** gone; the clipboard is the spool bridge on both OSes, so no
   `--host-uds`. Docker's seccomp profile is enforced inside (`--oci-seccomp`).
 - **macOS file owners:** Apple's virtiofs reports the asker as a file's owner (cached per inode),
-  so gVisor's root gofer saw kib's `700` dirs as root's → bindfs in the VM over each dir kib binds
-  into the box (`_vm_owners`). Not over all of `~`: the project's redaction view already reports
-  the box user, and a second FUSE hop there would slow every project read.
+  so gVisor's root gofer saw kib's `700` dirs as root's → bindfs in the VM over `~/.claude` and
+  kib's state (`_vm_owners`). Never over a project: its redaction view reports the box user
+  already, and bindfs over kib's own checkout hung the sidecar's `docker run` when kib was the
+  project. Kib's checkout and the Node cache are world-readable, so they need none.
 - **Rootless Docker:** unsupported → the VM's rootful Docker only.
 
 ## If this is ever revisited
