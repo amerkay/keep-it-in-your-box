@@ -114,7 +114,7 @@ is "CAP_SYS_ADMIN was never granted (bounding set)" "0" "$((0x$(awk '/^CapBnd:/{
 is "CAP_SETPCAP was never granted either" "0" "$((0x$(awk '/^CapBnd:/{print $2}' /proc/self/status) & 0x100 ? 1 : 0))"
 is "no-new-privileges set" "1" "$(awk '/^NoNewPrivs:/{print $2}' /proc/self/status)"
 is "seccomp in filter mode" "2" "$(awk '/^Seccomp:/{print $2}' /proc/self/status)"
-_lsm_label="$(tr -d '\0' </proc/self/attr/current 2>/dev/null)"
+_lsm_label="$(tr -d '\0' 2>/dev/null </proc/self/attr/current)"
 if on_gvisor; then
     # Docker's AppArmor profile confines gVisor's own Sentry, not this process; the Sentry's
     # syscall filter is the boundary (and seccomp above is Docker's, enforced inside it).

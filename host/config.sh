@@ -418,11 +418,26 @@ assemble_session_dir() {
     stage_shared_settings
     # Silent-log drift canary: note any top-level ~/.claude entry kib does not recognise.
     check_claude_home_drift
+    warn_private_asset_trees
 
     # This project's transcripts are shared host<->box via a nested bind, so --resume lists
     # the same sessions on both sides. Both ends must exist for the bind. NOT for an
     # ephemeral session: it must persist nothing to canonical.
     [ "$EPHEMERAL" = 1 ] || mkdir -p "$CLAUDE_HOME/projects/$SLUG" 2>/dev/null || true
+}
+
+# The entrypoint keeps a pre-share per-project tree rather than link over it, which hides every
+# shared install from this project. Say so: nothing migrates it.
+warn_private_asset_trees() {
+    local d
+    for d in skills agents commands plugins hooks; do
+        if [ -d "$SESSION_BASE/$d" ] && [ ! -L "$SESSION_BASE/$d" ]; then
+            warn "this project keeps its own $d/ from before kib shared it, so it misses what" \
+                "other projects install. To share it, close this project's sessions, then run:" \
+                "  mv '$SESSION_BASE/$d' '$SESSION_BASE/$d.old'" \
+                "and reinstall what it had (its old copy stays in $d.old)."
+        fi
+    done
 }
 
 # Diff canonical ~/.claude's top-level entries against the versioned manifest; LOG ONLY.
