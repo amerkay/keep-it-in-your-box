@@ -104,6 +104,8 @@ vm_up() {
 # dirs as root's and the box user is locked out. bindfs over each reports the host user instead.
 # Never over a project, kib's checkout included: under the redaction sidecar it hung `docker run`.
 # --multithreaded: single-threaded, bindfs hung on the first stat of a transcript (measured).
+# ulimit: it holds an fd per open dir, gVisor keeps one open per cached dir, and 1024 ran out
+# on the plugin tree (EMFILE in the box).
 _vm_owners() {
     is_macos || return 0
     local log="$KIB_STATE_ROOT/vm.log" d set=("$HOME/.claude" "$KIB_STATE_ROOT")
@@ -111,6 +113,7 @@ _vm_owners() {
     # shellcheck disable=SC2016 # the VM's shell expands them
     vm_root sh -c 'u=$1 g=$2 && shift 2
         command -v bindfs >/dev/null || apt-get install -y -q bindfs || exit 1
+        ulimit -n 1048576 || ulimit -n "$(ulimit -Hn)"
         for d; do
             grep -q " $d fuse" /proc/self/mounts \
                 || bindfs --multithreaded -o allow_other -u "$u" -g "$g" --chown-ignore \

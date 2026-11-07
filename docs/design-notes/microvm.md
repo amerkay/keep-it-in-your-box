@@ -104,7 +104,9 @@ runc. The seams the 2026-10-04 review listed, and their answers:
   already, and bindfs over kib's own checkout hung the sidecar's `docker run` when kib was the
   project. Kib's checkout and the Node cache are world-readable, so they need none. Always
   `--multithreaded`: single-threaded, bindfs hung on the first stat of a transcript, as root and
-  as the user (multithreaded: 240 files in 0.1 s).
+  as the user (multithreaded: 240 files in 0.1 s). Its open-file limit is raised to 1048576: it holds an fd
+  per open directory, gVisor keeps one open per cached directory, and the default 1024 ran out on
+  the plugin tree (`EMFILE` naming `~/.claude/plugins/…` in the box).
 - **Rootless Docker:** unsupported → the VM's rootful Docker only.
 
 ## If this is ever revisited
