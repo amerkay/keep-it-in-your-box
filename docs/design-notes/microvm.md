@@ -34,6 +34,17 @@ A shared lock on fd 205 counts sessions. The last one out starts a 10-minute tim
 VM only if no session holds fd 205 by then and no later close has replaced it. The FUSE root is
 `/mnt/kib` (Ubuntu's `fusermount3` AppArmor profile denies `/run`).
 
+**Memory: Lima's 4 GiB, doubled after an out-of-memory kill** (`_vm_oom`: the VM's
+`/proc/vmstat` read at each session close, applied at the next boot, up to half the host's RAM).
+Neither engine hands memory back while the VM runs (Lima's QEMU has no balloon, and it never moves
+vz's), so file cache fills any limit: a 4 GiB VM held 4.0 G of the host's `/dev/shm`. A bigger
+default stays taken; a cache trimmer (`memory.reclaim` works) was judged not worth it. On Linux the
+limit must stay under `/dev/shm`: QEMU backs guest RAM there for virtiofs.
+
+**Docker updates only at the idle stop** (`_vm_linger_end`). Its apt repo is outside
+unattended-upgrades' origins, and its restart cuts every `docker exec`, so every session, even
+with `live-restore` (measured: the box stayed up, its terminal died).
+
 **Running all of kib inside the VM was tried first and abandoned the same day.** The guest's own
 `$HOME` left it with no `~/.claude`, no login and no broker. `~/.claude.json` is a file directly in
 `$HOME`, and Lima mounts only directories. The ssh hop also corrupted the TUI.

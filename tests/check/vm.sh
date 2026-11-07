@@ -15,7 +15,11 @@ mkdir -p "$_vm_dir/bin" "$_vm_dir/home/devel/proj" "$_vm_dir/lima"
 cat >"$_vm_dir/bin/limactl" <<EOF
 #!/usr/bin/env bash
 case "\$1" in
-    list) case "\$3" in *Dir*) echo "$_vm_dir/lima" ;; *) echo Running ;; esac ;;
+    list) case "\$3" in
+        *Dir*) echo "$_vm_dir/lima" ;;
+        *Memory*) echo 4294967296 ;;
+        *) cat "$_vm_dir/status" 2>/dev/null || echo Running ;;
+    esac ;;
     stop) echo stop >>"$_vm_dir/stops" ;;
     edit) echo "\$*" >>"$_vm_dir/edits" ;;
     start) echo start >>"$_vm_dir/starts" ;;
@@ -25,6 +29,8 @@ case "\$1" in
             *"runsc install"*) echo "\${@: -1}" >>"$_vm_dir/runtimes" && echo gvisor >>"$_vm_dir/installs" ;;
             *nameserver*) echo "nameserver 192.168.5.3" ;;
             *bindfs*) echo "\$*" >>"$_vm_dir/bindfs" ;;
+            *only-upgrade*) echo docker >>"$_vm_dir/upgrades" ;;
+            *vmstat*) [ -e "$_vm_dir/oom" ] ;;
         esac
         ;;
 esac
@@ -110,6 +116,8 @@ is "the last kib out leaves the VM up (it lingers)" "0" "$(_vm_stops)"
 _vm_run "$_vm_dir/bin:$PATH" _vm_t_last >/dev/null # a second close within the linger
 sleep 3
 is "after the linger, only the newest close's timer stops the VM" "1" "$(_vm_stops)"
+is "the idle stop updates Docker first, when no session's terminal can be cut" "1" \
+    "$(wc -l <"$_vm_dir/upgrades" | tr -d ' ')"
 
 _vm_t_mac() { KIB_OS=darwin && vm_use claude && echo returned; }
 case "$(_vm_run /usr/bin:/bin _vm_t_mac)" in
@@ -130,6 +138,34 @@ case "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_build)" in
 esac
 sleep 2 # its 1 s timer, before the files go
 
+# The fake VM has 4 GiB; <host RAM in GiB>. Another kib holds the VM, so no stop timer.
+_vm_t_oom() {
+    # shellcheck disable=SC2317 # _vm_oom calls it
+    _mem=$1 && host_mem_kib() { echo $((_mem << 20)); }
+    exec 207>"$VM_LOCK" && flock -s 207 && vm_up >/dev/null 2>&1 && vm_down
+}
+_vm_grow="$_vm_dir/home/.local/state/kib/vm-memory"
+rm -f "$_vm_dir/edits"
+is "no out-of-memory kill: nothing said, the size kept" "" \
+    "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_oom 64)$(cat "$_vm_grow" 2>/dev/null)"
+touch "$_vm_dir/oom"
+case "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_oom 64)" in
+    *"out of memory (4 GiB)"*"gets 8 GiB from its next start"*"--memory 32") pass \
+        "an out-of-memory kill: told, with the command for more" ;;
+    *) fail "an out-of-memory kill went unreported" ;;
+esac
+is "said once per boot" "" "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_oom 64)"
+echo Stopped >"$_vm_dir/status"
+_vm_run "$_vm_dir/bin:$PATH" _vm_t_up >/dev/null
+case "$(cat "$_vm_dir/edits" 2>/dev/null)" in
+    *"--memory 8 kib-vm") pass "the next start from stopped doubles the VM's memory" ;;
+    *) fail "the VM did not grow at its next start" "$(cat "$_vm_dir/edits" 2>/dev/null)" ;;
+esac
+is "then the plan is spent" "no" "$([ -e "$_vm_grow" ] && echo yes || echo no)"
+rm -f "$_vm_dir/status"
+_vm_run "$_vm_dir/bin:$PATH" _vm_t_oom 4 >/dev/null
+is "never past half the host's RAM, and never below a size set by hand" "4" "$(cat "$_vm_grow")"
+
 _vm_t_lima() { # <answer> — the install prompt's outcome and any limactl it left
     printf '%s\n' "$1" | _vm_install " limactl docker" 2>&3 && echo installed || echo declined
     [ ! -e "$HOME/.local/bin/limactl" ] || echo limactl
@@ -149,4 +185,4 @@ is "launch notices are kept for the replay after the session" "⚠️  kib: one
 three" "$(_vm_run "$PATH" _vm_t_notes 3>&1 >/dev/null)"
 
 rm -rf "$_vm_dir"
-unset _vm_dir _vm_spec
+unset _vm_dir _vm_spec _vm_grow

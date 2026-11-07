@@ -122,6 +122,12 @@ sha256_file() {
     if [ "$KIB_OS" = darwin ]; then shasum -a 256 <"$1"; else sha256sum <"$1"; fi | cut -d' ' -f1
 }
 
+host_mem_kib() {
+    if [ "$KIB_OS" = darwin ]; then echo $(($(sysctl -n hw.memsize) >> 10)); else
+        awk '/^MemTotal:/ { print $2 }' /proc/meminfo
+    fi
+}
+
 # ── own-process-group launcher ────────────────────────────────────
 # Backgrounds "$@" in its own process group so `kill -TERM -$!` signals the whole tree. Darwin
 # uses perl POSIX::setsid + exec: in a non-interactive script `&` leaves the child in the

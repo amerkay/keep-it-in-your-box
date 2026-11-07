@@ -11,7 +11,8 @@
 
 KIB_VM_NAME="kib-vm"
 VM_LOCK="$KIB_STATE_ROOT/.locks/vm.lock"
-VM_SPEC="$KIB_STATE_ROOT/vm-spec" # the mount set the VM was last booted with
+VM_SPEC="$KIB_STATE_ROOT/vm-spec"   # the mount set the VM was last booted with
+VM_GROW="$KIB_STATE_ROOT/vm-memory" # GiB for its next boot, after an out-of-memory kill
 # ponytail: Lima's user-mode network address; read it from the VM if a network differs.
 LIMA_HOST_IP=192.168.5.2
 
@@ -87,6 +88,11 @@ vm_up() {
         printf '%s\n' "$want" >"$VM_SPEC"
         lock_fd -s 205
         status=Stopped
+    fi
+    if [ "$status" != Running ] && [ -s "$VM_GROW" ]; then
+        _limactl "giving its VM $(cat "$VM_GROW") GiB of memory" edit \
+            --memory "$(cat "$VM_GROW")" "$KIB_VM_NAME"
+        rm -f "$VM_GROW"
     fi
     [ "$status" = Running ] || _limactl "starting its VM" start "$KIB_VM_NAME"
     unset DOCKER_CONTEXT
@@ -241,6 +247,7 @@ VM_LINGER=600
 
 vm_down() {
     engine_lima || return 0
+    _vm_oom
     exec 205>&-
     exec 205>"$VM_LOCK"
     if lock_fd -n -x 205; then
@@ -258,7 +265,40 @@ _vm_linger_end() {
     [ "$(cat "$VM_LOCK.linger" 2>/dev/null)" = "$$" ] || return 0 # a later close took over
     exec 205>"$VM_LOCK"
     lock_fd -n -x 205 || return 0
+    # Docker updates only here: its restart cuts every `docker exec`, so every session, even
+    # with live-restore (measured). Time-boxed: a launch waits on this lock for 120 s at most.
+    # shellcheck disable=SC2016 # the VM's shell expands them
+    vm_root sh -c 'p="docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
+        a="-y -qq --only-upgrade -o Dpkg::Options::=--force-confold"
+        export DEBIAN_FRONTEND=noninteractive
+        timeout 45 apt-get update -qq && timeout 45 apt-get install $a --download-only $p \
+            && apt-get install $a --no-download $p' >/dev/null 2>&1 || true
     limactl stop "$KIB_VM_NAME" >/dev/null 2>&1 || true
+}
+
+# Lima's 4 GiB until the VM's kernel kills for memory, then double from its next boot, up to
+# half the host's RAM. Not a bigger default: the VM keeps what it used until it stops.
+_vm_oom() {
+    local cur want max
+    [ ! -e "$VM_GROW" ] || return 0 # already said, this boot
+    vm_root grep -q '^oom_kill [1-9]' /proc/vmstat 2>/dev/null || return 0
+    cur="$(limactl list --format '{{.Memory}}' "$KIB_VM_NAME" 2>/dev/null)"
+    max="$(host_mem_kib)"
+    [ "$cur" -gt 0 ] 2>/dev/null && [ "$max" -gt 0 ] 2>/dev/null || return 0
+    cur=$((cur >> 30)) want=$((cur * 2)) max=$((max >> 21))
+    [ "$want" -le "$max" ] || want=$max
+    [ "$want" -ge "$cur" ] || want=$cur # never shrink a size set by hand
+    echo "$want" >"$VM_GROW"
+    notify_desktop normal "kib: the VM ran out of memory" "It had $cur GiB and stopped a process."
+    if [ "$want" -gt "$cur" ]; then
+        warn "the VM ran out of memory ($cur GiB) and stopped a process." \
+            "It gets $want GiB from its next start. To restart it now, close every session, then:" \
+            "  limactl stop $KIB_VM_NAME" \
+            "For up to $max GiB, half your RAM:" \
+            "  limactl stop $KIB_VM_NAME && limactl edit $KIB_VM_NAME --memory $max"
+    else
+        warn "the VM ran out of memory ($cur GiB, kib's most: half your RAM) and stopped a process."
+    fi
 }
 
 # <verb>: claude and exec open a project, which must be one the VM can see.

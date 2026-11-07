@@ -27,6 +27,11 @@ If `/dev/kvm` is missing, turn on virtualization (VT-x / AMD-V) in your BIOS. If
   `--resume` history and broker routes.
 - **One VM, `kib-vm`.** It starts with your first session and stops 10 minutes after the last
   one closes, so a quick reopen skips the boot. Opening and closing projects never restarts it.
+- **4 GiB of memory, more only when needed.** The VM keeps what it has used until it stops, so
+  kib starts it small. If it ever runs out, kib tells you and doubles it from its next start, up
+  to half your RAM.
+- **It stays up to date.** Ubuntu installs security updates, kernel included, in the background;
+  Docker updates when the VM stops, the one moment it cuts no session. Both apply at the next start.
 - **The VM mounts your home folder**, once, over virtiofs. The box sees your project only through
   kib's redaction view, so `.env` values stay hidden and `.git/hooks` stays read-only. Projects
   outside your home folder are refused.
@@ -60,4 +65,5 @@ Lima: Apache-2.0. gVisor: Apache-2.0. The `docker` command: Apache-2.0.
 | Start from scratch | `limactl delete -f kib-vm` — the next `kib` creates it again |
 | Stop it now | `limactl stop kib-vm` (kib does this 10 minutes after your last session) |
 
-CPU and memory are limits, not reservations. The VM uses what it needs, up to those limits.
+On Linux keep memory under half your RAM: QEMU holds the VM's memory in `/dev/shm`, which is
+that size.
