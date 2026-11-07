@@ -54,7 +54,8 @@ RUN apt-get update && apt-get install -y curl \
     # Required for Claude Code's built-in sandbox
     bubblewrap socat \
     # FUSE runtime (fusermount3) for the .kibignore redacting mount, a Go binary built above.
-    # python3-yaml is the host-side renderer's YAML parser (kib/shared/render.py), for tests.
+    # TODO: drop python3-yaml and its smoke test below; nothing uses it. Wait until this layer
+    # changes anyway: editing it costs a ~10 min rebuild.
     fuse3 python3-yaml \
     && rm -rf /var/lib/apt/lists/*
 

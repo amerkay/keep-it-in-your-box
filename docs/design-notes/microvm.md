@@ -18,8 +18,8 @@ on the host** ([`../vm.md`](../vm.md), `host/vm.sh`, `PLAN_VM_SECURITY.md`). Alw
 (Docker Desktop dropped), opt-in on Linux. The CAP gate rules out a VM *per container*, not one VM
 holding the agent and the FUSE sidecar together. Three choices carry it:
 
-**Changed again 2026-11-07: the box runs on gVisor inside that VM, and the VM mounts `~`**
-(`TMP_PLAN_GVISOR.md`). The two-hop Mutagen sync, `vm-rw`/`vm-ro` and the native Linux path are
+**Changed again 2026-11-07: the box runs on gVisor inside that VM, and the VM mounts `~`**.
+The two-hop Mutagen sync, `vm-rw`/`vm-ro` and the native Linux path are
 gone. Measured on Linux and macOS (`sn-frontend`):
 
 - **virtiofs, not 9p:** 9p wrote ~6× slower than a VM disk, virtiofs ~1.5×. Linux needs
@@ -86,7 +86,7 @@ re-platforming, not a flag.
 
 ## gVisor
 
-Adopted 2026-11-07, probed first (`tmp_gvisor_probe.sh`). The FUSE sidecar and broker stay on
+Adopted 2026-11-07, probed first. The FUSE sidecar and broker stay on
 runc. The seams the 2026-10-04 review listed, and their answers:
 
 - **Broker net:** runsc wires NICs only at start → `docker create`, `network connect`, `start`.

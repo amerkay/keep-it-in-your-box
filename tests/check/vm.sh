@@ -123,6 +123,13 @@ case "$(_vm_run /usr/bin:/bin _vm_t_linux)" in
     *) fail "Linux without the VM's prerequisites is not refused" ;;
 esac
 
+_vm_t_build() { KIB_OS=darwin && VM_LINGER=1 && vm_use build >/dev/null 2>&1 && echo built; }
+case "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_build)" in
+    *built*"VM stops in"*) pass "kib build arms the VM's stop timer at exit, as a session does" ;;
+    *) fail "kib build left the VM running with no stop timer" ;;
+esac
+sleep 2 # its 1 s timer, before the files go
+
 _vm_t_lima() { # <answer> — the install prompt's outcome and any limactl it left
     printf '%s\n' "$1" | _vm_install " limactl docker" 2>&3 && echo installed || echo declined
     [ ! -e "$HOME/.local/bin/limactl" ] || echo limactl

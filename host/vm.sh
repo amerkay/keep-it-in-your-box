@@ -268,6 +268,7 @@ vm_use() {
         "here. Set them up once: $KIB_ROOT/docs/vm.md"
     _vm_tools || die "kib runs every box in a Lima VM." \
         "Run kib in a terminal and answer Y to install it (no sudo, nothing else changes)."
-    case "$1" in claude | exec) vm_project_ok ;; esac
+    # A session's cleanup calls vm_down; any other verb arms the stop timer at its own exit.
+    case "$1" in claude | exec) vm_project_ok ;; *) trap vm_down EXIT ;; esac
     vm_up
 }
