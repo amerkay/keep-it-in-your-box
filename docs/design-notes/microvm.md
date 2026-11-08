@@ -39,7 +39,10 @@ VM only if no session holds fd 205 by then and no later close has replaced it. T
 Neither engine hands memory back while the VM runs (Lima's QEMU has no balloon, and it never moves
 vz's), so file cache fills any limit: a 4 GiB VM held 4.0 G of the host's `/dev/shm`. A bigger
 default stays taken; a cache trimmer (`memory.reclaim` works) was judged not worth it. On Linux the
-limit must stay under `/dev/shm`: QEMU backs guest RAM there for virtiofs.
+limit must stay under `/dev/shm`: QEMU backs guest RAM there for virtiofs. **zram swap at each
+boot** (`_vm_zram`, half the VM's RAM): gVisor holds a box's memory as shmem, which no swap meant
+nothing could move, and the OOM killer's pick is a whole box (`gvisor_sentry`), every session in
+it. Measured: 4 projects, about 2 GiB of boxes, a 500 MB sentry killed.
 
 **Docker updates only at the idle stop** (`_vm_linger_end`). Its apt repo is outside
 unattended-upgrades' origins, and its restart cuts every `docker exec`, so every session, even

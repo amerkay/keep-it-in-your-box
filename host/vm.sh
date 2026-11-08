@@ -76,6 +76,7 @@ vm_up() {
             --vm-type="$LIMA_VM_TYPE" --mount-type="$LIMA_MOUNT_TYPE" \
             "${VM_MOUNTS[@]}" template:docker-rootful
         printf '%s\n' "$want" >"$VM_SPEC"
+        _vm_zram
         status=Running
     elif [ "$want" != "$(cat "$VM_SPEC" 2>/dev/null)" ]; then
         # A kib upgrade changed the mount set. Never cut a session, never bind what isn't mounted.
@@ -94,7 +95,7 @@ vm_up() {
             --memory "$(cat "$VM_GROW")" "$KIB_VM_NAME"
         rm -f "$VM_GROW"
     fi
-    [ "$status" = Running ] || _limactl "starting its VM" start "$KIB_VM_NAME"
+    [ "$status" = Running ] || { _limactl "starting its VM" start "$KIB_VM_NAME" && _vm_zram; }
     unset DOCKER_CONTEXT
     DOCKER_HOST="unix://$(limactl list --format '{{.Dir}}' "$KIB_VM_NAME")/sock/docker.sock"
     export DOCKER_HOST
@@ -129,6 +130,15 @@ _vm_owners() {
         tail -n 20 "$log" >&2
         die "could not give the VM your file owners (bindfs; full log: $log)."
     }
+}
+
+# Compressed swap in the VM's own RAM, each boot: a spike slows a box instead of the kernel
+# killing it. gVisor holds box memory as shmem, which nothing else can move out. Best effort.
+_vm_zram() {
+    # shellcheck disable=SC2016 # the VM's shell expands them
+    vm_root sh -c 'grep -q zram /proc/swaps && exit; m=$(grep MemTotal /proc/meminfo | tr -dc 0-9)
+        modprobe zram && d=$(zramctl -f -a zstd -s $((m / 2))K) && mkswap "$d" && swapon "$d"' \
+        >>"$KIB_STATE_ROOT/vm.log" 2>&1 || true
 }
 
 # gVisor into the VM once per pin: the release tarball (runsc needs its gvisor-bin/ beside it),
@@ -289,15 +299,16 @@ _vm_oom() {
     [ "$want" -le "$max" ] || want=$max
     [ "$want" -ge "$cur" ] || want=$cur # never shrink a size set by hand
     echo "$want" >"$VM_GROW"
-    notify_desktop normal "kib: the VM ran out of memory" "It had $cur GiB and stopped a process."
+    notify_desktop normal "kib: the VM ran out of memory" "It had $cur GiB and stopped its biggest process, usually a whole project's box."
     if [ "$want" -gt "$cur" ]; then
-        warn "the VM ran out of memory ($cur GiB) and stopped a process." \
+        warn "the VM ran out of memory ($cur GiB) and stopped its biggest process," \
+            "usually a whole project's box, with every session in it." \
             "It gets $want GiB from its next start. To restart it now, close every session, then:" \
             "  limactl stop $KIB_VM_NAME" \
             "For up to $max GiB, half your RAM:" \
             "  limactl stop $KIB_VM_NAME && limactl edit $KIB_VM_NAME --memory $max"
     else
-        warn "the VM ran out of memory ($cur GiB, kib's most: half your RAM) and stopped a process."
+        warn "the VM ran out of memory ($cur GiB, kib's most: half your RAM) and stopped its biggest process."
     fi
 }
 

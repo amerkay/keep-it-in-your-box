@@ -31,6 +31,7 @@ case "\$1" in
             *bindfs*) echo "\$*" >>"$_vm_dir/bindfs" ;;
             *only-upgrade*) echo docker >>"$_vm_dir/upgrades" ;;
             *vmstat*) [ -e "$_vm_dir/oom" ] ;;
+            *zram*) echo zram >>"$_vm_dir/zram" ;;
         esac
         ;;
 esac
@@ -155,13 +156,14 @@ case "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_oom 64)" in
     *) fail "an out-of-memory kill went unreported" ;;
 esac
 is "said once per boot" "" "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_oom 64)"
-echo Stopped >"$_vm_dir/status"
+echo Stopped >"$_vm_dir/status" && rm -f "$_vm_dir/zram"
 _vm_run "$_vm_dir/bin:$PATH" _vm_t_up >/dev/null
 case "$(cat "$_vm_dir/edits" 2>/dev/null)" in
     *"--memory 8 kib-vm") pass "the next start from stopped doubles the VM's memory" ;;
     *) fail "the VM did not grow at its next start" "$(cat "$_vm_dir/edits" 2>/dev/null)" ;;
 esac
 is "then the plan is spent" "no" "$([ -e "$_vm_grow" ] && echo yes || echo no)"
+is "a boot turns on compressed swap, a running VM is left alone" "zram" "$(cat "$_vm_dir/zram")"
 rm -f "$_vm_dir/status"
 _vm_run "$_vm_dir/bin:$PATH" _vm_t_oom 4 >/dev/null
 is "never past half the host's RAM, and never below a size set by hand" "4" "$(cat "$_vm_grow")"

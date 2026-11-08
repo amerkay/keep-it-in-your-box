@@ -28,8 +28,9 @@ If `/dev/kvm` is missing, turn on virtualization (VT-x / AMD-V) in your BIOS. If
 - **One VM, `kib-vm`.** It starts with your first session and stops 10 minutes after the last
   one closes, so a quick reopen skips the boot. Opening and closing projects never restarts it.
 - **4 GiB of memory, more only when needed.** The VM keeps what it has used until it stops, so
-  kib starts it small. If it ever runs out, kib tells you and doubles it from its next start, up
-  to half your RAM.
+  kib starts it small, with compressed swap inside it so a spike slows a box down instead of
+  stopping it. If it still runs out, kib tells you and doubles it from its next start, up to
+  half your RAM.
 - **It stays up to date.** Ubuntu installs security updates, kernel included, in the background;
   Docker updates when the VM stops, the one moment it cuts no session. Both apply at the next start.
 - **The VM mounts your home folder**, once, over virtiofs. The box sees your project only through

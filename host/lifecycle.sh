@@ -485,6 +485,8 @@ kib_cleanup() {
     # `exit`s would abort this trap exactly like the default did. (container-lifecycle.md)
     trap '' INT HUP TERM
     local notes="${_KIB_NOTES:-}" # the launch's, not teardown's own
+    # A killed TUI leaves mouse reporting on and the cursor hidden; every mouse move types codes.
+    [ ! -t 1 ] || printf '\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?25h'
 
     kill "$SLEEP_GUARD_PID" 2>/dev/null || true
 
