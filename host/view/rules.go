@@ -1,8 +1,8 @@
 package main
 
 // `.kibignore` rules: parsed and matched in exactly one place (the spec is
-// tests/fixtures/redaction/rules.json). Unlike the Python it replaces, matching folds case: on a
-// case-insensitive disk `.ENV` opens the real `.env`.
+// tests/fixtures/redaction/rules.json). Matching folds case (fold): on a case-insensitive disk
+// `.ENV` opens the real `.env`.
 
 import (
 	"bufio"
@@ -83,7 +83,7 @@ func ParseRules(lines []string, guard bool) []Rule {
 				r.Anchor = exact
 			}
 		}
-		for _, p := range strings.Split(strings.ToLower(line), "/") {
+		for _, p := range strings.Split(fold(line), "/") {
 			r.parts = append(r.parts, []rune(p))
 		}
 		out = append(out, r)
@@ -108,6 +108,20 @@ func LoadRules(path string, guard bool) ([]Rule, error) {
 	return ParseRules(lines, guard), sc.Err()
 }
 
+// ligatures: the full case folds that spell plain ASCII (U+00DF, U+FB00–FB06).
+var ligatures = strings.NewReplacer("ß", "ss", "ﬀ", "ff", "ﬁ", "fi", "ﬂ", "fl", "ﬃ", "ffi", "ﬄ", "ffl", "ﬅ", "st", "ﬆ", "st")
+
+// fold is as wide as a case-insensitive disk's folding: APFS opens `.vſcode` (long s) as `.vscode`.
+func fold(s string) string {
+	return ligatures.Replace(strings.Map(func(r rune) rune {
+		m := r
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			m = min(m, f)
+		}
+		return unicode.ToLower(m)
+	}, s))
+}
+
 func contains(xs []string, x string) bool {
 	for _, y := range xs {
 		if y == x {
@@ -117,7 +131,7 @@ func contains(xs []string, x string) bool {
 	return false
 }
 
-// matches compares one rule against an ancestor's components (already lower-cased).
+// matches compares one rule against an ancestor's components (already folded).
 func (r *Rule) matches(parts []string, underGit bool) bool {
 	if r.Anchor == bare {
 		return !underGit && fnmatch(parts[len(parts)-1], r.parts[0])
@@ -144,7 +158,7 @@ func (r *Rule) matches(parts []string, underGit bool) bool {
 func Verdict(rules []Rule, rel string) string {
 	// Exact case: bare rules stop inside the real .git only, never a look-alike `.GIT`.
 	underGit := strings.Split(rel, "/")[0] == ".git"
-	parts := strings.Split(strings.ToLower(rel), "/")
+	parts := strings.Split(fold(rel), "/")
 	guard, project, effective := "", "", ""
 	guardAt, optoutAt := -1, -1
 	for i := 1; i <= len(parts); i++ {

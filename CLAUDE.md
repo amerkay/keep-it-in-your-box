@@ -174,8 +174,10 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
 - **The view (`host/view`, Go) is specced by `tests/fixtures/redaction`, for both front ends** —
   change a behaviour there first; `go test` runs in `kib build` (`./dev.sh` runs it where `go` is
   on PATH). Every check lives in the core (`view.go`); `nfs.go` and `fuse.go` only map calls. NFS
-  reopens per WRITE, so the owner may write their own 0444 file (git) and a mirror's size is
-  checked once its writes stop; go-nfs can't serve LINK, so it is refused. gVisor holds files
+  reopens per WRITE, so the owner may write their own 0444 file (git) and a mirror's BYTES are
+  checked once its writes stop (never its size: holes are NULs, which sh skips), before any move
+  of it; go-nfs can't serve LINK, so it is refused. Rules match `fold`ed (APFS opens `.vſcode`
+  as `.vscode`); the VM drops box traffic to the view's port. gVisor holds files
   open, so the VM's client moves a replaced or deleted file aside (`.nfs…`): a git config is
   hard-linked there instead and stays, so git's `config.lock` rename is still checked; any other
   guarded file refuses (`silly`). FUSE (no-VM mode):

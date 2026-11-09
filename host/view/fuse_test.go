@@ -7,6 +7,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -39,6 +40,9 @@ func step(mnt, src string, s map[string]any) any {
 			return or(err, "open")
 		}
 		var werr error
+		if at, ok := s["at"].(float64); ok { // a sparse write: holes before it
+			f.Seek(int64(at), io.SeekStart)
+		}
 		if len(data) > 0 {
 			_, werr = f.Write(data)
 		}

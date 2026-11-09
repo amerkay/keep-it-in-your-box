@@ -45,6 +45,7 @@ func TestDirMoves(t *testing.T) {
 		{".git", "old", true},        // the host's git dir
 		{"fake", ".git", true},       // a replacement for it
 		{"fake", "a/.GIT", true},     // folded
+		{"keys", ".GIT/keys", true},  // into .git on macOS, where bare rules stop
 		{"store", "x", true},         // a git dir by its layout
 		{"keys", ".git/keys", true},  // bare rules (*.pem) stop inside .git
 		{".git/x", "x", true},        // and start outside it
@@ -69,6 +70,8 @@ func TestPlantsGitdir(t *testing.T) {
 		{[]string{"d/HEAD", "d/refs/", "d/hooks/"}, "d/objects", false},  // git init --bare
 		{[]string{"d/objects/", "d/hooks/x"}, "d/HEAD", false},           // refs still missing
 		{[]string{"d/objects/", "d/refs/", "d/hooks/x"}, "d/head", true}, // folded
+		{[]string{"d/HEAD", "d/refs/", "d/hooks/x"}, "d/objecſ", false},  // not a marker
+		{[]string{"d/HEAD", "d/refs/", "d/hooks/x"}, "d/objectſ", true},  // APFS's objects
 		{[]string{"d/objects/", "d/refs/", "d/hooks/x"}, "d/README", false},
 		{[]string{"d/HEAD", "d/objects/", "d/refs/", "d/hooks/x"}, "d/HEAD", false}, // git switch
 	} {
@@ -161,5 +164,24 @@ func TestGitConfigWriteAfterSillyRename(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(cfg); !strings.Contains(string(b), "name = x") {
 		t.Errorf("the config did not survive: %q", b)
+	}
+}
+
+// APFS opens a look-alike as the real file, so git's own paths are matched folded too.
+func TestGitPathsFolded(t *testing.T) {
+	v := scratchView(t, "")
+	for _, p := range []string{".git/hookſ/pre-commit", ".GIT/config", ".git/conﬁg"} {
+		if !v.protected(p) {
+			t.Errorf("%s is not protected", p)
+		}
+	}
+}
+
+// NFS handles are paths: a symlink swapped in under one must not lead stat out of the project.
+func TestStatStaysBeneath(t *testing.T) {
+	v := scratchView(t, "")
+	os.Symlink("/", filepath.Join(v.src, "a"))
+	if _, e := v.stat("a/etc"); e == 0 {
+		t.Error("stat followed a symlink out of the project")
 	}
 }

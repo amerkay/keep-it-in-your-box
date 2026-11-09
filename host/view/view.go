@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -33,6 +34,7 @@ const (
 		syscall.O_TRUNC
 	verdictMax = 1 << 16
 	renderKeep = 64
+	mirrorMax  = 1 << 26 // a guarded file bigger than this is never a valid mirror
 	// renameNoReplace is Linux's RENAME_NOREPLACE, the one rename flag FUSE may pass.
 	renameNoReplace = 1
 )
@@ -49,9 +51,15 @@ const (
 	absent      // masked, but not on the host: ENOENT on read, still refused on write
 )
 
-// mirrorGrace: NFS has no close, so a mirror is checked once its writes stop this long. A var
-// only so a test can shorten it.
+// mirrorGrace: NFS has no close, so a mirror is checked once its writes stop this long, or
+// 5× that after its first write, so rewriting a short copy cannot keep it alive. A var only so a
+// test can shorten it.
 var mirrorGrace = 2 * time.Second
+
+type pending struct {
+	t     *time.Timer
+	first time.Time
+}
 
 // rules is one rule set and its verdict memo, swapped whole on reload so a lookup racing the
 // swap can never store an old verdict under the new rules.
@@ -75,7 +83,7 @@ type view struct {
 	renderMu   sync.Mutex
 	renders    map[renderKey][]byte
 	mirrorMu   sync.Mutex
-	mirrors    map[string]*time.Timer
+	mirrors    map[string]*pending
 	sillies    []string // every silly name made, removed at exit
 }
 
@@ -100,7 +108,7 @@ func newView(src string, rules []Rule) (*view, error) {
 	if err != nil {
 		return nil, err
 	}
-	v := &view{src: real, srcfd: fd, renders: map[renderKey][]byte{}, mirrors: map[string]*time.Timer{}}
+	v := &view{src: real, srcfd: fd, renders: map[renderKey][]byte{}, mirrors: map[string]*pending{}}
 	v.setRules(rules)
 	return v, nil
 }
@@ -142,12 +150,12 @@ func (v *view) readAt(rel string, max int64) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(f, max))
 }
 
-func (v *view) lstatAt(rel string) (unix.Stat_t, error) {
+func (v *view) lstatAt(rel string) (syscall.Stat_t, error) {
 	var st unix.Stat_t
 	err := v.inParent(rel, func(dfd int, name string) error {
 		return unix.Fstatat(dfd, name, &st, unix.AT_SYMLINK_NOFOLLOW)
 	})
-	return st, err
+	return *(*syscall.Stat_t)(unsafe.Pointer(&st)), err // one struct stat, under two Go names
 }
 
 // verdict is memoised: within one rule set it is a pure function of the path.
@@ -207,7 +215,7 @@ func (v *view) classify(rel string) (kind, string) {
 	return pass, ""
 }
 
-func lowerParts(rel string) []string { return strings.Split(strings.ToLower(rel), "/") }
+func lowerParts(rel string) []string { return strings.Split(fold(rel), "/") }
 
 func (v *view) isGitdir(rel string) bool {
 	for _, m := range gitdirMarkers {
@@ -347,7 +355,7 @@ func (v *view) denyDirMove(old, dst string) syscall.Errno {
 	o, d := lowerParts(old), lowerParts(dst)
 	if o[len(o)-1] == ".git" || d[len(d)-1] == ".git" || v.isGitdir(old) ||
 		throughRule(rules, o) || throughRule(rules, d) ||
-		(strings.Split(old, "/")[0] == ".git") != (strings.Split(dst, "/")[0] == ".git") {
+		(o[0] == ".git") != (d[0] == ".git") { // folded: on macOS `.GIT` is the real .git
 		logf("kib-view: refusing to move directory %s to %s (a guard rule spans it)", old, dst)
 		return refused
 	}
@@ -360,7 +368,7 @@ func (v *view) plantsGitdir(rel string) bool {
 	base, d := filepath.Base(rel), filepath.Dir(rel)
 	found := false
 	for _, m := range gitdirMarkers {
-		if strings.EqualFold(m, base) {
+		if fold(m) == fold(base) {
 			found = true
 		} else if _, err := v.lstatAt(filepath.Join(d, m)); err != nil {
 			return false
@@ -462,12 +470,13 @@ func toErrno(err error) syscall.Errno {
 // real inode, so a reload that masks a file makes it a new one to any cache.
 func (v *view) stat(rel string) (syscall.Stat_t, syscall.Errno) {
 	k, root := v.classify(rel)
-	var st syscall.Stat_t
 	statPath := rel
 	if k == file || k == dir || k == inside {
 		statPath = root
 	}
-	if err := syscall.Lstat(v.real(statPath), &st); err != nil {
+	// Beneath --src: a handle's path may have had a symlink swapped in since (NFS handles are paths).
+	st, err := v.lstatAt(statPath)
+	if err != nil {
 		return st, toErrno(err)
 	}
 	switch k {
@@ -581,17 +590,17 @@ func (v *view) anchorBytes(rel string, off int64, size int) []byte {
 	return buf[:max(got, 0)]
 }
 
-// wholeMirror removes a mirror whose size is not its anchor's: a short copy matches byte for
-// byte as far as it goes, and a truncated script is a different script. The unlink is the
-// enforcement; the errno is a courtesy.
+// wholeMirror removes a mirror that is not its anchor's bytes: a short copy matches as far as it
+// goes, and a sparse one is NULs between them, which sh skips and runs the rest. The unlink is
+// the enforcement; the errno is a courtesy.
 func (v *view) wholeMirror(rel string, h *handle) syscall.Errno {
 	if !h.mirroring || !v.protected(rel) {
 		return 0
 	}
 	if a := v.mirrorAnchor(rel); a != "" {
-		got, err1 := v.lstatAt(rel)
-		want, err2 := v.lstatAt(a)
-		if err1 == nil && err2 == nil && got.Size == want.Size {
+		got, err1 := v.readAt(rel, mirrorMax)
+		want, err2 := v.readAt(a, mirrorMax)
+		if err1 == nil && err2 == nil && len(want) < mirrorMax && bytes.Equal(got, want) {
 			return 0
 		}
 	}
@@ -601,20 +610,41 @@ func (v *view) wholeMirror(rel string, h *handle) syscall.Errno {
 	return refused
 }
 
-// mirrorLater runs wholeMirror once rel's writes have stopped for mirrorGrace.
+// mirrorLater runs wholeMirror on rel once its writes stop (mirrorGrace).
 func (v *view) mirrorLater(rel string) {
 	v.mirrorMu.Lock()
 	defer v.mirrorMu.Unlock()
-	if t := v.mirrors[rel]; t != nil {
-		t.Reset(mirrorGrace)
+	if p := v.mirrors[rel]; p != nil {
+		if time.Since(p.first) < 5*mirrorGrace {
+			p.t.Reset(mirrorGrace)
+		}
 		return
 	}
-	v.mirrors[rel] = time.AfterFunc(mirrorGrace, func() {
+	v.mirrors[rel] = &pending{first: time.Now(), t: time.AfterFunc(mirrorGrace, func() {
 		v.mirrorMu.Lock()
 		delete(v.mirrors, rel)
 		v.mirrorMu.Unlock()
 		v.wholeMirror(rel, &handle{mirroring: true})
-	})
+	})}
+}
+
+// settle checks every mirror pending at or under rel ("" is all) now: a move would strand its
+// timer at a path that no longer holds it, and the short copy would stay.
+func (v *view) settle(rel string) {
+	f := fold(rel)
+	var due []string
+	v.mirrorMu.Lock()
+	for p, m := range v.mirrors {
+		if fp := fold(p); rel == "" || fp == f || strings.HasPrefix(fp, f+"/") {
+			m.t.Stop()
+			delete(v.mirrors, p)
+			due = append(due, p)
+		}
+	}
+	v.mirrorMu.Unlock()
+	for _, p := range due {
+		v.wholeMirror(p, &handle{mirroring: true})
+	}
 }
 
 // truncate through fd, or rel opened for it. No mirror: a standalone truncate can only make a
@@ -723,6 +753,7 @@ func (v *view) rename(old, dst string, flags uint32) syscall.Errno {
 	} else if errno := v.denyNew(dst, false); errno != 0 {
 		return errno
 	}
+	v.settle(old)
 	return toErrno(v.inParent(old, func(odfd int, oname string) error {
 		return v.inParent(dst, func(ddfd int, dname string) error {
 			return renameAt(odfd, oname, ddfd, dname, uint(flags))

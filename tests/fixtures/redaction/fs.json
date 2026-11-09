@@ -919,6 +919,30 @@
   }
  },
  {
+  "name": "a sparse mirror is removed at close",
+  "project": "",
+  "tree": {
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   ".envrc": "export FOO=1\n",
+   "wt/": ""
+  },
+  "steps": [
+   {
+    "op": "put",
+    "path": "wt/.envrc",
+    "data": "\n",
+    "at": 12,
+    "want": "EPERM@close"
+   }
+  ],
+  "after": {
+   ".envrc": "export FOO=1\n",
+   ".vscode/": "",
+   ".vscode/settings.json": "{\"a\": 1}\n",
+   "wt/": ""
+  }
+ },
+ {
   "name": "a long mirror is refused",
   "project": "",
   "tree": {

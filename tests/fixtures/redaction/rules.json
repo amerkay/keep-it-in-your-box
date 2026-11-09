@@ -577,6 +577,27 @@
    "note": "case-sensitive here, so a case-insensitive disk opens the real file; Go must guard it"
   },
   {
+   "project": "",
+   "path": ".vſcode/tasks.json",
+   "guard": true,
+   "want": null,
+   "note": "APFS folds these to ASCII, so a look-alike opens the real file; Go must guard it"
+  },
+  {
+   "project": "",
+   "path": ".githooKſ/pre-commit",
+   "guard": true,
+   "want": null,
+   "note": "APFS folds these to ASCII, so a look-alike opens the real file; Go must guard it"
+  },
+  {
+   "project": "",
+   "path": ".mvn/jvm.conﬁg",
+   "guard": true,
+   "want": null,
+   "note": "APFS folds these to ASCII, so a look-alike opens the real file; Go must guard it"
+  },
+  {
    "project": "!foo\nfoo",
    "path": "foo",
    "guard": false,

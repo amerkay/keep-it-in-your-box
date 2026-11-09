@@ -171,6 +171,37 @@ is "no unredacted copy of the project in this container" "absent" \
 is "the view's NFS source and its secret are not visible here" "" \
     "$(grep -hoE '[0-9.]+:/[0-9a-f]{32}' /proc/self/mountinfo /proc/self/mounts 2>/dev/null)"
 
+# A box reaches the host's loopback, so the VM drops box traffic to each view's port
+# (vm_view_mount): go-xdr allocates whatever length a request declares. Scans the ephemeral range.
+if [ "${KIB_ROOTLESS:-0}" = 1 ]; then
+    skip "no NFS view answers from the box" "no-VM mode: the view is a FUSE mount, not a port"
+else
+    is "no NFS view answers from the box" "" "$(
+        python3 - <<'PY' 2>&1
+import asyncio, socket, struct
+host = socket.gethostbyname("host.docker.internal")
+null = struct.pack(">11I", 0x80000028, 1, 0, 2, 100005, 3, 0, 0, 0, 0, 0)  # MOUNT NULL
+async def probe(port, sem):
+    async with sem:
+        try:
+            r, w = await asyncio.wait_for(asyncio.open_connection(host, port), 0.5)
+        except Exception:
+            return
+        try:
+            w.write(null)
+            if (await asyncio.wait_for(r.read(4), 0.5))[:1] == b"\x80":
+                print(port, end=" ")
+        except Exception:
+            pass
+        w.close()
+async def main():
+    sem = asyncio.Semaphore(500)
+    await asyncio.gather(*(probe(p, sem) for p in range(32768, 65536)))
+asyncio.run(main())
+PY
+    )"
+fi
+
 # A mode on a file the agent owns must gate it: gVisor checks it, since the view runs as the host
 # user. A chmod that silently failed leaves the file MORE permissive, so each deny fails loudly.
 _perm="$PWD/.kib-perm-probe.$$"

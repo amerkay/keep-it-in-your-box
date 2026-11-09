@@ -268,20 +268,25 @@ vm_resolv() { # <file>
 # sync: a refused write fails the write(2), not a later flush whose error gVisor may drop. soft: a
 # dead view errors in the box instead of hanging it. actimeo=1: an edit is seen at the next open
 # anyway (close-to-open), a stat-only watcher within a second. nolock: locks stay in the VM,
-# which serves one box per project. nfs-common once, like bindfs.
+# which serves one box per project. nfs-common once, like bindfs. Boxes reach the host's loopback
+# too, so a raw PREROUTING drop keeps every box off the view's port (go-xdr allocates a declared
+# length before reading it); VM root's own traffic never passes PREROUTING.
 VIEW_NFS_OPTS="vers=3,proto=tcp,mountproto=tcp,nolock,sync,actimeo=1,soft,timeo=10,retrans=2"
 vm_view_mount() { # <mountpoint> <port> <secret>
     # shellcheck disable=SC2016 # the VM's shell expands them
     vm_root sh -c 'i="apt-get install -y -q nfs-common"
         command -v mount.nfs >/dev/null || $i || { apt-get update -q && $i; } || exit 1
         umount -l "$1" 2>/dev/null
+        iptables -t raw -I PREROUTING -d "$4" -p tcp --dport "$3" -j DROP || exit 1
         mkdir -p "$1" && mount -t nfs -o "$2,port=$3,mountport=$3" "$4:/$5" "$1"' \
         _ "$1" "$VIEW_NFS_OPTS" "$2" "$LIMA_HOST_IP" "$3" >>"$KIB_STATE_ROOT/vm.log" 2>&1
 }
 vm_view_unmount() { # <mountpoint>: the VM's NFS mount, or rootless's FUSE one
     # shellcheck disable=SC2016 # the engine's shell expands it
-    _in_engine sh -c 'umount -l "$1" 2>/dev/null || fusermount3 -u -z "$1" 2>/dev/null
-        rmdir "$1" 2>/dev/null; true' _ "$1" >/dev/null 2>&1 || true
+    _in_engine sh -c 'p=$(sed -n "s|^[^ ]* $1 nfs [^ ]*,port=\([0-9]*\).*|\1|p" /proc/mounts)
+        [ -z "$p" ] || iptables -t raw -D PREROUTING -d "$2" -p tcp --dport "$p" -j DROP
+        umount -l "$1" 2>/dev/null || fusermount3 -u -z "$1" 2>/dev/null
+        rmdir "$1" 2>/dev/null; true' _ "$1" "$LIMA_HOST_IP" >/dev/null 2>&1 || true
 }
 vm_view_has() { # <mountpoint> <./a/b…>: those whose parent the view shows, without the ./
     # shellcheck disable=SC2016 # the engine's shell expands them

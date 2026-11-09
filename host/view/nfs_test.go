@@ -37,6 +37,9 @@ func nfsStep(f *nfsFS, src string, s map[string]any) any {
 			return result(err, "open")
 		}
 		var werr error
+		if at, ok := s["at"].(float64); ok { // a sparse write: holes before it
+			fh.Seek(int64(at), io.SeekStart)
+		}
 		if len(data) > 0 {
 			_, werr = fh.Write(data)
 		}
@@ -122,18 +125,6 @@ func resolve(f *nfsFS, p string) string {
 	return strings.Join(parts, "/")
 }
 
-// flushMirrors runs every pending mirror check now, as mirrorGrace would.
-func flushMirrors(v *view) {
-	v.mirrorMu.Lock()
-	pending := v.mirrors
-	v.mirrors = map[string]*time.Timer{}
-	v.mirrorMu.Unlock()
-	for rel, t := range pending {
-		t.Stop()
-		v.wholeMirror(rel, &handle{mirroring: true})
-	}
-}
-
 func TestNFSSpec(t *testing.T) {
 	forEachCase(t, func(t *testing.T, c fsCase, src string, rules []Rule) {
 		v, err := newView(src, rules)
@@ -148,7 +139,7 @@ func TestNFSSpec(t *testing.T) {
 				t.Errorf("%s %s: got %s, want %s", s["op"], s["path"], got, want)
 			}
 		}
-		flushMirrors(v)
+		v.settle("")
 	})
 }
 
@@ -260,6 +251,43 @@ func TestNFSShortMirrorRemoved(t *testing.T) {
 		time.Sleep(4 * mirrorGrace)
 		if got := lexists(filepath.Join(src, rel)); got != c.kept {
 			t.Errorf("%d bytes of a %d-byte anchor: kept=%v, want %v", len(c.data), len(anchor), got, c.kept)
+		}
+	}
+}
+
+// A short copy may not outlive its check: not by moving its directory before the timer fires
+// (the timer is keyed by path), nor by rewriting it to keep resetting the timer.
+func TestNFSShortMirrorCannotEscape(t *testing.T) {
+	defer func(g time.Duration) { mirrorGrace = g }(mirrorGrace)
+	mirrorGrace = 50 * time.Millisecond
+	for _, escape := range []string{"move", "rewrite"} {
+		src := t.TempDir()
+		os.MkdirAll(filepath.Join(src, ".vscode"), 0o755)
+		os.MkdirAll(filepath.Join(src, "wt/.vscode"), 0o755)
+		os.WriteFile(filepath.Join(src, ".vscode/settings.json"), []byte("{\"a\": 1}\n"), 0o644)
+		v, _ := newView(src, guardRules(t))
+		f := &nfsFS{v: v}
+		put := func(flag int) { // a rewrite is an NFS WRITE: it never creates
+			if fh, err := f.OpenFile("wt/.vscode/settings.json", flag, 0o644); err == nil {
+				fh.Write([]byte("{"))
+				fh.Close()
+			}
+		}
+		put(os.O_RDWR | os.O_CREATE)
+		left := "wt2/.vscode/settings.json"
+		if escape == "move" {
+			if err := f.Rename("wt", "wt2"); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			left = "wt/.vscode/settings.json"
+			for end := time.Now().Add(8 * mirrorGrace); time.Now().Before(end); {
+				put(os.O_RDWR)
+				time.Sleep(mirrorGrace / 2)
+			}
+		}
+		if lexists(filepath.Join(src, left)) {
+			t.Errorf("%s: the short copy survived at %s", escape, left)
 		}
 	}
 }

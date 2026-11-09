@@ -68,8 +68,8 @@ func TestRules(t *testing.T) {
 		if c.Want != nil {
 			want = *c.Want
 		}
-		if c.Note != "" { // case folding: what the lower-cased path gets
-			want = Verdict(rules, strings.ToLower(c.Path))
+		if c.Note != "" { // case folding: what the folded path gets
+			want = Verdict(rules, fold(c.Path))
 			if want == "" {
 				t.Errorf("%q under %q: a case note on a path no rule covers", c.Path, c.Project)
 			}
