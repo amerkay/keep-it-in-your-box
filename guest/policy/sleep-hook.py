@@ -10,7 +10,6 @@ concurrent hooks run in parallel, and create/unlink are atomic where a read-modi
 shared counter would lose updates.
 
     <root>/<tag>/live              hooks are working at all (SessionStart)
-    <root>/<tag>/sid.<id>          Claude's session id, so a VM restart can --resume it
     <root>/<tag>/turn              a turn is in flight (UserPromptSubmit → Stop)
     <root>/<tag>/wait              blocked on the USER (question, permission prompt)
     <root>/<tag>/agents/<id>       one live subagent (SubagentStart → SubagentStop)
@@ -40,7 +39,6 @@ import glob
 import json
 import math
 import os
-import re
 import shutil
 import sys
 
@@ -48,7 +46,6 @@ ROOT = "/run/kib/sleep"  # kib's own bind; the container path is a constant, not
 DEFAULT_TOOL_MS = 120_000  # Claude's own default tool timeout, for a call that declares none
 MAX_TOOL_MIN = 15  # cap on a declared timeout, so a silly one cannot pin the machine
 BLOCKING_TOOLS = ("AskUserQuestion", "ExitPlanMode")  # the tools that wait on a human
-SESSION_ID = re.compile(r"[0-9a-f-]{36}")
 
 
 def _session_dir() -> str | None:
@@ -142,12 +139,6 @@ def main() -> None:
 
     if event == "SessionStart":
         _touch(os.path.join(base, "live"))
-        # A name, never content: the host reads nothing the box wrote. /clear starts a new id.
-        for old in glob.glob(os.path.join(base, "sid.*")):
-            _rm(old)
-        sid = str(payload.get("session_id", ""))
-        if SESSION_ID.fullmatch(sid):
-            _touch(os.path.join(base, "sid." + sid))
     elif event == "UserPromptSubmit":
         _touch(turn)
         _rm(os.path.join(base, "wait"))  # a new prompt means the previous wait was answered

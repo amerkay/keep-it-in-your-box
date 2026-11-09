@@ -71,6 +71,12 @@ BUILD_LOCK="$KIB_BUILD_DIR/build.lock"
 BUILD_LOG="$KIB_BUILD_DIR/build.log"
 BUILD_PID="$KIB_BUILD_DIR/build.pid"
 
+# Host-only, outside every share of kib's VM: the redaction view's binary and each project's view
+# state (its staged rules among them). VM root could otherwise swap the binary the host runs, or
+# the rules the view serves it.
+KIB_HOST_ONLY="${XDG_DATA_HOME:-$HOME/.local/share}/keep-it-in-your-box"
+KIB_VIEW="$KIB_HOST_ONLY/kib-view"
+
 # ── Per-project sticky tables ────────────────────────────────────
 # One `<project path>=<value>` line per project in a flat file, last wins. Beside the host config
 # and NEVER in the project: a box-writable table here would let a session choose the next

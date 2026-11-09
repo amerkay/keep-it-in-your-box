@@ -6,11 +6,11 @@
 # would let the box un-redact a file by writing its own `!.env`; those wait for the next attach,
 # which prompts. (docs/design-notes/redaction-config-guard.md)
 #
-# Usage: rules-watch.sh <patterns-state> <fuse-container>, cwd = the PROJECT — inherited
-# through detach_pgrp, and where _reload_rules reads the rule file from.
+# Usage: rules-watch.sh <view-state>, cwd = the PROJECT — inherited through detach_pgrp, and
+# where _reload_rules reads the rule file from.
 
-PATTERNS_STATE="${1:?Usage: rules-watch.sh <patterns-state> <fuse-container>, cwd = project}"
-FUSE_CNAME="${2:?Usage: rules-watch.sh <patterns-state> <fuse-container>, cwd = project}"
+VIEW_STATE="${1:?Usage: rules-watch.sh <view-state>, cwd = project}"
+PATTERNS_STATE="$VIEW_STATE.patterns"
 POLL=2
 
 # An EXECUTED host script gets a fresh environment, so KIB_ROOT comes from $0, never from it.
@@ -37,17 +37,16 @@ _rule_text() {
 
 _rule_text
 seen="$RULE_TEXT"
-exec >/dev/null 2>&1 # nothing reads a detached daemon; the sidecar logs each reload it does
+exec >/dev/null 2>&1 # nothing reads a detached daemon; the view logs each reload it does
 
 while sleep "$POLL"; do
     # teardown removes the staged copy last, so its absence means the container is gone.
     [ -e "$PATTERNS_STATE" ] || exit 0
     _rule_text
     [ "$RULE_TEXT" = "$seen" ] && continue
-    # Recorded either way: a loosening edit is answered at the next attach, and re-running the
-    # gate every 2s would `docker exec` for the life of the container.
+    # Recorded either way: a loosening edit is answered at the next attach.
     seen="$RULE_TEXT"
-    if _rules tightens /kib-patterns - >/dev/null 2>&1; then
+    if _rules tightens "$PATTERNS_STATE" - >/dev/null 2>&1; then
         _reload_rules "$PATTERNS_STATE" "it redacts strictly more"
     fi
 done

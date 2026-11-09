@@ -22,19 +22,14 @@ everything else calls its shims or tests `is_macos`.
 
 ## Redaction and container topology
 
-**The topology itself does not differ.** Both platforms serve the redacted view from a FUSE
-**sidecar** and propagate it into the agent's container over `$PWD` (`:rslave`). Only the sidecar
-holds `SYS_ADMIN`, `/dev/fuse` and `apparmor=unconfined`; the agent's container is capless at
-creation. What differs is only *where the propagation root lives*, and how it is reached:
+**The topology does not differ (2026-11-09).** On both, `kib-view` runs on the host and serves the redacted view over NFS; VM root mounts it at `/mnt/kib/<hash>` and the box binds that at `$PWD`. No container holds `SYS_ADMIN` or `/dev/fuse`, and nothing uses mount propagation. The rows that still differ:
 
 | Behaviour | Ubuntu / Linux | macOS | Owner | Proven |
 |---|---|---|---|---|
-| Propagation root | `$KIB_STATE_ROOT/fuse.<hash>` — systemd makes `/` rshared, so it propagates already | `/mnt/kib/fuse.<hash>` inside kib's VM — VM-internal, never a Lima mount; not `/run`, which Ubuntu's `fusermount3` AppArmor profile denies | `microvm.md` | ✅ |
-| Preparing / destroying that root, and unmounting | Plain `mkdir`/`rm` as you; a `/proc/self/mounts` read and `fusermount3` | `limactl shell` as root in the VM — the Mac cannot see the path at all. Deliberately **not** used on Linux, where it would target the real machine | `macos.md` | ✅ |
-| Mode bits inside the project view | **Enforced** — the mount carries `default_permissions`, so the kernel checks owner/mode against the caller rather than the server | **Enforced the same way**, and this is the *only* place mode bits bite on macOS: outside the view `fakeowner` records a mode but ignores it in `access(2)` | `macos.md` | ✅ |
-| Ownership in the backing store | Already the agent's, so the remap is identity | `fakeowner` reports every bind as `root:root`; without the remap git refuses the whole tree as "dubious ownership" | `macos.md` | ✅ |
-| AppArmor | `docker-default` on the agent's container — its `deny mount,` costs nothing now the sidecar holds the mount | Lima's Ubuntu VM has AppArmor, so `docker-default` should apply (Docker Desktop's LinuxKit had none; the suite skips the label assertion when the kernel has no AppArmor) | `macos.md` | ⏳ |
-| Sidecars per project | Up to 3 (FUSE, Wayland guard, broker) + main | Up to 2 (FUSE, broker) + main | `container-lifecycle.md` | — |
+| Mode bits inside the project view | The view reports the host's real owner and mode over NFS; the owner may still write their own read-only file, as git needs (`ownerWrite`) | Same | `PLAN_NFS_VIEW.md` | ✅ |
+| Ownership in the project view | The view reports the host's real uid over NFS, so no remap | Same (the VM's Linux NFS client, not virtiofs) | `PLAN_NFS_VIEW.md` | ⏳ |
+| AppArmor | `docker-default` on the agent's container — its `deny mount,` costs nothing, since no container mounts anything | Lima's Ubuntu VM has AppArmor, so `docker-default` should apply (Docker Desktop's LinuxKit had none; the suite skips the label assertion when the kernel has no AppArmor) | `macos.md` | ⏳ |
+| Sidecars per project | Up to 2 (Wayland guard, broker) + main | 1 (broker) + main | `container-lifecycle.md` | — |
 
 ## Clipboard
 
@@ -83,6 +78,8 @@ creation. What differs is only *where the propagation root lives*, and how it is
 **Removed 2026-11-07:** kib always uses its VM's rootful Docker (`microvm.md`). Rootless Docker does
 run gVisor, but only with `--ignore-cgroups` (measured 2026-11-09, `PLAN_NFS_VIEW.md` Test 11).
 Kept for the record: a no-VM mode would start from these findings.
+
+**Back 2026-11-09 as the opt-in no-VM mode** (`engine = rootless`, `docs/vm.md`). It reuses these findings: `box_uid` 0, `IS_SANDBOX=1`, no cap add-backs, no gosu, the entrypoint's `KIB_ROOTLESS` branches. gVisor runs with `--ignore-cgroups`, and the view is a host FUSE mount the box binds (no `allow_other`), so the propagation rows below no longer apply.
 
 Supported, and it is an **engine** difference rather than an OS one — `is_rootless` sits beside
 `is_macos` in `host/portable.sh`, memoised off one `docker info` per launch. Measured by a
@@ -139,7 +136,7 @@ and its chowns target ids it already owns, so they need no capability.
 
 ## Identical on both platforms
 
-`.kibignore` rules and the FUSE server/matcher behind them · the host-executed-config guard
+`.kibignore` rules and the host view/matcher (`kib-view`) behind them · the host-executed-config guard
 (`.git/config`, hooks, `.vscode/`, `.devcontainer/`, `.envrc`) · the git audit gate at cold
 start, teardown and `kib audit` · per-launch config assembly and subtree merge-out · the credential
 broker and MCP interception · the verb CLI · `cap-drop=ALL` + `no-new-privileges` + seccomp on the
@@ -175,7 +172,7 @@ platform facts, not topology facts. All are fixed and regression-guarded.
 |---|---|---|
 | Every git command refuses the repo; `dev.sh` finds no files | `fakeowner` reports the project `root:root` | `regressions.sh` (`--uid`/`--gid`), `test_fuse.py` |
 | The synthetic `.credentials.json` is writable | `chmod 0400` is a no-op on a bind | `regressions.sh` (`:ro` by mount) |
-| Two sets of `projects/`, `.claude.json`, `↑` history | box path ≠ host path while the view was mounted in-container; the sidecar's `$PWD` bind makes them one key again, and the re-keying argument is gone | `wiring.sh`, `test_config_scope.py` |
+| Two sets of `projects/`, `.claude.json`, `↑` history | box path ≠ host path while the view was mounted in-container; the box's `$PWD` bind makes them one key again, and the re-keying argument is gone | `wiring.sh`, `test_config_scope.py` |
 | No `commands/` in the box | the merge farm returned early with no shared source | — (entrypoint) |
 | 3 `lock_fd` failures + 2 false passes | the shim suite used GNU `flock(1)` as its own oracle | `portability.sh` now holds `shims.sh` to the contract |
 | AppArmor assertion cannot pass | LinuxKit ships no AppArmor | `security-test.sh` skips when the label is empty |

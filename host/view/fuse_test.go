@@ -1,10 +1,11 @@
+//go:build linux
+
 package main
 
-// tests/fixtures/redaction/fs.json on a real mount. Needs /dev/fuse (and fusermount3 unless
+// tests/fixtures/redaction/fs.json on a real FUSE mount. Needs /dev/fuse (and fusermount3 unless
 // root): skipped without it, unless KIB_FUSE_TESTS=1 (CI) makes that a failure.
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,31 +17,6 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 )
 
-type fsCase struct {
-	Name, Project string
-	Tree          map[string]string
-	Drop          []string
-	Steps         []map[string]any
-	After         map[string]string
-}
-
-func errName(err error) string {
-	var e syscall.Errno
-	if errors.As(err, &e) {
-		for _, n := range []syscall.Errno{syscall.EPERM, syscall.ENOENT, syscall.EACCES,
-			syscall.EEXIST, syscall.ENOTDIR, syscall.EISDIR, syscall.EINVAL,
-			syscall.ENOTEMPTY, syscall.EXDEV, syscall.EBADF, syscall.ELOOP} {
-			if e == n {
-				return map[syscall.Errno]string{syscall.EPERM: "EPERM", syscall.ENOENT: "ENOENT",
-					syscall.EACCES: "EACCES", syscall.EEXIST: "EEXIST", syscall.ENOTDIR: "ENOTDIR",
-					syscall.EISDIR: "EISDIR", syscall.EINVAL: "EINVAL", syscall.ENOTEMPTY: "ENOTEMPTY",
-					syscall.EXDEV: "EXDEV", syscall.EBADF: "EBADF", syscall.ELOOP: "ELOOP"}[n]
-			}
-		}
-	}
-	return err.Error()
-}
-
 func step(mnt, src string, s map[string]any) any {
 	path := s["path"].(string)
 	p := filepath.Join(mnt, path)
@@ -48,15 +24,7 @@ func step(mnt, src string, s map[string]any) any {
 		_ = os.MkdirAll(parent, 0o755)
 	}
 	to, _ := s["to"].(string)
-	or := func(err error, phase string) any {
-		if err == nil {
-			return "OK"
-		}
-		if phase != "" {
-			return errName(err) + "@" + phase
-		}
-		return errName(err)
-	}
+	or := result
 	switch s["op"] {
 	case "put":
 		data := []byte("x\n")
@@ -103,13 +71,7 @@ func step(mnt, src string, s map[string]any) any {
 		if err != nil {
 			return or(err, "")
 		}
-		typ, size := "file", any(st.Size())
-		if st.IsDir() {
-			typ, size = "dir", nil
-		} else if st.Mode()&os.ModeSymlink != 0 {
-			typ, size = "symlink", nil
-		}
-		return map[string]any{"type": typ, "perm": fmt.Sprintf("0o%o", st.Mode().Perm()), "size": size}
+		return statResult(st)
 	case "readdir":
 		ents, err := os.ReadDir(p)
 		if err != nil {
@@ -138,40 +100,16 @@ func step(mnt, src string, s map[string]any) any {
 	return "unknown op"
 }
 
-func snapshot(src string) map[string]string {
-	out := map[string]string{}
-	filepath.Walk(src, func(p string, info os.FileInfo, err error) error {
-		rel, _ := filepath.Rel(src, p)
-		switch {
-		case err != nil || rel == ".":
-		case info.Mode()&os.ModeSymlink != 0:
-			t, _ := os.Readlink(p)
-			out[rel] = "-> " + t
-		case info.IsDir():
-			out[rel+"/"] = ""
-		default:
-			b, _ := os.ReadFile(p)
-			if s := string(b); strings.ToValidUTF8(s, "�") == s {
-				out[rel] = s
-			} else {
-				out[rel] = "hex:" + fmt.Sprintf("%x", b)
-			}
-		}
-		return nil
-	})
-	return out
-}
-
 func mount(t *testing.T, src string, rules []Rule) (string, *view) {
 	t.Helper()
 	mnt := t.TempDir()
-	v, err := newView(src, rules, -1, -1)
+	v, err := newView(src, rules)
 	if err != nil {
 		t.Fatal(err)
 	}
-	opts := mountOptions(false)
+	opts := mountOptions()
 	opts.DirectMount = true // as root (a container); go-fuse falls back to fusermount3
-	server, err := fs.Mount(mnt, v.root, opts)
+	server, err := fs.Mount(mnt, &node{v: v}, opts)
 	if err != nil {
 		if os.Getenv("KIB_FUSE_TESTS") == "1" {
 			t.Fatalf("mount: %v", err)
@@ -183,51 +121,15 @@ func mount(t *testing.T, src string, rules []Rule) (string, *view) {
 }
 
 func TestMount(t *testing.T) {
-	var cases []fsCase
-	readJSON(t, "fs.json", &cases)
-	if len(cases) < 30 {
-		t.Fatal("fs.json did not load")
-	}
-	guard := guardRules(t)
-	for _, c := range cases {
-		t.Run(c.Name, func(t *testing.T) {
-			src := t.TempDir()
-			for rel, text := range c.Tree {
-				full := filepath.Join(src, rel)
-				if strings.HasSuffix(rel, "/") {
-					os.MkdirAll(full, 0o755)
-					continue
-				}
-				os.MkdirAll(filepath.Dir(full), 0o755)
-				os.WriteFile(full, []byte(text), 0o644)
+	forEachCase(t, func(t *testing.T, c fsCase, src string, rules []Rule) {
+		mnt, v := mount(t, src, rules)
+		for _, s := range c.Steps {
+			got, want := fmt.Sprint(step(mnt, src, s)), fmt.Sprint(s["want"])
+			if got != want && !kernelRefused(got, want) && !unreachable(v, s["path"].(string), got) {
+				t.Errorf("%s %s: got %s, want %s", s["op"], s["path"], got, want)
 			}
-			for _, rel := range c.Drop {
-				os.Remove(filepath.Join(src, rel))
-			}
-			mnt, v := mount(t, src, append(slices.Clone(guard), ParseRules(lines(c.Project), false)...))
-			for _, s := range c.Steps {
-				got, want := fmt.Sprint(step(mnt, src, s)), fmt.Sprint(s["want"])
-				if got != want && !kernelRefused(got, want) && !unreachable(v, s["path"].(string), got) {
-					t.Errorf("%s %s: got %s, want %s", s["op"], s["path"], got, want)
-				}
-			}
-			if got := snapshot(src); !mapsEqual(got, c.After) {
-				t.Errorf("tree after:\n got %v\nwant %v", got, c.After)
-			}
-		})
-	}
-}
-
-func mapsEqual(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if w, ok := b[k]; !ok || w != v {
-			return false
 		}
-	}
-	return true
+	})
 }
 
 // kernelRefused: the recorder called the view directly, but on a mount the kernel may refuse
@@ -247,14 +149,15 @@ func TestReloadAndSymlinkSwap(t *testing.T) {
 	os.MkdirAll(filepath.Join(src, ".git", "hooks"), 0o755)
 	os.MkdirAll(filepath.Join(src, "d"), 0o755)
 	guard := guardRules(t)
-	v, err := newView(src, guard, -1, -1)
+	v, err := newView(src, guard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	opts := mountOptions(false)
+	opts := mountOptions()
 	opts.DirectMount = true
 	mnt := t.TempDir()
-	server, err := fs.Mount(mnt, v.root, opts)
+	root := &node{v: v}
+	server, err := fs.Mount(mnt, root, opts)
 	if err != nil {
 		if os.Getenv("KIB_FUSE_TESTS") == "1" {
 			t.Fatalf("mount: %v", err)
@@ -268,7 +171,7 @@ func TestReloadAndSymlinkSwap(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	v.reload(append(slices.Clone(guard), ParseRules([]string{"notes.txt"}, false)...))
+	reloadFUSE(v, root, append(slices.Clone(guard), ParseRules([]string{"notes.txt"}, false)...))
 	buf := make([]byte, 64)
 	n, _ := f.ReadAt(buf, 0)
 	if strings.Contains(string(buf[:n]), "s3cr3t") {

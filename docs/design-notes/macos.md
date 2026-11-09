@@ -11,6 +11,8 @@ Supporting macOS is what settled kib's redaction topology for **both** platforms
 
 ## The propagation root must never be a host file share
 
+**Superseded 2026-11-09:** the view now runs on the host and the VM mounts it over NFS (`PLAN_NFS_VIEW.md`), so there is no sidecar, no propagation root and no `fusermount3`; this section and the next two are history.
+
 kib serves the redacted view from a **sidecar** container and the agent's container consumes it by shared-mount propagation, on Linux and macOS alike. Only the sidecar gets `SYS_ADMIN`, `/dev/fuse` and `apparmor=unconfined`; the agent's container is `--cap-drop=ALL` under `docker-default`, capless at **creation**, with no FUSE server beside it.
 
 That topology was once retired on the grounds that propagation is a shared-kernel feature and *"could never run on macOS"*. **That reasoning was wrong.** Both containers run in the same LinuxKit VM, so they share a kernel and propagation between them is ordinary. What actually failed is narrower and entirely fixable: kib rooted propagation at `/tmp`, which on a Mac is a *macOS* directory exposed over virtiofs — a file-sharing protocol, not a mount namespace, so a mount event has nowhere to land. Kubernetes hits the same wall and resolves it the same way: CSI FUSE sidecars propagate through an `emptyDir`, never a host share.
@@ -60,7 +62,7 @@ A **second** entrypoint block links `$HOST_HOME/.claude` → the session config 
 Docker Desktop backs every bind with a `fakeowner` layer over virtiofs. Two consequences, both
 found on the first real Mac run and neither reproducible on Linux:
 
-**Ownership is invented, so git refuses the project.** The project reaches the sidecar owned
+**Ownership is invented, so git refuses the project.** (Sidecar era. Over NFS the VM sees real owners, so the remap is gone.) The project reaches the sidecar owned
 by `root:root` whatever it is on the host. The FUSE server passed `st_uid`/`st_gid` straight
 through, the agent runs as `HOST_UID`, and git therefore reported *"detected dubious ownership
 in repository"* for the entire tree — taking `git status`, `./dev.sh` (its file discovery is
@@ -113,8 +115,8 @@ own scratch dirs is unaffected — that is APFS, not a bind.
 
 ## Host key vs box key — one key again
 
-Claude keys `projects/`, `.claude.json` and `history.jsonl` by its **resolved** cwd. Under the
-sidecar the redacted view is bound at the project's **host** path, so that mountpoint makes the
+Claude keys `projects/`, `.claude.json` and `history.jsonl` by its **resolved** cwd. The
+redacted view is bound at the project's **host** path, so that mountpoint makes the
 `$HOME`-shaped parent a real directory, the entrypoint's `$HOST_HOME` symlink is never created,
 and the resolved cwd *is* the host path. Canonical and the session share one key, so
 `config_scope`'s verbs take **one** project path — the second, re-keying argument was deleted

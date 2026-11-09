@@ -55,21 +55,41 @@ if [ -z "$LATEST_VERSION" ] && [ "$INTERACTIVE" = 1 ]; then
     echo "   Falling back to CLAUDE_VERSION=latest — Docker may reuse a cached, older install." >&2
 fi
 
-build_image() {
-    local args=(--build-arg CLAUDE_VERSION="${LATEST_VERSION:-latest}"
-        -t "${IMAGE_NAME}:building" "$@" "$KIB_ROOT")
+_docker_build() { # <args…>
     if [ "$INTERACTIVE" = 1 ]; then
-        echo "🔨 Building $IMAGE_NAME with Claude Code ${LATEST_VERSION:-latest}..." >&2
         # Straight to the terminal — no pipe, no redirect. BuildKit only draws its progress
         # UI when stdout is a tty, so even `| tee` demotes it to a scrolling wall of text.
         # The log is there for the backgrounded case, which is when nobody is watching.
-        docker build "${args[@]}"
+        docker build "$@"
     else
-        docker build "${args[@]}" >"$BUILD_LOG" 2>&1
+        docker build "$@" >>"$BUILD_LOG" 2>&1
     fi
 }
 
-if build_image "$@" \
+build_image() {
+    : >"$BUILD_LOG"
+    [ "$INTERACTIVE" = 0 ] \
+        || echo "🔨 Building $IMAGE_NAME with Claude Code ${LATEST_VERSION:-latest}..." >&2
+    _docker_build --build-arg CLAUDE_VERSION="${LATEST_VERSION:-latest}" \
+        -t "${IMAGE_NAME}:building" "$@" "$KIB_ROOT"
+}
+
+# The redaction view runs on THIS host, so it is built for it and taken out of the build, never
+# into the image. Renamed into place: a running view keeps its own inode.
+build_view() {
+    local arch tmp
+    arch="$(uname -m)"
+    case "$arch" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; esac
+    mkdir -p "$KIB_HOST_ONLY" && chmod 700 "$KIB_HOST_ONLY"
+    tmp="$(mktemp -d "$KIB_HOST_ONLY/.build.XXXXXX")" || return 1
+    _docker_build --target view --build-arg VIEW_OS="$KIB_OS" --build-arg VIEW_ARCH="$arch" \
+        --output "type=local,dest=$tmp" "$KIB_ROOT" && mv -f "$tmp/kib-view" "$KIB_VIEW"
+    local rc=$?
+    rm -rf "$tmp"
+    return "$rc"
+}
+
+if build_image "$@" && build_view \
     && docker tag "${IMAGE_NAME}:building" "${IMAGE_NAME}:latest" \
     && docker rmi "${IMAGE_NAME}:building" >>"$BUILD_LOG" 2>&1; then
     echo "✅ Build complete — new image ready for next launch" >>"$BUILD_LOG"

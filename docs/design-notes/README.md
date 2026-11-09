@@ -9,11 +9,11 @@ debugging time.
 |---|---|
 | [architecture.md](architecture.md) | Component/file map, build & run, aliases |
 | [container-lifecycle.md](container-lifecycle.md) | Per-project config dirs, one-container-per-project, locks |
-| [redaction-config-guard.md](redaction-config-guard.md) | `.kibignore` FUSE + the audit gate, host-executed config guard, shared config surface |
+| [redaction-config-guard.md](redaction-config-guard.md) | `.kibignore` view (host NFS server) + the audit gate, host-executed config guard, shared config surface |
 | [credential-broker.md](credential-broker.md) | `kib/broker/`, providers, delivery modes, MCP interception |
 | [clipboard-and-dns.md](clipboard-and-dns.md) | Wayland clipboard proxy, live-DNS sync |
 | [sleep-guard.md](sleep-guard.md) | Per-session sleep inhibition, proactive suspend, incident diagnosis |
 | [macos.md](macos.md) | macOS engine support: portability contract, virtiofs, pbpaste bridge |
-| [microvm.md](microvm.md) | Why not a VM per container; why Docker runs in one Lima VM (always on macOS) and projects are synced in |
+| [microvm.md](microvm.md) | Why not a VM per container; why Docker runs in one Lima VM (always on macOS) and projects reach it as NFS views |
 | [platform-matrix.md](platform-matrix.md) | Ubuntu vs macOS, row by row: what differs, how each row is proven, what still needs a Mac |
 | [terminal-and-security.md](terminal-and-security.md) | `tput`/left-arrow/daemon.log quirks, security posture, accepted risks |

@@ -134,7 +134,7 @@ func gitConfigWriteOK(candidate, current []byte, currentErr error) bool {
 	}
 	for _, e := range GitIniEntries(string(candidate)) {
 		if !old[e] {
-			logf("kib-fuse: refusing git config write — '%s.%s' names a command the host "+
+			logf("kib-view: refusing git config write — '%s.%s' names a command the host "+
 				"would execute (or the file has an ambiguous line separator)", e[0], e[1])
 			return false
 		}

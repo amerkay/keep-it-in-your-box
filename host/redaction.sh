@@ -1,31 +1,22 @@
 #!/usr/bin/env bash
-# `.kibignore` redaction + the host-executed-config guard: the FUSE sidecar and the launch-time
-# opt-out report, behind one small interface.
+# `.kibignore` redaction + the host-executed-config guard: the view (host/view, run here as an
+# NFS server the VM mounts) and the launch-time opt-out report, behind one small interface.
 #
-# Reads:  KIB_ROOT IMAGE_NAME CNAME FUSE_CNAME FUSE_ROOT PWD STATE_DIR PATTERNS_STATE
-#         PASSWD_STATE GROUP_STATE
+# Reads:  KIB_ROOT KIB_VIEW KIB_HOST_ONLY CNAME PWD VIEW_STATE VIEW_MNT PATTERNS_STATE
 # Writes: REDACTION_ARGS
 # shellcheck disable=SC2034  # REDACTION_ARGS is consumed in host/lifecycle.sh
 
 KIB_RULE_FILE=".kibignore"
 KIB_GUARD_FILE_HOST="$KIB_ROOT/guest/policy/global.kibignore"
 
-# The rule checks are the redaction view's own binary (guest/fuse), so `.kibignore` has one
-# matcher. In the running sidecar, else a throwaway container of the image; the project's rule
-# file goes in on stdin, where the arguments say `-`. `tightens` needs the sidecar's staged copy.
-_rules() { # <fuse subcommand args…>
+# The rule checks are the view's own binary, so `.kibignore` has one matcher. The project's rule
+# file goes in on stdin, where the arguments say `-`.
+_rules() { # <kib-view subcommand args…>
     local f="$PWD/$KIB_RULE_FILE"
     [ -f "$f" ] || f=/dev/null
-    if sidecar_running; then
-        docker exec -i "$FUSE_CNAME" /usr/local/bin/fuse "$@" <"$f"
-    elif [ "$1" = optouts ]; then
-        docker run --rm -i --network none --entrypoint /usr/local/bin/fuse \
-            -v "$KIB_GUARD_FILE_HOST:/usr/local/share/global.kibignore:ro" "$IMAGE_NAME" "$@" <"$f"
-    else
-        return 1
-    fi
+    [ -x "$KIB_VIEW" ] && "$KIB_VIEW" "$@" <"$f"
 }
-_optouts() { _rules optouts /usr/local/share/global.kibignore -; }
+_optouts() { _rules optouts "$KIB_GUARD_FILE_HOST" -; }
 
 # ── The [redact] opt-out, named at every launch ──────────────────
 # `!.env` in a project .kibignore cancels the guard's redaction, and so does a wildcard `!*`, so
@@ -41,66 +32,16 @@ report_kibignore_optouts() {
 $(printf '%s\n' "$optouts" | sed 's/^/   !/')"
 }
 
-# ── The redaction layer ──────────────────────────────────────────
-# The view (guest/fuse, a Go binary in the image) runs in its OWN container — the sidecar — and the agent's container consumes
-# the view by shared-mount propagation. Matched paths refuse writes, including files created
-# AFTER launch, which no bind mount can cover and which a nested `git init` or a mid-session
-# clone relies on.
-#
-# ONLY the sidecar gets SYS_ADMIN, /dev/fuse and an AppArmor override, and it runs as the host
-# user with --network none. The agent's container keeps `--cap-drop=ALL` under docker-default,
-# has no mount capability at any point in its life, and no FUSE server beside it to pivot into.
-#
-# The one platform-sensitive part is WHERE the propagation root lives: on macOS it must be a
-# path the engine serves from inside its VM rather than from the Mac over virtiofs. That choice,
-# and the mount/unmount primitives, are fuse_root_path/fuse_root_create/unmount_fuse in
-# host/portable.sh. Everything below is shared. (docs/design-notes/macos.md)
-
-# The rule file the sidecar enforces, staged host-side so the sandbox cannot edit what it
-# is validated against, and so the attach-time staleness check has a stable copy.
+# The rule file the view enforces, staged host-only so the sandbox cannot edit what it is
+# validated against, and so the attach-time staleness check has a stable copy.
 _stage_patterns() {
     local dst="$1"
     if [ -f "$PWD/$KIB_RULE_FILE" ]; then cp "$PWD/$KIB_RULE_FILE" "$dst"; else : >"$dst"; fi
     chmod 644 "$dst"
 }
 
-# fusermount3 resolves getpwuid(getuid()) and aborts with "could not determine username" when
-# the uid is unknown to the image — which a host uid always is. Binding the HOST's /etc/passwd
-# (as kib once did) works on Linux and CANNOT work on macOS, where Open Directory keeps real
-# users out of that file, so uid 501 is missing there too. Two synthesised lines instead: same
-# code on both platforms, and nothing of the host's user table enters the container.
-_stage_passwd() {
-    {
-        printf 'root:x:0:0:root:/root:/bin/bash\n'
-        # Skipped under rootless, where the sidecar runs as uid 0: a second entry for the same
-        # id would shadow root's, and the root line above already resolves it.
-        [ "$(box_uid)" = 0 ] \
-            || printf '%s:x:%s:%s::/tmp:/bin/sh\n' "$(id -un)" "$(box_uid)" "$(box_gid)"
-    } >"$PASSWD_STATE"
-    {
-        printf 'root:x:0:\n'
-        [ "$(box_gid)" = 0 ] || printf '%s:x:%s:\n' "$(id -gn)" "$(box_gid)"
-    } >"$GROUP_STATE"
-    chmod 644 "$PASSWD_STATE" "$GROUP_STATE"
-}
-
-# One wording for the two callers that meet a view they could not unmount: teardown (warn — see
-# teardown_redaction) and the next launch (die — see prepare_redaction). $1 is the emitter.
-_stale_mount_report() { # <die|warn>
-    "$1" "a $KIB_RULE_FILE redaction mount is still live at" \
-        "  $FUSE_ROOT/mnt" \
-        "and could not be unmounted. It is a passthrough view of your project, so kib will" \
-        "neither delete it (that would delete the real files) nor stack a second view on it." \
-        "Clear it by hand, then relaunch — on Linux:" \
-        "  fusermount3 -u '$FUSE_ROOT/mnt' || sudo umount -l '$FUSE_ROOT/mnt'" \
-        "On macOS that path lives inside the Docker engine VM and the Mac cannot see it;" \
-        "restart the engine to clear it."
-}
-
-# Restage, then signal the sidecar to re-read. The staged copy must ALWAYS be what the live
-# layer enforces — it is the only record of that — so the old bytes go back if the signal does
-# not land. `cp` both ways, never `mv`: the sidecar's bind is of this INODE, so a rename leaves
-# the host on the old rules while the container reads the new ones. Inverted, and silent.
+# Restage, then signal the view to re-read. The staged copy must ALWAYS be what the live layer
+# enforces — it is the only record of that — so the old bytes go back if the signal does not land.
 #
 # Locked at all because an attaching launch and host/rules-watch.sh both write this file. fd
 # 204, NOT 202: teardown holds the project lock there while it calls in here (host/lifecycle.sh)
@@ -114,7 +55,7 @@ _reload_rules() { # <staged> <why>
     }
     if cp "$staged" "$staged.prev"; then
         _stage_patterns "$staged"
-        if docker kill -s HUP "$FUSE_CNAME" >/dev/null 2>&1; then
+        if kill -HUP "$(cat "$VIEW_STATE.pid" 2>/dev/null)" 2>/dev/null; then
             rc=0
         else
             cp "$staged.prev" "$staged"
@@ -150,7 +91,7 @@ _reload_or_refuse_stale_rules() {
     local staged="$1"
     cmp -s "$PWD/$KIB_RULE_FILE" "$staged" 2>/dev/null && return 0
     [ ! -f "$PWD/$KIB_RULE_FILE" ] && [ ! -s "$staged" ] && return 0
-    if _rules tightens /kib-patterns - >/dev/null 2>&1; then
+    if _rules tightens "$staged" - >/dev/null 2>&1; then
         _reload_rules "$staged" "it redacts strictly more" && return 0
     elif _confirm_looser_rules "$staged"; then
         _reload_rules "$staged" "you confirmed it" && return 0
@@ -163,139 +104,91 @@ _reload_or_refuse_stale_rules() {
         "  diff -u '$staged' '$PWD/$KIB_RULE_FILE'"
 }
 
+# ── The redaction layer ──────────────────────────────────────────
+# The view runs HERE, as the host user, and serves the project over NFS on a random loopback
+# port; VM root mounts it and the box binds that mount at $PWD. So the VM never sees the raw
+# project, nothing in it needs SYS_ADMIN or /dev/fuse, and the box stays capless at creation.
+# Matched paths refuse writes, including files created AFTER launch, which no bind can cover and
+# which a nested `git init` or a mid-session clone relies on. (PLAN_NFS_VIEW.md)
 prepare_redaction() {
-    mkdir -p "$STATE_DIR" && chmod 700 "$STATE_DIR"
+    local port secret view
+    mkdir -p "$STATE_DIR" "${VIEW_STATE%/*}"
+    chmod 700 "$STATE_DIR" "$KIB_HOST_ONLY" "${VIEW_STATE%/*}"
     # An absent rule file is an empty rule set, not a reason to skip the layer: it also
-    # enforces global.kibignore against writing files the HOST later executes. Gating it on
-    # the rule file is what left every project without one — this repo included — on a raw
-    # bind mount with no protection.
+    # enforces global.kibignore against writing files the HOST later executes.
     _stage_patterns "$PATTERNS_STATE"
-    _stage_passwd
-
-    # A view teardown could not unmount is still live over the real project. Refuse HERE rather
-    # than stack a second mount on it — teardown only warns, so that it can never abort the exit
-    # path before merge_out_session.
-    ! fuse_mounted "$FUSE_ROOT/mnt" || _stale_mount_report die
-
-    # Dies with instructions if the root cannot propagate; never escalates, never degrades.
-    fuse_root_create "$FUSE_ROOT" "$(box_uid)" "$(box_gid)"
-
-    # --uid/--gid: the ids reported in place of whoever owns the project ROOT, and only them. On
-    # macOS the project reaches the sidecar over the engine VM's virtiofs, which reports every
-    # file as root:root — without the remap git refuses the whole tree ("dubious ownership") and
-    # nothing that shells out to it works. Rootless does the same thing for its own reason: our
-    # uid maps to 0 inside, so the sidecar sees root:root too. Otherwise the base ids are already
-    # the agent's and the map is identity. A file owned by someone else keeps its real ids, so
-    # the mount's default_permissions still refuses it.
-    local run_err
-    if ! run_err="$(docker run -d --name "$FUSE_CNAME" \
-        --cap-drop=ALL --cap-add=SYS_ADMIN \
-        --device /dev/fuse --security-opt apparmor=unconfined \
-        --user "$(box_uid):$(box_gid)" --userns=host \
-        --network none \
-        -v "$PWD:/src" \
-        -v "$PATTERNS_STATE:/kib-patterns:ro" \
-        -v "$PASSWD_STATE:/etc/passwd:ro" \
-        -v "$GROUP_STATE:/etc/group:ro" \
-        -v "$FUSE_ROOT:$FUSE_ROOT:rshared" \
-        -v "$KIB_GUARD_FILE_HOST:/usr/local/share/global.kibignore:ro" \
-        --entrypoint /usr/local/bin/fuse \
-        "$IMAGE_NAME" \
-        --src /src --mnt "$FUSE_ROOT/mnt" \
-        --uid "$(box_uid)" --gid "$(box_gid)" \
-        --patterns-file /kib-patterns \
-        --guard-file /usr/local/share/global.kibignore 2>&1 >/dev/null)"; then
-        fuse_root_destroy "$FUSE_ROOT"
-        # The engine's own words, or a name clash / missing /dev/fuse / unshared source mount
-        # all read as the same blank failure.
-        die "could not start the $KIB_RULE_FILE redaction sidecar." "${run_err:-(no output)}"
+    [ -x "$KIB_VIEW" ] || die "kib's redaction view is not built ($KIB_VIEW). Run: kib build"
+    # Rootless Docker cannot mount NFS, so there the view mounts itself with FUSE.
+    view=("$KIB_VIEW" nfs --src "$PWD" --patterns-file "$PATTERNS_STATE"
+        --guard-file "$KIB_GUARD_FILE_HOST")
+    if engine_rootless; then
+        view[1]=fuse && view+=(--mnt "$VIEW_MNT") && mkdir -p "$VIEW_MNT"
+    fi
+    : >"$VIEW_STATE.addr"
+    detach_pgrp "${view[@]}" >"$VIEW_STATE.addr" 2>"$VIEW_STATE.log" 200>&- 201>&- 205>&-
+    echo $! >"$VIEW_STATE.pid"
+    disown 2>/dev/null || true
+    wait_until 100 0.05 _view_up || true
+    _view_ready || _view_failed "never started"
+    if ! engine_rootless; then
+        # "<port> <secret>": the secret is the only path it mounts, and only once (nfs.go).
+        read -r port secret <"$VIEW_STATE.addr"
+        vm_view_mount "$VIEW_MNT" "$port" "$secret" || _view_failed "could not be mounted in the VM"
     fi
 
-    # Poll the SIDECAR's own mount table, not the root: a `docker exec` is cheap on both
-    # platforms, where on macOS every look at the root costs a privileged VM helper. Then check
-    # the root ONCE, which is the assertion that actually matters — the sidecar seeing its own
-    # mount says nothing about whether it propagated out, and that is precisely how the old
-    # /tmp-rooted layout failed on a Mac.
-    if ! wait_until 100 0.05 _sidecar_mounted_or_gone || ! _sidecar_mounted \
-        || ! fuse_mounted "$FUSE_ROOT/mnt"; then
-        echo "❌ kib: the $KIB_RULE_FILE redaction view never reached $FUSE_ROOT/mnt." >&2
-        echo "   Sidecar logs:" >&2
-        docker logs "$FUSE_CNAME" 2>&1 | sed 's/^/   /' >&2 || true
-        docker rm -f "$FUSE_CNAME" >/dev/null 2>&1 || true
-        fuse_root_destroy "$FUSE_ROOT"
-        # Never fall through to a bind-mounted fallback: a launch-time mask cannot cover files
-        # created mid-session, so it would silently weaken the redaction the user relies on.
-        die "refusing to launch unprotected — without the sidecar neither $KIB_RULE_FILE nor" \
-            "the host-config guard is enforced."
-    fi
-
-    # :rslave, not :rshared — the view propagates IN, and a mount the agent somehow made would
-    # not propagate back out to the host.
-    REDACTION_ARGS=(-v "$FUSE_ROOT/mnt:$PWD:rslave")
-    echo "🛡️  $KIB_RULE_FILE: FUSE redacting mount active (sidecar: $FUSE_CNAME)" >&2
+    REDACTION_ARGS=(-v "$VIEW_MNT:$PWD")
+    echo "🛡️  $KIB_RULE_FILE: redacting view active ($(engine_rootless && echo FUSE || echo NFS))" >&2
 
     # Carries a later $KIB_RULE_FILE edit into this view without waiting for a launch. The
-    # pidfile is in $STATE_DIR, NOT bind-mounted into the box: teardown kills whatever group it
-    # names. The path stays a LITERAL — tests/check/wiring.sh finds exec'd scripts by grepping
-    # this call shape, and a variable hides them from it.
-    detach_pgrp "$KIB_ROOT/host/rules-watch.sh" "$PATTERNS_STATE" "$FUSE_CNAME" 200>&- 201>&- 205>&-
+    # pidfile is NOT bind-mounted into the box: teardown kills whatever group it names. The path
+    # stays a LITERAL — tests/check/wiring.sh finds exec'd scripts by grepping this call shape,
+    # and a variable hides them from it.
+    detach_pgrp "$KIB_ROOT/host/rules-watch.sh" "$VIEW_STATE" 200>&- 201>&- 205>&-
     echo $! >"$PATTERNS_STATE.watch.pid"
     disown 2>/dev/null || true
 }
 
+_view_running() { kill -0 "$(cat "$VIEW_STATE.pid" 2>/dev/null)" 2>/dev/null; }
+_view_up() { _view_ready || ! _view_running; }
+_view_ready() { # NFS: it printed its address. FUSE: its mount is in this host's table.
+    if engine_rootless; then grep -q " $VIEW_MNT fuse" /proc/self/mounts; else [ -s "$VIEW_STATE.addr" ]; fi
+}
+
+# Never fall through to a raw bind: a launch-time mask cannot cover files created mid-session.
+_view_failed() { # <what went wrong>
+    echo "❌ kib: the $KIB_RULE_FILE redaction view $1. Its log:" >&2
+    sed 's/^/   /' "$VIEW_STATE.log" >&2 2>/dev/null || true
+    teardown_redaction
+    die "refusing to launch unprotected — without the view neither $KIB_RULE_FILE nor the" \
+        "host-config guard is enforced."
+}
+
 # Build and install folders (host/lifecycle.sh mounts each on a volume), relative to the project,
-# one per line: found in the raw source, fast, then kept only if the VIEW has it too, so none is
-# ever inside a redacted folder (that mountpoint would fail the launch). Never descends into
-# one. A root node_modules or .venv the manifest implies counts before the first install.
+# one per line: found in the raw project, fast, then kept only if the VIEW has its parent too, so
+# none is ever inside a redacted folder (that mountpoint would fail the launch). Never descends
+# into one. A root node_modules or .venv the manifest implies counts before the first install.
 LOCAL_DIR_NAMES="node_modules .pnpm-store .next .nuxt .turbo target .terraform .venv venv"
 local_dirs() {
+    local n names="" d found=()
+    for n in $LOCAL_DIR_NAMES; do names="$names -o -name $n"; done
     # shellcheck disable=SC2086 # one argument per name
-    docker exec "$FUSE_CNAME" sh -c '
-        view="$1"
-        shift
-        cd /src || exit 0
-        names=""
-        for n; do names="$names -o -name $n"; done
-        {
-            find . -mindepth 1 -maxdepth 6 -name .git -prune -o -type d \( ${names# -o } \) \
-                -print -prune
-            [ ! -f package.json ] || [ -e node_modules ] || echo ./node_modules
-            if [ -f pyproject.toml ] || [ -f requirements.txt ]; then
-                [ -e .venv ] || echo ./.venv
-            fi
-        } | while IFS= read -r d; do
-            [ -d "$view/${d%/*}" ] && printf "%s\n" "${d#./}"
-        done' _ "$FUSE_ROOT/mnt" $LOCAL_DIR_NAMES 2>/dev/null
+    while IFS= read -r d; do found+=("$d"); done < <(
+        find . -mindepth 1 -maxdepth 6 -name .git -prune -o -type d \( ${names# -o } \) \
+            -print -prune 2>/dev/null
+        [ ! -f package.json ] || [ -e node_modules ] || echo ./node_modules
+        if [ -f pyproject.toml ] || [ -f requirements.txt ]; then
+            [ -e .venv ] || echo ./.venv
+        fi
+    )
+    [ "${#found[@]}" = 0 ] || vm_view_has "$VIEW_MNT" ${found[@]+"${found[@]}"}
 }
 
-sidecar_running() { [ -n "$(docker ps -q -f "name=^${FUSE_CNAME}$" 2>/dev/null)" ]; }
-
-# Is the view mounted, as the SIDECAR sees it? Polled for readiness.
-_sidecar_mounted() {
-    docker exec "$FUSE_CNAME" sh -c '
-        p=$(readlink -f "$1" 2>/dev/null || echo "$1")
-        while read -r _d _m _t _r; do
-            [ "$_m" = "$p" ] || continue
-            case "$_t" in fuse*) exit 0 ;; esac
-        done </proc/self/mounts
-        exit 1' _ "$FUSE_ROOT/mnt" 2>/dev/null
-}
-
-# Mounted, or dead — either way waiting longer is pointless. A sidecar that exited on a bad
-# argument would otherwise cost 100 failing `docker exec`s before anyone said so.
-_sidecar_mounted_or_gone() { _sidecar_mounted || ! sidecar_running; }
-
-# Three things must hold to attach: the sidecar is up (it is unconditional, so its absence is
-# always an error — including for a container an older kib left running), the view actually
-# reached the AGENT's container, and the rules match — or can be reloaded into — what is running.
-# global.kibignore cannot go stale: it mounts :ro from the checkout, so the sidecar and this
-# process read the very same file.
+# Three things must hold to attach: the view is up (it is unconditional, so its absence is
+# always an error, including for a container an older kib left running), it reaches the BOX, and
+# the rules match — or can be reloaded into — what is running. global.kibignore cannot go stale:
+# the view reads it from the checkout, as this process does.
 verify_redaction_attach() {
-    # A live sidecar says nothing about the agent's side: the view can be gone underneath it.
-    # gVisor shows the box a gofer mount, not the fuse one, so the VM's table answers for the
-    # mount and a listing from the box for its end.
-    if ! sidecar_running || ! fuse_mounted "$FUSE_ROOT/mnt" \
-        || ! docker exec "$CNAME" ls -A "$PWD" >/dev/null 2>&1; then
+    if ! _view_running || ! docker exec "$CNAME" ls -A "$PWD" >/dev/null 2>&1; then
         die "this project's container has no live redaction view, so neither" \
             "$KIB_RULE_FILE nor the host-config guard is being enforced in it." \
             "Refusing to attach — close all kib sessions for this project and relaunch." \
@@ -304,44 +197,13 @@ verify_redaction_attach() {
     _reload_or_refuse_stale_rules "$PATTERNS_STATE"
 }
 
-# Did this project ever get a sidecar? teardown_redaction also runs defensively on the cold-start
-# path, and on macOS every probe of the root costs a privileged VM helper — so answer from local
-# state first. The state file is removed LAST, after the unmount, so a leak cannot hide behind it.
-_redaction_present() {
-    [ -e "$PATTERNS_STATE" ] && return 0
-    [ -n "$(docker ps -aq -f "name=^${FUSE_CNAME}$" 2>/dev/null)" ]
-}
-
-# unmount_fuse first (host-side, and the only option once the sidecar is gone), then from INSIDE
-# the sidecar: its bind is rshared, so an unmount there propagates back out. That second path is
-# what covers a host with no fusermount3 of its own — the mount was made by the sidecar's copy,
-# so the host is not required to carry one.
-_unmount_view() {
-    unmount_fuse "$FUSE_ROOT/mnt" && return 0
-    sidecar_running || return 1
-    docker exec "$FUSE_CNAME" fusermount3 -u "$FUSE_ROOT/mnt" >/dev/null 2>&1 || true
-    ! fuse_mounted "$FUSE_ROOT/mnt"
-}
-
-# Unmount BEFORE removing the sidecar. The other order kills the server first, leaving a
-# mounted-but-ENOTCONN mount that gets skipped and orphaned on EVERY exit — and the next launch
-# then dies on the rm below. Confirmed live on Docker Desktop: the mount outlives the container.
+# Unmount first, then stop the view: a soft mount of a dead server only times out. Also runs
+# defensively at every cold start, so only when this project left something behind.
 teardown_redaction() {
-    _redaction_present || return 0
-    # First: the watcher must not signal a sidecar being torn down out from under it.
+    [ -e "$VIEW_STATE.pid" ] || [ -e "$PATTERNS_STATE" ] || return 0
+    # First: the watcher must not signal a view being torn down out from under it.
     kill_pgrp "$PATTERNS_STATE.watch.pid" # whole group: it is its own (detach_pgrp)
-    if ! _unmount_view; then
-        # WARN, never die: this runs from the EXIT trap, ahead of merge_out_session — aborting
-        # here would lose the session's .claude.json/history fold-back and overwrite its exit
-        # code. Everything below is skipped instead, so nothing is deleted and nothing is
-        # forgotten; the next launch refuses on the same mount (prepare_redaction).
-        _stale_mount_report warn
-        return 0
-    fi
-    docker rm -f "$FUSE_CNAME" >/dev/null 2>&1 || true
-    # `|| true` throughout: never let a failed cleanup kill kib under `set -e` — least of all
-    # from the EXIT trap, where it would also overwrite the session's exit code.
-    fuse_root_destroy "$FUSE_ROOT"
-    rm -f "$PATTERNS_STATE" "$PATTERNS_STATE.prev" "$PASSWD_STATE" "$GROUP_STATE" \
-        2>/dev/null || true
+    vm_view_unmount "$VIEW_MNT"
+    kill_pgrp "$VIEW_STATE.pid"
+    rm -f "$PATTERNS_STATE" "$PATTERNS_STATE.prev" "$VIEW_STATE.addr" 2>/dev/null || true
 }

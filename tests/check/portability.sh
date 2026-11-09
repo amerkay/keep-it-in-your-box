@@ -83,21 +83,6 @@ else
     pass "all OS branching stays in host/portable.sh (no exemptions)"
 fi
 
-# The FUSE sidecar is the one topology on both platforms, and exactly these five functions are
-# what differ. Each must exist and be defined HERE, so a platform fix cannot quietly grow a
-# sixth branch somewhere else. (docs/design-notes/macos.md)
-missing=""
-for fn in fuse_root_path fuse_root_create fuse_root_destroy fuse_mounted unmount_fuse; do
-    grep -q "^$fn() {" host/portable.sh || missing="$missing $fn"
-done
-if [ -n "$missing" ]; then
-    fail "host/portable.sh is missing a FUSE platform shim:$missing" \
-        "the sidecar's only OS-sensitive parts live here — a caller must never branch itself"
-else
-    pass "the five FUSE platform shims are all defined in host/portable.sh"
-fi
-unset missing fn
-
 # host_claude_path gates every "this runs OUTSIDE the sandbox" warning kib prints, so a wrong
 # answer either nags a user with no native claude or stays silent for one who has it. Memoised
 # per launch, and it must NEVER shell out to node — `npm prefix -g` on a launch path costs an

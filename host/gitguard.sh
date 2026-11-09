@@ -8,20 +8,18 @@
 #
 # Findings and remedies live in kib.host.gitaudit; this file is placement and severity mapping.
 #
-# Reads:  PWD
+# Reads:  PWD KIB_VIEW
 # Writes: nothing global
 
-_git_toplevel() { git -C "$1" rev-parse --show-toplevel 2>/dev/null || true; }
+_git_toplevel() { git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true; }
 
-# Tracked paths .kibignore covers, NUL-separated, by the view's own matcher: git and the binary in
-# a throwaway container on a read-only bind (the VM shares the repo's folder). Empty if the engine is not up.
+# Tracked paths .kibignore covers, NUL-separated, by the view's own matcher. core.fsmonitor is
+# the one key ls-files would run, and the box may have written it: overridden. Empty if unbuilt.
 _tracked_matches() { # <top> <out>
     : >"$2"
-    [ -f "$1/.kibignore" ] && [ -n "${IMAGE_NAME:-}" ] || return 0
-    # shellcheck disable=SC2016 # the container's own shell
-    docker run --rm --network none -v "$1:/p:ro" -w /p --entrypoint sh "$IMAGE_NAME" -c \
-        'git -c safe.directory="*" ls-files -z | /usr/local/bin/fuse match .kibignore' \
-        >"$2" 2>/dev/null || : >"$2"
+    [ -f "$1/.kibignore" ] && [ -x "$KIB_VIEW" ] || return 0
+    git -C "$1" -c core.fsmonitor=false ls-files -z 2>/dev/null \
+        | "$KIB_VIEW" match "$1/.kibignore" >"$2" 2>/dev/null || : >"$2"
 }
 
 # $1 = launch | teardown | report.
@@ -38,7 +36,7 @@ _tracked_matches() { # <top> <out>
 kib_audit_gate() {
     local mode="$1" top rc=0 what="" stamp="${STATE_DIR:-}/${SLUG:-x}.hooks.seen" tracked
     have_python || return 0
-    top="$(_git_toplevel "$PWD")"
+    top="$(_git_toplevel)"
     [ -n "$top" ] || return 0 # not a git repo — nothing to audit
 
     # `.claude/hooks/` is a whole tree with no schema to parse, and git cannot bound it: the box

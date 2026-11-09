@@ -29,7 +29,7 @@ func readJSON(t *testing.T, name string, v any) {
 }
 
 func guardRules(t *testing.T) []Rule {
-	r, err := LoadRules("../policy/global.kibignore", true)
+	r, err := LoadRules("../../guest/policy/global.kibignore", true)
 	if err != nil || len(r) == 0 {
 		t.Fatalf("guard file: %v", err)
 	}

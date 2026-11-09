@@ -171,7 +171,7 @@ fi
 # Every docker call below targets the VM's engine (docs/vm.md). Verbs that never touch docker
 # stay off it, so they work with no VM.
 case "$VERB" in
-    claude | exec | audit | build) vm_use "$VERB" ;;
+    claude | exec | build) vm_use "$VERB" ;;
     broker) [ "${1:-}" != login ] || vm_use broker ;;
 esac
 

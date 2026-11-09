@@ -9,7 +9,7 @@
 section "Lima VM engine (host/vm.sh)"
 
 _vm_dir="$(mktemp -d)"
-mkdir -p "$_vm_dir/bin" "$_vm_dir/home/devel/proj" "$_vm_dir/home/other/app" "$_vm_dir/lima"
+mkdir -p "$_vm_dir/bin" "$_vm_dir/home/devel/proj" "$_vm_dir/lima"
 # Fake limactl: an existing, running VM; stops, edits and root shells are logged. A root shell
 # that runs `runsc install` registers the runtime it names (its last argument) with fake docker.
 cat >"$_vm_dir/bin/limactl" <<EOF
@@ -32,20 +32,13 @@ case "\$1" in
             *only-upgrade*) echo docker >>"$_vm_dir/upgrades" ;;
             *vmstat*) [ -e "$_vm_dir/oom" ] ;;
             *zram*) echo zram >>"$_vm_dir/zram" ;;
+            *"mount -t nfs"*) echo "\$*" >>"$_vm_dir/nfs" ;;
         esac
         ;;
 esac
 EOF
-# Fake docker: one running box, whose project is ~/other/app; stops are logged.
-cat >"$_vm_dir/bin/docker" <<EOF
-#!/usr/bin/env bash
-case "\$1" in
-    info) cat "$_vm_dir/runtimes" 2>/dev/null ;;
-    ps) echo box1 ;;
-    inspect) echo "$_vm_dir/home/other/app" ;;
-    stop) echo stop >>"$_vm_dir/dstops" ;;
-esac
-EOF
+printf '#!/usr/bin/env bash\ncase "$1" in info) cat "%s/runtimes" 2>/dev/null ;; esac\n' "$_vm_dir" \
+    >"$_vm_dir/bin/docker"
 chmod +x "$_vm_dir/bin/"*
 
 # Subshells inherit these; a `sh -c` would not see the sourced functions.
@@ -57,16 +50,11 @@ _vm_t_last() { VM_LINGER=1 && vm_up && vm_down; }
 _vm_stops() { if [ -f "$_vm_dir/stops" ]; then wc -l <"$_vm_dir/stops" | tr -d ' '; else echo 0; fi; }
 _vm_t_engine() { if engine_lima; then echo vm; else echo native; fi; }
 _vm_t_shared() { exec 207>"$VM_LOCK" && flock -s 207 && vm_up && vm_down; }
-_vm_t_resolv() { vm_resolv "$_vm_dir/resolv" && cat "$_vm_dir/resolv"; }
-_vm_t_root() { cd "$1" && vm_project_ok && echo "${VM_NEW_ROOT:-none}"; }
-_vm_t_evict() { VM_EVICT_WAIT=1 && _vm_t_shared; }
-# Another kib holds the VM for a second, then closes: the restart waits it out.
-_vm_t_released() {
-    (exec 207>"$VM_LOCK" && flock -s 207 && sleep 1) &
-    sleep 0.3
-    VM_EVICT_WAIT=5 && vm_project_ok && vm_up >/dev/null 2>&1 && cat "$VM_ROOTS"
-    [ ! -e "$VM_RESTART" ] || echo "marker left"
-    wait
+_vm_t_resolv() { _KIB_ENGINE_VM=1 && vm_resolv "$_vm_dir/resolv" && cat "$_vm_dir/resolv"; }
+_vm_t_view() { mkdir -p "$KIB_STATE_ROOT" && vm_view_mount /mnt/kib/abc 40123 s3cr3t && cat "$_vm_dir/nfs"; }
+_vm_t_hostonly() {
+    _vm_mounts && _vm_under "$KIB_HOST_ONLY" "${VM_MOUNTS[@]}" && echo shared
+    true
 }
 
 _vm_run() { ( # <PATH> <cmd…> — a fresh subshell with the units loaded, HOME and state faked
@@ -76,8 +64,7 @@ _vm_run() { ( # <PATH> <cmd…> — a fresh subshell with the units loaded, HOME
     unset KIB_PORTABLE_SOURCED # a fresh load, as bin/kib does
     shift
     # shellcheck source=/dev/null
-    . "$KIB_ROOT/host/core.sh" && . "$KIB_ROOT/host/portable.sh" && . "$KIB_ROOT/host/gitguard.sh"
-    . "$KIB_ROOT/host/session-state.sh" && . "$KIB_ROOT/host/vm.sh"
+    . "$KIB_ROOT/host/core.sh" && . "$KIB_ROOT/host/portable.sh" && . "$KIB_ROOT/host/vm.sh"
     cd "$HOME/devel/proj" && "$@"
 ) 2>&1 </dev/null; }
 
@@ -86,18 +73,14 @@ _vm_h="$_vm_dir/home"
 is "the VM never mounts ~: ~/.claude, kib's own dirs, its checkout read-only" \
     "--mount-only $_vm_h/.claude:w --mount-only $_vm_h/.local/state/kib:w --mount-only $_vm_dir/node:w --mount-only $KIB_ROOT" \
     "$(_vm_run "$PATH" _vm_t_mounts | tr '\n' ' ' | sed 's/ $//')"
-is "a project shares itself, never its siblings" "$_vm_h/devel/proj" \
-    "$(_vm_run "$PATH" _vm_t_root "$_vm_h/devel/proj")"
-mkdir -p "$_vm_dir/srv/app"
-is "a project outside ~ works too" "$_vm_dir/srv/app" "$(_vm_run "$PATH" _vm_t_root "$_vm_dir/srv/app")"
-case "$(_vm_run "$PATH" _vm_t_root "$_vm_h")$(_vm_run "$PATH" _vm_t_root "$_vm_dir")" in
-    *"won't share $_vm_h"*"won't share $_vm_dir"*) pass "~, and a folder holding it, are never shared" ;;
-    *) fail "~ or a folder holding it was shared" ;;
+is "the view's binary and rules are outside every VM share: VM root cannot swap them" "" \
+    "$(_vm_run "$PATH" _vm_t_hostonly)"
+case "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_view)" in
+    *'mount -t nfs -o "$2,port=$3,mountport=$3" "$4:/$5" "$1"'*" _ /mnt/kib/abc vers=3,proto=tcp,mountproto=tcp,nolock,sync,actimeo=1,soft,timeo=10,retrans=2 40123 192.168.5.2 s3cr3t")
+        pass "VM root mounts a view from the host's loopback, by its secret path, soft"
+        ;;
+    *) fail "the view's NFS mount is wrong" "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_view)" ;;
 esac
-git init -q "$_vm_h"
-is "a home folder that is a git repo is never shared" "$_vm_h/devel/proj" \
-    "$(_vm_run "$PATH" _vm_t_root "$_vm_h/devel/proj")"
-rm -rf "$_vm_h/.git"
 is "the docker engine moves into the VM; kib stays here" \
     "unix://$_vm_dir/lima/sock/docker.sock vm 192.168.5.2" "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_up | tail -1)"
 is "gVisor is installed once per pin" "1" \
@@ -129,68 +112,12 @@ case "$(cat "$_vm_dir/edits")" in
     *) fail "the re-mount is not virtiofs" "$(cat "$_vm_dir/edits")" ;;
 esac
 _vm_spec="$_vm_dir/home/.local/state/kib/vm-spec"
-_vm_tag="$_vm_h/.local/state/kib/.state/-p.sleep/kib-$$-1"
-mkdir -p "$_vm_tag" && touch "$_vm_tag/live" "$_vm_tag/turn"
 mv "$_vm_spec" "$_vm_dir/spec" && echo stale >"$_vm_spec"
-case "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_evict)" in
-    *"1 of its sessions are mid-work"*"left the VM as it is"*) is \
-        "a restart with a session mid-work and nobody to say y: refused, nothing stopped" \
-        "1 no" "$(_vm_edits) $([ -e "$_vm_dir/dstops" ] && echo yes || echo no)" ;;
-    *) fail "a restart under a session mid-work was not asked" ;;
+case "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_shared)" in
+    *"other kib sessions use it"*) is "a stale mount set in use: refused, the VM untouched" "1" "$(_vm_edits)" ;;
+    *) fail "a stale mount set in use was not refused" ;;
 esac
-rm "$_vm_tag/turn"
-case "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_evict)" in
-    *"1 idle session(s) resume after"*"still use the VM after 1 s"*) is \
-        "all idle: no question, the boxes stop, the VM waits for their kibs" "1" "$(_vm_edits)" ;;
-    *) fail "a restart under idle sessions did not go ahead" ;;
-esac
-is "the restart stops every box" "1" "$(wc -l <"$_vm_dir/dstops" | tr -d ' ')"
-is "a running box's project and the new one stay shared; the restart's marker is gone" \
-    "$_vm_h/devel/proj $_vm_h/other/app" "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_released | tr '\n' ' ' | sed 's/ $//')"
-is "then the VM is re-mounted with them" "2" "$(_vm_edits)"
-is "a project opened before needs no restart" "none" "$(_vm_run "$PATH" _vm_t_root "$_vm_h/devel/proj")"
-_vm_t_roots() { _vm_roots; }
-echo "$_vm_dir/gone" >>"$_vm_h/.local/state/kib/vm-roots"
-is "a deleted project leaves the shares, and is not recreated" "$_vm_h/devel/proj $_vm_h/other/app" \
-    "$(_vm_run "$PATH" _vm_t_roots | tr '\n' ' ' | sed 's/ $//')"
-rm -rf "$_vm_tag" "$_vm_spec" && mv "$_vm_dir/spec" "$_vm_spec"
-_vm_run "$_vm_dir/bin:$PATH" _vm_t_up >/dev/null # back to the plain mount set
-
-# A session cut by another kib's restart: no stop timer, and it comes back as itself.
-_vm_t_cut() { # <sid marker name>
-    VERB=claude CMD=(claude --dangerously-skip-permissions --model opus "fix it")
-    SLEEP_STATE="$_vm_dir/sl" SESSION_TAG=t && mkdir -p "$SLEEP_STATE/t" && touch "$SLEEP_STATE/t/$1"
-    exec 207>"$VM_LOCK" && flock -s 207 && vm_up >/dev/null 2>&1 && echo "$$" >"$VM_RESTART"
-    vm_down && echo "resume=$_VM_RESUME"
-    KIB_ROOT="$_vm_dir/fake" && vm_resume
-}
-mkdir -p "$_vm_dir/fake/bin" && printf '#!/bin/sh\necho "relaunched: $*"\n' >"$_vm_dir/fake/bin/kib"
-chmod +x "$_vm_dir/fake/bin/kib"
-_vm_sid=0123abcd-0000-4000-8000-0123456789ab
-case "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_cut "sid.$_vm_sid")" in
-    *"resume=$_vm_sid"*"resumes after it"*"relaunched: claude --model opus --resume $_vm_sid") pass \
-        "a session cut by a restart relaunches itself with --resume, no stop timer" ;;
-    *) fail "a cut session did not resume itself" "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_cut "sid.$_vm_sid")" ;;
-esac
-case "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_cut none)" in
-    *"resume=-"*"ended this session"*relaunched*) fail "a session with no id relaunched blind" ;;
-    *"resume=-"*"ended this session"*) pass "a session with no id is told, not relaunched" ;;
-    *) fail "a cut session with no id was not told" ;;
-esac
-rm -f "$_vm_dir/home/.local/state/kib/vm-restart"
-
-_vm_t_args() { _vm_resume_args "$@" && local IFS='|' && echo "${RESUME_ARGS[*]+"${RESUME_ARGS[*]}"}"; }
-for _vm_case in \
-    "a prompt is never sent again|--model|opus|--model opus fix-it" \
-    "a session pick is dropped, many-valued flags kept whole|--add-dir|a|b|--verbose|-r abc --add-dir a b --verbose" \
-    "print and continue are dropped||-c -p hi" \
-    "an unknown flag before a word: both dropped||--frob val" \
-    "an unknown flag alone, and flag=value, are kept|--frob|--model=x|--frob --model=x fix-it" \
-    "everything after -- is a prompt|--effort|high|--effort high -- --model x"; do
-    _vm_want="${_vm_case#*|}" && _vm_want="${_vm_want%|*}"
-    # shellcheck disable=SC2086 # the case's words
-    is "relaunch flags: ${_vm_case%%|*}" "$_vm_want" "$(_vm_run "$PATH" _vm_t_args ${_vm_case##*|})"
-done
+mv "$_vm_dir/spec" "$_vm_spec"
 
 rm -f "$_vm_dir/stops"
 _vm_run "$_vm_dir/bin:$PATH" _vm_t_shared >/dev/null
@@ -213,6 +140,19 @@ case "$(_vm_run /usr/bin:/bin _vm_t_linux)" in
     *docs/vm.md*returned) fail "Linux without the VM's prerequisites ran natively" ;;
     *docs/vm.md*) pass "Linux without QEMU/KVM/virtiofsd: refused, naming docs/vm.md" ;;
     *) fail "Linux without the VM's prerequisites is not refused" ;;
+esac
+
+# No-VM mode: rootless Docker that already lists kib's gVisor runtime. The box is root inside.
+mkdir -p "$_vm_dir/rl"
+printf '#!/bin/sh\necho "name=rootless kib-gvisor-%s"\n' "$(sed -n 's/^GVISOR_VERSION=//p' "$KIB_ROOT/host/vm.sh")" \
+    >"$_vm_dir/rl/docker"
+chmod +x "$_vm_dir/rl/docker"
+_vm_t_rootless() { KIB_OS=$1 && KIB_CFG_ENGINE=rootless && vm_use claude && echo "$(box_uid):$(box_gid) $(_vm_t_engine)"; }
+is "engine = rootless: no VM, the box runs as root (this user outside)" "0:0 native" \
+    "$(_vm_run "$_vm_dir/rl:$PATH" _vm_t_rootless linux | tail -1)"
+case "$(_vm_run "$_vm_dir/rl:$PATH" _vm_t_rootless darwin)" in
+    *"Linux only"*) pass "engine = rootless is refused on macOS" ;;
+    *) fail "engine = rootless ran on macOS" ;;
 esac
 
 _vm_t_build() { KIB_OS=darwin && VM_LINGER=1 && vm_use build >/dev/null 2>&1 && echo built; }

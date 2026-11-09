@@ -9,8 +9,8 @@
 # (docs/design-notes/container-lifecycle.md)
 #
 # Reads:  KIB_ROOT IMAGE_NAME and the globals host/config.sh sets
-# Writes: PROJ_HASH CNAME FUSE_CNAME FUSE_ROOT PATTERNS_STATE PASSWD_STATE
-#         GROUP_STATE RESOLV_STATE CLIP_STATE CLIP_HOST SLEEP_STATE SLEEP_STATE_CPATH
+# Writes: PROJ_HASH CNAME VIEW_STATE VIEW_MNT PATTERNS_STATE
+#         RESOLV_STATE CLIP_STATE CLIP_HOST SLEEP_STATE SLEEP_STATE_CPATH
 #         CRED_WITNESS SESSION_CDIR SHARED_CDIR SHARED_ASSET_CDIR
 #         TRANSCRIPTS_CPATH BROKER_CNAME BROKER_NET BROKER_DIR BROKER_OUT
 #         BROKER_HASH BROKER_ENABLED REDACTION_ARGS ARGS
@@ -34,23 +34,19 @@ kib_identity() {
         CNAME="$CNAME-eph-$$"
         EPHEMERAL=1
         # Its own scratch dirs: sharing the project's would have this session's startup sweep
-        # and its exit both tear down the real container's live FUSE mount, unmasking files.
+        # and its exit both tear down the real container's live view, unmasking files.
         SCRATCH_SUFFIX=".eph.$$"
     fi
 
-    FUSE_CNAME="${CNAME}-fuse"
-    # Platform-sensitive: on macOS the propagation root must live inside the engine VM, not on
-    # a virtiofs share of the Mac. host/portable.sh owns that choice.
-    FUSE_ROOT="$(fuse_root_path "${PROJ_HASH}${SCRATCH_SUFFIX}")"
+    # The redaction view: its process's files (.pid .addr .log) and staged rules, host-only;
+    # and where it is mounted for the box, in the VM.
+    VIEW_STATE="$KIB_HOST_ONLY/views/${SLUG}${SCRATCH_SUFFIX}"
+    PATTERNS_STATE="$VIEW_STATE.patterns"
+    VIEW_MNT="/mnt/kib/${PROJ_HASH}${SCRATCH_SUFFIX}"
+    ! engine_rootless || VIEW_MNT="$VIEW_STATE.mnt" # mounted here, by the view itself
     # Per-container files.
     local st="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}"
-    PATTERNS_STATE="$st.patterns"
     RESOLV_STATE="$st.resolv"
-    # The sidecar's /etc/passwd + /etc/group, synthesised so fusermount3 can resolve its own uid
-    # without the host's user table crossing the boundary (see _stage_passwd). Host-side state,
-    # never inside FUSE_ROOT: on macOS that root is VM-internal and the Mac cannot write to it.
-    PASSWD_STATE="$st.passwd"
-    GROUP_STATE="$st.group"
     CLIP_STATE="$st.clip"
     CLIP_HOST="$st.clip" # the bridge's pidfile and staging dir
     # The sleep guard's marker tree: written by the in-box hook, read by host/sleep-guard.sh.
@@ -73,9 +69,8 @@ kib_identity() {
     BROKER_HASH="$BROKER_DIR/hash"
     BROKER_ENABLED=0
 
-    # prepare_redaction fills this with the bind that brings the sidecar's redacted view in over
-    # $PWD. The seam is deliberate: redaction.sh stays the only file that knows about /dev/fuse
-    # and the caps that go with it — none of which reach this container.
+    # prepare_redaction fills this with the bind of the VM's mount of the view over $PWD. The seam
+    # is deliberate: redaction.sh stays the only file that knows how the view is served.
     REDACTION_ARGS=()
 }
 
@@ -166,7 +161,7 @@ teardown_container() {
     # this before `docker run`, so a stopped leftover never blocks the name.
     docker rm -f "$CNAME" >/dev/null 2>&1 || true
 
-    # After the container, so its :rslave view of the mount is gone before we unmount it.
+    # After the container, so nothing holds the view's mount when it goes.
     teardown_redaction
     stop_clipboard_bridge
 
@@ -225,14 +220,13 @@ start_container() {
         # below, and only where they are needed.
         --cap-drop=ALL
 
-        # The image still ships setuid binaries (su, mount, passwd, fusermount3). Defence in
+        # The image still ships setuid binaries (su, mount, passwd). Defence in
         # depth — the session's caps are already empty, so this closes a route, not a hole.
         --security-opt no-new-privileges
 
-        # NOT here, and this is the point of the sidecar topology: no --cap-add=SYS_ADMIN, no
-        # --cap-add=SETPCAP, no --device /dev/fuse, and no apparmor override. This container is
-        # capless at CREATION — a kernel fact — rather than capless once a shell has dropped
-        # things, and it keeps docker-default's `deny mount,`.
+        # NOT here: no --cap-add=SYS_ADMIN, no --cap-add=SETPCAP, no --device /dev/fuse, and no
+        # apparmor override. This container is capless at CREATION — a kernel fact — rather than
+        # capless once a shell has dropped things, and it keeps docker-default's `deny mount,`.
 
         # Bridge network + Claude's own domain allowlist. --add-host so a dev server on the
         # host stays reachable. host/vm.sh swaps in Lima's host address.
@@ -242,12 +236,18 @@ start_container() {
         -e DISABLE_ERROR_REPORTING=1
     )
 
-    # useradd + gosu into hostuser, inert at a non-root uid under no-new-privileges.
-    ARGS+=(--cap-add=SETUID --cap-add=SETGID --cap-add=CHOWN --cap-add=DAC_OVERRIDE
-        --cap-add=FOWNER)
+    if engine_rootless; then
+        # The box is root here, which is this user outside: Claude's root check takes the
+        # sanctioned IS_SANDBOX, and the five caps would land in CapEff, so none are added.
+        ARGS+=(-e KIB_ROOTLESS=1 -e IS_SANDBOX=1)
+    else
+        # useradd + gosu into hostuser, inert at a non-root uid under no-new-privileges.
+        ARGS+=(--cap-add=SETUID --cap-add=SETGID --cap-add=CHOWN --cap-add=DAC_OVERRIDE
+            --cap-add=FOWNER)
+    fi
 
-    # The project comes in here and ONLY here: prepare_redaction binds the sidecar's redacted
-    # view over $PWD (:rslave). There is no second, unredacted path to it.
+    # The project comes in here and ONLY here: prepare_redaction binds the redacted view over
+    # $PWD. There is no second, unredacted path to it: the VM never sees the raw project.
     ARGS+=(${REDACTION_ARGS[@]+"${REDACTION_ARGS[@]}"})
 
     # The sandbox rules, read-only at Claude's managed-policy path (host/config.sh has the why).
@@ -278,9 +278,9 @@ start_container() {
     # Python's caches would sit in every package folder: moved into the cache, not mounted.
     ARGS+=(-e PYTHONPYCACHEPREFIX="$c/pycache" -e MYPY_CACHE_DIR="$c/mypy"
         -e RUFF_CACHE_DIR="$c/ruff" -e PYTEST_ADDOPTS="-o cache_dir=$c/pytest")
-    # Build and install folders live on volumes: off FUSE (installs are ×5 faster) and off the
-    # host, built for Linux. Kept like the cache; one made mid-session is on FUSE until the next
-    # container. The entrypoint gives each root to the user.
+    # Build and install folders live on volumes: off the view (installs are ×5 faster) and off
+    # the host, built for Linux. Kept like the cache; one made mid-session is on the view until
+    # the next container. The entrypoint gives each root to the user.
     local d dirs=""
     while IFS= read -r d; do
         ARGS+=(-v "$CNAME-local-$(hash8 "$d"):$PWD/$d")
@@ -301,14 +301,14 @@ start_container() {
         )
     fi
 
-    # .git/hooks is NOT bound read-only here: $PWD is the FUSE view, and a bind over a subpath
+    # .git/hooks is NOT bound read-only here: $PWD is the view, and a bind over a subpath
     # of it would shadow the very layer doing the enforcing. The guard covers it — and covers
     # what the bind never could: nested repos, submodules, and repos created mid-session.
 
     # This project's transcripts, shared host<->box so --resume lists the same sessions on
-    # both sides. Would nest inside the session mount, hence the link. The sidecar binds the
-    # view at the project's host path, so Claude — which keys by its RESOLVED cwd — uses the
-    # same $SLUG canonical does, and source and link agree.
+    # both sides. Would nest inside the session mount, hence the link. The view is bound at the
+    # project's host path, so Claude — which keys by its RESOLVED cwd — uses the same $SLUG
+    # canonical does, and source and link agree.
     #
     # Drop OUR links first, exactly as the shared-asset farm does. $SESSION_BASE outlives the
     # container, so a link keyed by a name we no longer use is never reaped, and it reads to an
@@ -480,7 +480,7 @@ kib_cleanup() {
     # Uninterruptible from here. A tty ^C signals the whole foreground process group, so mashing
     # it to quit Claude lands the later presses on kib itself, once `docker exec` has restored
     # cooked mode: bash enters this trap on the first and a second one kills it mid-`docker stop`,
-    # stranding the main container, the FUSE sidecar and the broker. Ignore rather than trap —
+    # stranding the main container, the redaction view and the broker. Ignore rather than trap —
     # SIG_IGN survives fork+exec, so every `docker` child below is covered too, and a handler that
     # `exit`s would abort this trap exactly like the default did. (container-lifecycle.md)
     trap '' INT HUP TERM
@@ -520,7 +520,6 @@ kib_cleanup() {
     # erasing a short command's output the instant it exits. Claude's TUI manages its own
     # screen, as it does on the host, so kib leaves the terminal alone. Regression-guarded.
     [ -z "$notes" ] || printf '\n🛡️  kib: said before the session:\n%s' "$notes" >&2
-    vm_resume
 }
 
 # ── Run this terminal's session inside the project container ─────
@@ -556,12 +555,14 @@ kib_run_session() {
     trap 'exit 129' HUP
     trap 'exit 143' TERM
 
-    # No `setpriv` here. The container never had SYS_ADMIN or SETPCAP to drop — the sidecar
-    # holds the mount — so `docker exec` handing a session the container's full cap set is
+    # No `setpriv` here. The container never had SYS_ADMIN or SETPCAP to drop — the view is
+    # served from the host — so `docker exec` handing a session the container's full cap set is
     # harmless: that set is the entrypoint's own add-backs (0xcb:
     # CHOWN/DAC_OVERRIDE/FOWNER/SETGID/SETUID), inert under no-new-privileges at a non-root uid.
     # security-test.sh asserts CapEff=0 and that SYS_ADMIN is absent from the bounding set.
-    local -a incmd=(gosu "$(box_uid):$(box_gid)" /usr/local/bin/docker-entrypoint.sh "$@")
+    # No gosu under rootless: it would setuid to the root it already is, which needs CAP_SETUID.
+    local -a incmd=(/usr/local/bin/docker-entrypoint.sh "$@")
+    engine_rootless || incmd=(gosu "$(box_uid):$(box_gid)" "${incmd[@]}")
 
     # Same reasoning as the tag below: --node-version rides the exec, so two terminals can run
     # two Node versions against ONE container and no attach has to be refused over it. Empty

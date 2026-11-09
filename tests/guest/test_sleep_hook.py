@@ -40,18 +40,6 @@ def fire(hook: ModuleType, event: str, **extra: object) -> None:
         sys.stdin = sys.__stdin__
 
 
-def test_session_start_names_the_session_for_resume(hook: ModuleType, tmp_path: Path) -> None:
-    """A VM restart resumes each session by this name. /clear's new id replaces it, and an id that
-    is not a UUID names nothing: the host passes it on as an argument."""
-    session = tmp_path / "tag"
-    first, cleared = "0123abcd-0000-4000-8000-0123456789ab", "fedcba98-0000-4000-8000-0123456789ab"
-    fire(hook, "SessionStart", session_id=first)
-    fire(hook, "SessionStart", session_id=cleared)
-    assert [p.name for p in session.glob("sid.*")] == [f"sid.{cleared}"]
-    fire(hook, "SessionStart", session_id="../../etc/passwd")
-    assert list(session.glob("sid.*")) == []
-
-
 def test_events_keep_their_own_marker_warm(hook: ModuleType, tmp_path: Path) -> None:
     """The host expires what stops being touched, so live work has to keep touching it — and
     nothing may resurrect a marker whose work is over, or the next idle session is pinned."""

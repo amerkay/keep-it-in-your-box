@@ -104,11 +104,12 @@ else
         "every rebuild then leaks the old :latest — Dockerfile LABEL and prune must match"
 fi
 
-# The FUSE view (guest/fuse, Go) — what its tests cannot see. Its behaviour is pinned by
-# `go test` against tests/fixtures/redaction (run by `kib build`, and on a real mount in CI).
-_gf="$(cat "$KIB_ROOT"/guest/fuse/[!_]*[!t].go)" # the code, not its *_test.go
+# The view (host/view, Go) — what its tests cannot see. Its behaviour is pinned by `go test`
+# against tests/fixtures/redaction (run by `kib build`, and on a real FUSE mount in CI).
+_gf="$(cat "$KIB_ROOT"/host/view/[!_]*[!t].go)" # the code, not its *_test.go
 # Concurrent requests share one fd offset: lseek+read truncated reads at a 16 KiB boundary.
-if grep -q 'Seek(' <<<"$_gf" \
+# (billy's File.Seek, which NFS needs, only moves its own offset.)
+if grep -v '^func ' <<<"$_gf" | grep -q 'Seek(' \
     || ! grep -q 'syscall.Pwrite(h.fd' <<<"$_gf"; then
     fail "the FUSE view seeks, or lost pwrite" "a shared fd offset truncates concurrent I/O"
 else
@@ -241,96 +242,61 @@ else
         "chmod alone is a no-op on Docker Desktop's fakeowner binds"
 fi
 
-# ── The sidecar topology ─────────────────────────────────────────
-# The whole point of serving the view from its own container: the agent's must be capless at
-# CREATION. Each of these was a live property of the in-container-mount window, and losing any
-# one silently hands the agent mount capability back.
+# ── The view's topology ──────────────────────────────────────────
+# The view runs on the host and reaches the box as a bind of the VM's NFS mount, so the box is
+# capless at CREATION. Losing any of these silently hands it mount capability back.
 _red="$(sed 's/#.*$//' "$KIB_ROOT/host/redaction.sh")"
 _life="$(sed 's/#.*$//' "$KIB_ROOT/host/lifecycle.sh")"
-
-# lifecycle.sh builds the agent container's whole argv, so none of the four may appear in it at
-# all. (redaction.sh legitimately passes them — to the SIDECAR.)
 _leaked=""
 for _flag in 'cap-add=SYS_ADMIN' 'cap-add=SETPCAP' '/dev/fuse' 'apparmor=unconfined'; do
-    case "$_life" in *"$_flag"*) _leaked="$_leaked $_flag" ;; esac
+    case "$_life$_red" in *"$_flag"*) _leaked="$_leaked $_flag" ;; esac
 done
-# …and the one thing redaction.sh hands the agent is the bind, nothing else. Pinned exactly:
-# an added flag lands on this line.
+# The one thing redaction.sh hands the box is the bind, nothing else. Pinned exactly: an added
+# flag lands on this line.
 # shellcheck disable=SC2016  # matching redaction.sh's source text; the $vars stay literal
-printf '%s\n' "$_red" | grep -q '^ *REDACTION_ARGS=(-v "\$FUSE_ROOT/mnt:\$PWD:rslave")$' \
+printf '%s\n' "$_red" | grep -q '^ *REDACTION_ARGS=(-v "\$VIEW_MNT:\$PWD")$' \
     || _leaked="$_leaked REDACTION_ARGS"
 if [ -z "$_leaked" ]; then
     pass "the agent's container is capless at creation (no SYS_ADMIN/SETPCAP//dev/fuse/apparmor)"
 else
     fail "the agent's container regained:$_leaked" \
-        "the sidecar holds the mount; nothing the agent runs may be able to mount"
+        "the view is served from the host; nothing the agent runs may be able to mount"
 fi
 
 # `setpriv` was how the in-container mount clawed the caps back off each session. Its return
 # means the container is being created with caps to drop again.
 if printf '%s\n' "$_life" | grep -q 'setpriv'; then
     fail "host/lifecycle.sh runs setpriv on the session exec again" \
-        "capless-at-runtime is the shape the sidecar exists to replace"
+        "capless-at-runtime is the shape the host view exists to replace"
 else
     pass "sessions need no runtime cap drop (nothing was granted to drop)"
 fi
 
-# Ordering, not presence: killing the server first leaves a mounted-but-ENOTCONN path that the
-# next launch's rm -rf would delete THROUGH — the real project. Confirmed live on Docker Desktop
-# that the mount outlives the container, so this is not theoretical.
+# Unmount, then stop the view: a soft mount of a dead server only times out. And never die: it
+# runs from the EXIT trap ahead of merge_out_session, so aborting loses the session's fold-back.
 _td="$(printf '%s\n' "$_red" | awk '/^teardown_redaction\(\)/,/^}/')"
-if printf '%s\n' "$_td" | grep -q '_unmount_view' \
-    && [ "$(printf '%s\n' "$_td" | grep -n '_unmount_view' | head -1 | cut -d: -f1)" \
-        -lt "$(printf '%s\n' "$_td" | grep -n 'docker rm' | head -1 | cut -d: -f1)" ]; then
-    pass "teardown unmounts the view BEFORE removing the sidecar"
+_un="$(printf '%s\n' "$_td" | grep -n 'vm_view_unmount' | head -1 | cut -d: -f1)"
+# shellcheck disable=SC2016  # matching redaction.sh's source text
+_kill="$(printf '%s\n' "$_td" | grep -n 'kill_pgrp "\$VIEW_STATE.pid"' | head -1 | cut -d: -f1)"
+if [ -n "$_un" ] && [ -n "$_kill" ] && [ "$_un" -lt "$_kill" ] \
+    && ! printf '%s\n' "$_td" | grep -qw die; then
+    pass "teardown unmounts the view in the VM before stopping it, and never dies"
 else
-    fail "teardown_redaction removes the sidecar before unmounting its view" \
-        "a stale ENOTCONN mount is orphaned every exit, and rm -rf then hits the real project"
+    fail "teardown_redaction stops the view before unmounting it, or can die" \
+        "the exit path must reach merge_out_session"
 fi
-
-# …and it must WARN, not die: teardown_redaction runs from the EXIT trap ahead of
-# merge_out_session, so aborting there loses the session's .claude.json/history fold-back and
-# overwrites its exit code. The refusal to delete a live view moves to the next launch instead.
-if printf '%s\n' "$_td" | grep -q '_stale_mount_report warn' \
-    && ! printf '%s\n' "$_td" | grep -q '_stale_mount_report die'; then
-    pass "a view that will not unmount warns at teardown (the exit path still merges out)"
-else
-    fail "teardown_redaction dies on a view it could not unmount" \
-        "it runs before merge_out_session, so the session's config changes are lost"
-fi
-
-# The sidecar's own /etc/passwd is synthesised, never the host's. fusermount3 aborts if it
-# cannot resolve its uid, and binding the host's file works on Linux but CANNOT on macOS, where
-# Open Directory keeps real users out of it.
-# shellcheck disable=SC2016  # matching redaction.sh's source text: $PASSWD_STATE stays literal
-if printf '%s\n' "$_red" | grep -q -- '-v "\$PASSWD_STATE:/etc/passwd:ro"' \
-    && ! printf '%s\n' "$_red" | grep -q -- '-v /etc/passwd'; then
-    pass "the sidecar gets a synthesised /etc/passwd, not the host's"
-else
-    fail "the sidecar binds the host's /etc/passwd" \
-        "fusermount3 cannot resolve uid 501 from it on macOS — and it leaks the user table"
-fi
-unset _red _life _leaked _flag _td
-
-# The mount must remap ownership: on macOS the project reaches the sidecar over virtiofs as
-# root:root, and without --uid/--gid git reads the whole tree as another user's and refuses it.
-if grep -q -- '--uid' "$KIB_ROOT/host/redaction.sh" \
-    && grep -q -- '--gid' "$KIB_ROOT/host/redaction.sh"; then
-    pass "the FUSE view remaps ownership to the agent (git 'dubious ownership')"
-else
-    fail "the sidecar lost its --uid/--gid remap" \
-        "virtiofs reports root:root; git then refuses the whole tree"
-fi
+unset _red _life _leaked _flag _td _un _kill
 
 # Both rule files are argv and both required: an optional --guard-file fails OPEN (zero
 # [protect] rules, the mount reported active). "No rules" is an empty file, never a missing flag.
-if grep -q -- '--guard-file /usr/local/share/global.kibignore' "$KIB_ROOT/host/redaction.sh" \
-    && grep -q -- '--patterns-file /kib-patterns' "$KIB_ROOT/host/redaction.sh" \
+# shellcheck disable=SC2016  # matching redaction.sh's source text
+if grep -q -- '--guard-file "$KIB_GUARD_FILE_HOST"' "$KIB_ROOT/host/redaction.sh" \
+    && grep -q -- '--patterns-file "$PATTERNS_STATE"' "$KIB_ROOT/host/redaction.sh" \
     && grep -q '\*patterns == "" || \*guardFile == ""' <<<"$_gf"; then
-    pass "the sidecar is handed both rule files, and refuses to start without the guard one"
+    pass "the view is handed both rule files, and refuses to start without the guard one"
 else
-    fail "the redaction sidecar can start without guard rules" \
-        "a dropped --guard-file must abort the sidecar, not launch an unprotected box"
+    fail "the redaction view can start without guard rules" \
+        "a dropped --guard-file must abort the view, not launch an unprotected box"
 fi
 # The server's syscalls run as ITS uid: without default_permissions a `chmod 000` file reads.
 if grep -q '"default_permissions"' <<<"$_gf"; then
@@ -350,7 +316,7 @@ else
 fi
 # SIGHUP is the live rule reload; an unhandled one kills pid 1 and the view with it.
 if grep -q 'signal.Notify(sig, syscall.SIGHUP' <<<"$_gf"; then
-    pass "the sidecar reloads its rules on SIGHUP"
+    pass "the view reloads its rules on SIGHUP"
 else
     fail "the FUSE view no longer handles SIGHUP" "the host's live reload would kill the view"
 fi
@@ -376,7 +342,45 @@ if awk '/^func \(n \*node\) Flush/ {f=1; next} f && /^func / {exit} f' <<<"$_gf"
 else
     pass "Flush does not fsync (the kernel calls it on every close)"
 fi
+# A view in FUSE mode must exit when its mount goes, never fall through to serving NFS.
+if awk '/serveFUSE\(v, \*mnt, build\)/ {getline; print; exit}' <<<"$_gf" | grep -q 'return'; then
+    pass "the FUSE view exits with its mount (no NFS server after it)"
+else
+    fail "serve() falls through from FUSE to NFS" "an unmounted no-VM view would keep serving the project"
+fi
 unset _gf
+
+# ── The host view's wiring (each one broke, or nearly broke, its first real run) ──
+# .dockerignore keeps host/ out of the build context; the view's Go source lives in it.
+if grep -qx 'host' "$KIB_ROOT/.dockerignore" && ! grep -qx '!host/view' "$KIB_ROOT/.dockerignore"; then
+    fail ".dockerignore hides host/view from the build" "kib build fails: COPY host/view/ not found"
+else
+    pass "the build context carries the view's source (host/view)"
+fi
+# sync: without it a refused write is buffered and reported done (measured: an append to
+# .git/config read WRITTEN while the host's stayed untouched). soft: a dead view errors, never hangs.
+_opts="$(sed -n 's/^VIEW_NFS_OPTS="\(.*\)"$/\1/p' "$KIB_ROOT/host/vm.sh")"
+case ",$_opts," in
+    *,sync,*soft,* | *,soft,*sync,*) pass "the VM mounts the view sync and soft" ;;
+    *) fail "the view's NFS mount lost sync or soft" "options: $_opts" ;;
+esac
+unset _opts
+# limactl shell reads stdin: without </dev/null it swallows the caller's input (a pasted script,
+# a pipe). And nothing may pipe into a VM command for that reason: pass arguments.
+if ! grep -A2 '^vm_root() {' "$KIB_ROOT/host/portable.sh" | grep -q '</dev/null'; then
+    fail "vm_root lost its </dev/null" "limactl shell reads stdin and eats the caller's"
+elif grep -nE '\| *(vm_root|_in_engine)\b' "$KIB_ROOT"/host/*.sh | grep -v '^\s*#' | grep -q .; then
+    fail "something pipes into a VM command" "vm_root reads /dev/null: pass arguments instead"
+else
+    pass "VM commands never read stdin"
+fi
+# The host runs git on a repo the box writes: ls-files would run a core.fsmonitor it planted.
+if grep -q 'ls-files' "$KIB_ROOT/host/gitguard.sh" \
+    && ! grep -q -- '-c core.fsmonitor=false ls-files' "$KIB_ROOT/host/gitguard.sh"; then
+    fail "the host's git ls-files can run the repo's core.fsmonitor" "host code execution from the box"
+else
+    pass "the host's git ls-files runs with core.fsmonitor off"
+fi
 
 # kib installs no hook into a user's repo: the checks run at launch, teardown and `kib audit`.
 # Why a hook is not an option is in kib/host/gitaudit.py's docstring.
@@ -414,7 +418,7 @@ t_audit_gate_severity() {
     }
 
     # warn-class: a tracked path matching .kibignore is named, and the launch continues. The
-    # match is the view's (`fuse match` in a container): a fake docker answers for it.
+    # match is the view's (`kib-view match`): a fake one answers for it.
     (
         GIT_TEMPLATE_DIR='' git init -q "$dir/warn"
         cd "$dir/warn" || exit 1
@@ -422,11 +426,12 @@ t_audit_gate_severity() {
         printf 'v\n' >secret.txt
         git add -A
     ) >/dev/null 2>&1
-    mkdir "$dir/bin"
-    printf '#!/bin/sh\ncase "$*" in *"fuse match"*) printf "secret.txt\\0" ;; esac\n' >"$dir/bin/docker"
-    chmod +x "$dir/bin/docker"
+    mkdir -p "$dir/data/keep-it-in-your-box"
+    # shellcheck disable=SC2016 # the fake's own $1
+    printf '#!/bin/sh\ncat >/dev/null\n[ "$1" = match ] && printf "secret.txt\\0"\n' >"$dir/data/keep-it-in-your-box/kib-view"
+    chmod +x "$dir/data/keep-it-in-your-box/kib-view"
     rc=0
-    out="$(PATH="$dir/bin:$PATH" IMAGE_NAME=img _gate_in "$dir/warn")" || rc=$?
+    out="$(XDG_DATA_HOME="$dir/data" _gate_in "$dir/warn")" || rc=$?
     if [ "$rc" = 0 ] && printf '%s' "$out" | grep -q 'GATE-RETURNED-OK' \
         && printf '%s' "$out" | grep -q 'secret.txt'; then
         pass "audit gate: a tracked hidden path warns and the launch continues"

@@ -8,7 +8,7 @@
 #   ./dev.sh lint      verify: ruff, mypy --strict, shfmt -d, gofmt + go vet  (CI, via check)
 #   ./dev.sh check      lint + tests/check.sh + go test (syntax, shellcheck, portability, pytest)
 #
-# The Go steps (guest/fuse) run where `go` is on PATH: CI, and anywhere you install it. The
+# The Go steps (host/view) run where `go` is on PATH: CI, and anywhere you install it. The
 # image has no Go; `kib build` runs the same tests in its Go stage.
 #
 # Host-side, so bash-3.2/BSD-clean per the portability contract. Nothing here needs a
@@ -54,10 +54,10 @@ step() {
 
 gofmt_clean() { [ -z "$(gofmt -l . | tee /dev/stderr)" ]; }
 
-# One Go step, run in the module (guest/fuse).
+# One Go step, run in the module (host/view).
 gostep() {
     printf '\n\033[1m== %s\033[0m\n' "$1"
-    (cd guest/fuse && "${@:2}") || FAILED="$FAILED $1"
+    (cd host/view && "${@:2}") || FAILED="$FAILED $1"
 }
 
 # Tracked files plus new-but-not-ignored ones, so a file is linted before its first commit.
@@ -111,7 +111,7 @@ case "${1:-}" in
         step "ruff format" ruff format "${PY[@]}"
         step "ruff check --fix" ruff check --fix "${PY[@]}"
         step "shfmt -w" shfmt -w "${SH[@]}"
-        ! command -v go >/dev/null || step "gofmt -w" gofmt -w guest/fuse
+        ! command -v go >/dev/null || step "gofmt -w" gofmt -w host/view
         ;;
     lint)
         step "ruff format --check" ruff format --check "${PY[@]}"
@@ -122,7 +122,7 @@ case "${1:-}" in
             gostep "gofmt -l" gofmt_clean
             gostep "go vet" go vet ./...
         else
-            printf '\n(no go on PATH: guest/fuse is linted by CI and kib build)\n'
+            printf '\n(no go on PATH: host/view is linted by CI and kib build)\n'
         fi
         ;;
     check)

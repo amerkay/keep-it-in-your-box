@@ -1,6 +1,6 @@
-# The build context only needs the Dockerfile's inputs: guest/, kib/, requirements-dev.txt and
-# the redaction fixtures the Go stage tests against. Everything else is either host-side, other
-# tests, or caches that would bust the `COPY kib` layer on every lint run.
+# The build context only needs the Dockerfile's inputs: guest/, kib/, requirements-dev.txt, the
+# view's source (host/view) and the redaction fixtures its Go stage tests against. Everything else
+# is either host-side, other tests, or caches that would bust the `COPY kib` layer on every lint run.
 .git
 .github
 .venv
@@ -12,6 +12,7 @@ examples
 tests
 !tests/fixtures/redaction
 host
+!host/view
 bin
 tools
 *.md

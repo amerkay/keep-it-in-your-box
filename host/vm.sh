@@ -1,22 +1,19 @@
 #!/usr/bin/env bash
 # Docker runs in a Lima VM and the box runs on gVisor inside it, while kib stays on the host: a
 # kernel exploit needs a gVisor bug, then a VM kernel bug (docs/vm.md). Same ~/.claude, login and
-# broker either way: kib itself never moves. The VM shares kib's own dirs and the folders projects
-# opened, never ~ itself; a new one restarts it, and every session cut resumes on its own.
+# broker either way: kib itself never moves. The VM shares ~/.claude and kib's own dirs, a fixed
+# set, so it never restarts for a project; projects reach it only as their redacted views, which
+# it mounts from the host over NFS (vm_view_mount).
 #
 # Reads:  KIB_CONFIG KIB_STATE_ROOT KIB_ROOT HOME LIMA_VM_TYPE LIMA_MOUNT_TYPE KIB_NODE_CACHE
-#         STATE_DIR, and at a session's exit VERB CMD SLEEP_STATE SESSION_TAG EPHEMERAL
 # Writes: DOCKER_HOST DOCKER_CONFIG (exported) _KIB_ENGINE_VM KIB_HOST_GATEWAY VM_MOUNTS VM_WANT
-#         VM_NEW_ROOT _VM_RESUME RESUME_ARGS PATH GVISOR_RUNTIME
+#         PATH GVISOR_RUNTIME
 # shellcheck disable=SC2034
 
 KIB_VM_NAME="kib-vm"
 VM_LOCK="$KIB_STATE_ROOT/.locks/vm.lock"
-VM_SPEC="$KIB_STATE_ROOT/vm-spec"       # the mount set the VM was last booted with
-VM_GROW="$KIB_STATE_ROOT/vm-memory"     # GiB for its next boot, after an out-of-memory kill
-VM_ROOTS="$KIB_STATE_ROOT/vm-roots"     # the projects it shares, one per line
-VM_RESTART="$KIB_STATE_ROOT/vm-restart" # the pid of a kib restarting it under open sessions
-VM_EVICT_WAIT=120                       # seconds those sessions get to close
+VM_SPEC="$KIB_STATE_ROOT/vm-spec"   # the mount set the VM was last booted with
+VM_GROW="$KIB_STATE_ROOT/vm-memory" # GiB for its next boot, after an out-of-memory kill
 # ponytail: Lima's user-mode network address; read it from the VM if a network differs.
 LIMA_HOST_IP=192.168.5.2
 
@@ -27,25 +24,16 @@ GVISOR_VERSION=20261102.0
 # Versioned, so a pin bump installs beside the old one and no running box loses its runtime.
 GVISOR_RUNTIME="kib-gvisor-$GVISOR_VERSION"
 
-# ~/.claude, the projects opened, then kib's own dirs, each at its own path; never ~ itself, so
-# ~/.ssh, ~/.aws and the rest stay out of the VM. A dir inside one already listed shares its mount.
+# ~/.claude, then kib's own dirs, each at its own path; never ~ itself or a project, so ~/.ssh,
+# ~/.aws and every raw project stay out of the VM. A dir inside one already listed shares its mount.
 _vm_mounts() {
     local p
     VM_MOUNTS=(--mount-only "$HOME/.claude:w")
-    while IFS= read -r p; do _vm_mount "$p:w"; done < <(_vm_roots)
     for p in "$KIB_STATE_ROOT:w" "$KIB_NODE_CACHE:w" "$KIB_ROOT"; do _vm_mount "$p"; done
     VM_WANT="$LIMA_MOUNT_TYPE ${VM_MOUNTS[*]}"
 }
 _vm_mount() { # <dir[:w]>
     _vm_under "${1%:w}" "${VM_MOUNTS[@]}" || VM_MOUNTS+=(--mount-only "$1")
-}
-# Sorted, so a folder comes before any inside it. A deleted project drops out: never recreated.
-_vm_roots() {
-    local p
-    {
-        cat "$VM_ROOTS" 2>/dev/null || true
-        [ -z "${VM_NEW_ROOT:-}" ] || echo "$VM_NEW_ROOT"
-    } | LC_ALL=C sort -u | while IFS= read -r p; do [ ! -d "$p" ] || echo "$p"; done
 }
 _vm_under() { # <path> <dir[:w]…>: the path is one of the dirs, or inside one
     local p="$1/" d
@@ -53,23 +41,6 @@ _vm_under() { # <path> <dir[:w]…>: the path is one of the dirs, or inside one
     for d; do case "$p" in "${d%:w}"/*) return 0 ;; esac done
     return 1
 }
-
-# A project not yet shared joins the list. Never ~ or above it, which would share ~/.ssh again.
-vm_project_ok() {
-    local r
-    while IFS= read -r r; do _vm_under "$PWD" "$r" && return 0; done < <(_vm_roots)
-    VM_NEW_ROOT="$(_vm_root_of "$PWD")"
-    if _vm_private "$VM_NEW_ROOT"; then
-        die "kib won't share $VM_NEW_ROOT with its VM: your home folder is in it."
-    fi
-}
-_vm_root_of() { # <dir>: its whole repo, which the launch's git audit reads
-    local d
-    d="$(_git_toplevel "$1")"
-    ! _vm_private "$d" || d=$1
-    echo "$d"
-}
-_vm_private() { [ -z "$1" ] || _vm_under "$HOME" "$1"; } # none (/), ~, or a folder holding ~
 
 # One line and a dot a second, the log only if it fails. Its host agent outlives kib, so it must
 # not inherit a lock fd.
@@ -89,15 +60,14 @@ _limactl() { # <message> <limactl verb> <args…>
 }
 
 # Bring the VM up and hold its session count (fd 205, shared) until exit — the same reference
-# count as the project lock. Boot (fd 206) serialises create, start, re-mount and gVisor, and
-# comes first: a kib waiting out another's restart must hold no share of 205.
+# count as the project lock. Boot (fd 206) serialises create, start, re-mount and gVisor.
 vm_up() {
     local status
     mkdir -p "$KIB_STATE_ROOT/.locks"
-    exec 206>"$VM_LOCK.boot"
-    lock_fd -x 206
     exec 205>"$VM_LOCK"
     lock_fd -w 120 -s 205 || die "timed out waiting for the VM to stop ($VM_LOCK)."
+    exec 206>"$VM_LOCK.boot"
+    lock_fd -x 206
     _vm_mounts
     _vm_mkdirs
     status="$(limactl list --format '{{.Status}}' "$KIB_VM_NAME" 2>/dev/null || true)"
@@ -109,8 +79,9 @@ vm_up() {
         _vm_zram
         status=Running
     elif [ "$VM_WANT" != "$(cat "$VM_SPEC" 2>/dev/null)" ]; then
-        # A new project folder or a kib upgrade. Never bind what isn't mounted.
-        lock_fd -n -x 205 || { _vm_evict && _vm_mounts; }
+        # A kib upgrade changed the mount set. Never cut a session, never bind what isn't mounted.
+        lock_fd -n -x 205 || die "this kib changed the VM's mounts, and other kib sessions use it." \
+            "Close them once; the next launch updates the VM (one restart)."
         limactl stop "$KIB_VM_NAME" >/dev/null 2>&1 || true
         # Not `edit --start`: an edit that changes nothing never starts the VM.
         _limactl "updating its VM's mounts" edit \
@@ -145,50 +116,11 @@ _vm_mkdirs() {
         case "$m" in --*) ;; *) mkdir -p "${m%:w}" ;; esac
     done
 }
-_vm_save() { # the mount set the VM now has
-    printf '%s\n' "$VM_WANT" >"$VM_SPEC"
-    _vm_roots >"$VM_ROOTS.tmp" && mv "$VM_ROOTS.tmp" "$VM_ROOTS"
-}
-
-# Restarting the VM ends every session in it, so ask first if one is mid-work. Each running box's
-# project stays shared, and each session cut comes back with --resume (vm_down, vm_resume).
-_vm_evict() {
-    local v n=0 busy=0 a="" ids
-    for v in $(kib_sessions "$STATE_DIR"); do
-        n=$((n + 1))
-        [ "$v" = idle ] || busy=$((busy + 1))
-    done
-    if [ "$busy" -gt 0 ]; then
-        printf '🛡️  kib: sharing a new project restarts the VM, and %s of its sessions are mid-work.\n' \
-            "$busy" >&2
-        printf '   They stop, then resume where they left off. Restart now? [y/N] ' >&2
-        { [ -t 0 ] && read -r a; } || true
-        case "$a" in [yY]*) ;; *) die "left the VM as it is: open this project again once they finish." ;; esac
-    elif [ "$n" -gt 0 ]; then
-        echo "🛡️  kib: restarting the VM to share a new project; its $n idle session(s) resume after." >&2
-    fi
-    echo "$$" >"$VM_RESTART"
-    _vm_docker
-    ids="$(docker ps -q 2>/dev/null || true)"
-    if [ -n "$ids" ]; then
-        # The FUSE sidecar binds its project at /src (host/redaction.sh).
-        # shellcheck disable=SC2086 # one id per word
-        docker inspect --format '{{range .Mounts}}{{if eq .Destination "/src"}}{{.Source}}{{end}}{{end}}' \
-            $ids 2>/dev/null | while IFS= read -r v; do [ -z "$v" ] || _vm_root_of "$v"; done >>"$VM_ROOTS"
-        # shellcheck disable=SC2086
-        docker stop $ids >/dev/null 2>&1 || true
-    fi
-    lock_fd -w "$VM_EVICT_WAIT" -x 205 || {
-        rm -f "$VM_RESTART"
-        die "other kib sessions still use the VM after $VM_EVICT_WAIT s; close them, then retry."
-    }
-    rm -f "$VM_RESTART"
-}
-_vm_restarting() { kill -0 "$(cat "$VM_RESTART" 2>/dev/null)" 2>/dev/null; }
+_vm_save() { printf '%s\n' "$VM_WANT" >"$VM_SPEC"; } # the mount set the VM now has
 
 # Apple's virtiofs reports a file as owned by whoever asks, so gVisor (root) sees kib's private
 # dirs as root's and the box user is locked out. bindfs over each reports the host user instead.
-# Never over a project, kib's checkout included: under the redaction sidecar it hung `docker run`.
+# Never over kib's checkout: it hung `docker run` when kib was the project.
 # --multithreaded: single-threaded, bindfs hung on the first stat of a transcript (measured).
 # ulimit: it holds an fd per open dir, gVisor keeps one open per cached dir, and 1024 ran out
 # on the plugin tree (EMFILE in the box).
@@ -225,11 +157,7 @@ _vm_zram() {
 _vm_gvisor() {
     local sha log="$KIB_STATE_ROOT/vm.log"
     ! _vm_has_gvisor || return 0
-    case "$(uname -m)" in
-        x86_64) sha=2e6671bb2d033b871c5811ab57e16ac570988b0e0054c525f911cfaf191bab3ca4efb08e0a98daa4b9e7d248f9e5776ef2ef2f8a6b82d829646a42924c98bb05 ;;
-        arm64 | aarch64) sha=574b5775b4417618f63c8506e6bb237e370df85722832a5d0c3831382155e55e59d4cfa993a1e9bbe1b1cf04346ffd48b20aaa879c6ed9a52c680f762fd19980 ;;
-        *) die "no gVisor build for $(uname -m)." ;;
-    esac
+    sha="$(_gvisor_sha)"
     echo "🛡️  kib: installing gVisor $GVISOR_VERSION into its VM (one time)…" >&2
     # The VM has no bzip2; python3 unpacks it. No && chains: set -e stops at the first failure.
     # shellcheck disable=SC2016 # the VM's shell expands them
@@ -247,6 +175,13 @@ _vm_gvisor() {
     }
     wait_until 50 0.2 _vm_has_gvisor \
         || die "Docker in the VM never listed gVisor (runtime $GVISOR_RUNTIME)."
+}
+_gvisor_sha() {
+    case "$(uname -m)" in
+        x86_64) echo 2e6671bb2d033b871c5811ab57e16ac570988b0e0054c525f911cfaf191bab3ca4efb08e0a98daa4b9e7d248f9e5776ef2ef2f8a6b82d829646a42924c98bb05 ;;
+        arm64 | aarch64) echo 574b5775b4417618f63c8506e6bb237e370df85722832a5d0c3831382155e55e59d4cfa993a1e9bbe1b1cf04346ffd48b20aaa879c6ed9a52c680f762fd19980 ;;
+        *) die "no gVisor build for $(uname -m)." ;;
+    esac
 }
 _vm_has_gvisor() {
     docker info --format '{{range $k, $v := .Runtimes}}{{$k}} {{end}}' 2>/dev/null \
@@ -324,9 +259,73 @@ _install() { # <sha256> <url> <dir under ~> [tar members…, or the name of a ba
 # The box's resolv.conf: the VM's own resolvers. Under gVisor Docker's embedded DNS
 # (127.0.0.11) is unreachable, so the broker is a host entry instead (add_broker_env_args).
 vm_resolv() { # <file>
-    vm_root grep '^nameserver' /run/systemd/resolve/resolv.conf >"$1" 2>/dev/null || true
-    [ -s "$1" ] || die "could not read the VM's DNS servers."
+    _in_engine grep '^nameserver' /run/systemd/resolve/resolv.conf >"$1" 2>/dev/null || true
+    [ -s "$1" ] || die "could not read the engine's DNS servers (/run/systemd/resolve/resolv.conf)."
     chmod 644 "$1"
+}
+
+# A project's redacted view, mounted by VM root from the host's loopback (Lima's address for it).
+# sync: a refused write fails the write(2), not a later flush whose error gVisor may drop. soft: a
+# dead view errors in the box instead of hanging it. actimeo=1: an edit is seen at the next open
+# anyway (close-to-open), a stat-only watcher within a second. nolock: locks stay in the VM,
+# which serves one box per project. nfs-common once, like bindfs.
+VIEW_NFS_OPTS="vers=3,proto=tcp,mountproto=tcp,nolock,sync,actimeo=1,soft,timeo=10,retrans=2"
+vm_view_mount() { # <mountpoint> <port> <secret>
+    # shellcheck disable=SC2016 # the VM's shell expands them
+    vm_root sh -c 'i="apt-get install -y -q nfs-common"
+        command -v mount.nfs >/dev/null || $i || { apt-get update -q && $i; } || exit 1
+        umount -l "$1" 2>/dev/null
+        mkdir -p "$1" && mount -t nfs -o "$2,port=$3,mountport=$3" "$4:/$5" "$1"' \
+        _ "$1" "$VIEW_NFS_OPTS" "$2" "$LIMA_HOST_IP" "$3" >>"$KIB_STATE_ROOT/vm.log" 2>&1
+}
+vm_view_unmount() { # <mountpoint>: the VM's NFS mount, or rootless's FUSE one
+    # shellcheck disable=SC2016 # the engine's shell expands it
+    _in_engine sh -c 'umount -l "$1" 2>/dev/null || fusermount3 -u -z "$1" 2>/dev/null
+        rmdir "$1" 2>/dev/null; true' _ "$1" >/dev/null 2>&1 || true
+}
+vm_view_has() { # <mountpoint> <./a/b…>: those whose parent the view shows, without the ./
+    # shellcheck disable=SC2016 # the engine's shell expands them
+    _in_engine sh -c 'm=$1 && shift; for d; do [ -d "$m/${d%/*}" ] && printf "%s\n" "${d#./}"; done; true' \
+        _ "$@" 2>/dev/null
+}
+
+# Runs a command where the engine's mounts are: as VM root, or here under rootless.
+_in_engine() { if engine_lima; then vm_root "$@"; else "$@"; fi; }
+
+# ── No-VM mode (Linux, `engine = rootless`) ─────────────────────
+# The box runs on gVisor under the user's rootless Docker, as root inside, which is this user
+# outside. One barrier, not two: a gVisor bug alone reaches the host, as this user. And runsc
+# runs with --ignore-cgroups, rootless Docker's only way to run it, so boxes have no memory or
+# CPU limits. The view is a host FUSE mount, since rootless Docker cannot mount NFS.
+# (PLAN_NFS_VIEW.md Tests 11–12)
+GVISOR_HOST_DIR="$KIB_HOST_ONLY/gvisor/$GVISOR_VERSION"
+rootless_use() {
+    is_macos && die "engine = rootless is Linux only: a Mac needs kib's VM."
+    docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless \
+        || die "engine = rootless needs rootless Docker running (docs/vm.md, \"No-VM mode\")."
+    _KIB_ROOTLESS=1
+    _vm_has_gvisor || _rootless_gvisor
+}
+
+# gVisor into rootless Docker once per pin, after one prompt: it edits the user's Docker config.
+# HUP to dockerd alone; signalling the whole user unit takes containerd down with it.
+_rootless_gvisor() {
+    local a pid cfg="$HOME/.config/docker/daemon.json" tgz="$GVISOR_HOST_DIR/gvisor.tar.bz2"
+    printf '🛡️  kib: no-VM mode adds gVisor (%s) to %s and reloads Docker. Go ahead? [y/N] ' \
+        "$GVISOR_RUNTIME" "$cfg" >&2
+    { [ -t 0 ] && read -r a; } || true
+    case "$a" in [yY]*) ;; *) die "gVisor is not set up for rootless Docker." ;; esac
+    mkdir -p "$GVISOR_HOST_DIR" "${cfg%/*}"
+    if ! curl -fsSL -o "$tgz" "https://storage.googleapis.com/gvisor/releases/release/$GVISOR_VERSION/$(uname -m)/gvisor.tar.bz2" \
+        || [ "$(sha512_file "$tgz")" != "$(_gvisor_sha)" ] || ! tar -xjf "$tgz" -C "$GVISOR_HOST_DIR" \
+        || ! "$GVISOR_HOST_DIR/runsc" install --config_file="$cfg" --runtime="$GVISOR_RUNTIME" \
+            -- --oci-seccomp --ignore-cgroups >/dev/null; then
+        die "could not install gVisor $GVISOR_VERSION for rootless Docker."
+    fi
+    rm -f "$tgz"
+    pid="$(pgrep -u "$(id -u)" -x dockerd)" || die "no rootless dockerd to reload; restart it, then retry."
+    kill -HUP "$pid"
+    wait_until 50 0.2 _vm_has_gvisor || die "rootless Docker never listed gVisor ($GVISOR_RUNTIME)."
 }
 
 # Last kib out leaves the VM up for VM_LINGER, so a quick reopen skips the boot. Only the newest
@@ -337,83 +336,17 @@ VM_LINGER=600
 vm_down() {
     engine_lima || return 0
     _vm_oom
-    # Cut by another kib's restart: decided while fd 205 still holds it back, and no stop timer.
-    if _vm_restarting; then
-        { [ "${EPHEMERAL:-0}" != 1 ] && [ "${VERB:-}" = claude ] \
-            && _VM_RESUME="$(kib_session_id "${SLEEP_STATE:-}" "${SESSION_TAG:-}")"; } || _VM_RESUME=-
-    else
-        exec 205>&-
-        exec 205>"$VM_LOCK"
-        if lock_fd -n -x 205; then
-            # shellcheck disable=SC2016 # the detached shell's own $1, $2
-            detach_pgrp bash -c '. "$1/host/core.sh" && . "$1/host/portable.sh" && . "$1/host/vm.sh" \
-                && sleep "$2" && _vm_linger_end' _ "$KIB_ROOT" "$VM_LINGER" \
-                >/dev/null 2>&1 200>&- 201>&- 202>&- 205>&- 206>&-
-            echo "$!" >"$VM_LOCK.linger" # the timer's own pid: unique, and the newest wins
-            echo "🛡️  kib: last session closed — the VM stops in $((VM_LINGER / 60)) min unless one opens." >&2
-        fi
+    exec 205>&-
+    exec 205>"$VM_LOCK"
+    if lock_fd -n -x 205; then
+        # shellcheck disable=SC2016 # the detached shell's own $1, $2
+        detach_pgrp bash -c '. "$1/host/core.sh" && . "$1/host/portable.sh" && . "$1/host/vm.sh" \
+            && sleep "$2" && _vm_linger_end' _ "$KIB_ROOT" "$VM_LINGER" \
+            >/dev/null 2>&1 200>&- 201>&- 202>&- 205>&- 206>&-
+        echo "$!" >"$VM_LOCK.linger" # the timer's own pid: unique, and the newest wins
+        echo "🛡️  kib: last session closed — the VM stops in $((VM_LINGER / 60)) min unless one opens." >&2
     fi
     exec 205>&-
-}
-
-# The session another kib's restart cut comes back as itself, once the VM is up again.
-vm_resume() {
-    case "${_VM_RESUME:-}" in
-        "") return 0 ;;
-        -)
-            echo "🛡️  kib: the VM restarted to share a new project, which ended this session." >&2
-            return 0
-            ;;
-    esac
-    echo "🛡️  kib: the VM is restarting to share a new project; this session resumes after it." >&2
-    rm -rf "${SLEEP_STATE:?}/${SESSION_TAG:?}" # its markers would count as a live session
-    trap - INT HUP TERM                        # kib_cleanup's ignore would outlive the exec
-    _vm_resume_args ${CMD[@]+"${CMD[@]:2}"}    # CMD: claude --dangerously-skip-permissions …
-    exec "$KIB_ROOT/bin/kib" claude ${RESUME_ARGS[@]+"${RESUME_ARGS[@]}"} --resume "$_VM_RESUME" \
-        200>&- 201>&- 202>&- 205>&- 206>&-
-}
-
-# The session's own claude flags, for its relaunch: never a prompt, which would be sent again, nor
-# a session pick. Lists from `claude --help` (2.1). A flag not listed is kept only when no word
-# follows it, which may be its value or a prompt: the worst case loses a flag, never replays one.
-_vm_resume_args() { # <claude args…> → RESUME_ARGS
-    local a next=prompt odd=""
-    RESUME_ARGS=()
-    for a; do
-        case "$a" in
-            --) break ;;
-            -*)
-                [ -z "$odd" ] || RESUME_ARGS+=("$odd")
-                odd="" next=prompt
-                case "${a%%=*}" in
-                    -c | --continue | -p | --print | -r | --resume | --session-id | --fork-session | \
-                        --from-pr | --teleport | --cloud | --environment | --bg | --background | \
-                        --desktop | -w | --worktree | --tmux) continue ;;
-                    --add-dir | --allowedTools | --allowed-tools | --disallowedTools | \
-                        --disallowed-tools | --betas | --file | --mcp-config | --tools) next=many ;;
-                    --agent | --agents | --append-system-prompt | --append-system-prompt-file | \
-                        --autocompact | -d | --debug | --debug-file | --effort | --fallback-model | \
-                        --input-format | --json-schema | --max-budget-usd | --model | -n | --name | \
-                        --output-format | --permission-mode | --permission-prompts | --plugin-dir | \
-                        --plugin-url | --prompt-suggestions | --remote-control | \
-                        --remote-control-session-name-prefix | --setting-sources | --settings | \
-                        --system-prompt | --system-prompt-file | --system-prompt-snapshot) next=one ;;
-                    *) case "$a" in *=*) ;; *) odd=$a && continue ;; esac ;;
-                esac
-                case "$a" in *=*) next=prompt ;; esac
-                RESUME_ARGS+=("$a")
-                ;;
-            *)
-                if [ -n "$odd" ]; then
-                    odd="" # an unknown flag's value, or a prompt: neither is kept
-                elif [ "$next" != prompt ]; then
-                    RESUME_ARGS+=("$a")
-                    [ "$next" = many ] || next=prompt
-                fi
-                ;;
-        esac
-    done
-    [ -z "$odd" ] || RESUME_ARGS+=("$odd")
 }
 
 _vm_linger_end() {
@@ -457,8 +390,11 @@ _vm_oom() {
     fi
 }
 
-# <verb>: claude and exec open a project, which must be one the VM can see.
-vm_use() {
+vm_use() { # <verb>
+    if [ "$KIB_CFG_ENGINE" = rootless ]; then
+        rootless_use
+        return 0
+    fi
     PATH="$PATH:$HOME/.local/bin:$HOME/.local/docker" # where _vm_tools installs
     # kib's docker config, plugins beside it. Not ~/.docker: Docker Desktop's `credsStore: desktop`
     # there fails every pull once it is gone.
@@ -467,7 +403,6 @@ vm_use() {
         "here. Set them up once: $KIB_ROOT/docs/vm.md"
     _vm_tools || die "kib runs every box in a Lima VM." \
         "Run kib in a terminal and answer Y to install it (no sudo, nothing else changes)."
-    case "$1" in claude | exec | audit) vm_project_ok ;; esac
     # A session's cleanup calls vm_down; any other verb arms the stop timer at its own exit.
     case "$1" in claude | exec) ;; *) trap vm_down EXIT ;; esac
     vm_up

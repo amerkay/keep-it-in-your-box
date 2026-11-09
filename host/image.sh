@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Image existence, version lookup and the background-rebuild prompt.
 #
-# Reads:  KIB_ROOT IMAGE_NAME BUILD_LOCK BUILD_LOG BUILD_PID
+# Reads:  KIB_ROOT IMAGE_NAME KIB_VIEW BUILD_LOCK BUILD_LOG BUILD_PID
 # Writes: nothing global
 
 CLAUDE_DIST_URL="https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest"
@@ -18,12 +18,12 @@ latest_claude_version() {
 # non-interactive failure, and 1 on an interactive one, which under `set -e` would abort kib
 # here and leave the `die` below (the message the user needs) unreachable. `|| true`, then
 # re-inspect: the image either exists or it does not.
+_built() { docker image inspect "$IMAGE_NAME" &>/dev/null && [ -x "$KIB_VIEW" ]; }
 build_image_if_missing() {
-    docker image inspect "$IMAGE_NAME" &>/dev/null && return 0
+    _built && return 0
     echo "🔨 Building Claude Code image (first time, please wait)..." >&2
     "$KIB_ROOT/tools/build-image.sh" || true
-    docker image inspect "$IMAGE_NAME" &>/dev/null \
-        || die "the image build did not produce $IMAGE_NAME — see $BUILD_LOG."
+    _built || die "the image build did not produce $IMAGE_NAME and $KIB_VIEW — see $BUILD_LOG."
 }
 
 check_for_updates() {

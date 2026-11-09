@@ -9,7 +9,7 @@
 # Shims are DETERMINISTIC per OS — no native-first fallback, exactly two paths, and the check
 # suite forces the perl paths on Linux so both stay exercised.
 #
-# Reads:  KIB_CONFIG, and (FUSE shims only) KIB_STATE_ROOT IMAGE_NAME from core.sh / bin/kib
+# Reads:  KIB_CONFIG, and (vm_root only) KIB_VM_NAME from host/vm.sh
 # Writes: KIB_OS, KIB_CFG_* (from ~/.keep-it-in-your-box/config) — all read across the source
 #         boundary by the other host units
 # shellcheck disable=SC2034
@@ -26,9 +26,13 @@ esac
 is_macos() { [ "$KIB_OS" = darwin ]; }
 
 # The engine runs in kib's Lima VM (host/vm.sh; always on macOS). Set here, never from the
-# environment — an inherited 1 would aim engine_ns_exec's privileged nsenter at THIS host.
+# environment — an inherited 1 would aim vm_root's commands at the wrong engine.
 _KIB_ENGINE_VM=0
 engine_lima() { [ "$_KIB_ENGINE_VM" = 1 ]; }
+# Or, opted into on Linux (`engine = rootless`), rootless Docker here, the box as root inside it,
+# which is this user outside (host/vm.sh rootless_use). Never from the environment either.
+_KIB_ROOTLESS=0
+engine_rootless() { [ "$_KIB_ROOTLESS" = 1 ]; }
 
 # virtiofs on both: 9p writes ~6x slower. Never reverse-sshfs: it can reach host paths no mount
 # names.
@@ -120,6 +124,9 @@ hash8() {
 
 sha256_file() {
     if [ "$KIB_OS" = darwin ]; then shasum -a 256 <"$1"; else sha256sum <"$1"; fi | cut -d' ' -f1
+}
+sha512_file() {
+    if [ "$KIB_OS" = darwin ]; then shasum -a 512 <"$1"; else sha512sum <"$1"; fi | cut -d' ' -f1
 }
 
 host_mem_kib() {
@@ -228,74 +235,20 @@ host_claude_path() {
     printf '%s\n' "$KIB_HOST_CLAUDE"
 }
 
-# The ids everything in the box runs as: ours. Every --user, HOST_UID and FUSE id goes through
-# these (tests/check/regressions.sh).
-box_uid() { id -u; }
-box_gid() { id -g; }
-
-# ── The FUSE redaction root ───────────────────────────────────────
-# The sidecar mounts the redacted view under this root and the agent's container consumes it by
-# mount propagation, so both containers must see the same directory AND the mount *event* must
-# be able to travel between them.
-#
-# That rules out any path the engine serves as a file share: a share has no mount namespace for
-# the event to land in. The root is a VM-local dir, never a Lima mount; not /run, which
-# Ubuntu's fusermount3 AppArmor profile denies. (docs/design-notes/macos.md)
-fuse_root_path() { printf '/mnt/kib/fuse.%s\n' "$1"; } # <per-project key>
+# The ids everything in the box runs as: ours, or 0 under rootless Docker, where 0 IS ours. Every
+# --user and HOST_UID goes through these (tests/check/regressions.sh).
+box_uid() { if engine_rootless; then echo 0; else id -u; fi; }
+box_gid() { if engine_rootless; then echo 0; else id -g; fi; }
 
 # Root in the VM, over Lima's own ssh. Its ssh master may outlive kib: no lock fd.
 vm_root() {
     limactl shell --workdir / "$KIB_VM_NAME" sudo -n -- "$@" </dev/null \
         200>&- 201>&- 202>&- 205>&- 206>&-
 }
-engine_ns_exec() { vm_root "$@" >/dev/null 2>&1; }
-
-# ── Mount state ───────────────────────────────────────────────────
-# Ask the kernel directly. `mountpoint -q` is NOT usable: after the server dies the mount stays
-# in the table but stat() returns ENOTCONN, so mountpoint calls a directory that still IS one
-# "not a mountpoint" — and the unmount gets skipped.
-# shellcheck disable=SC2016  # $1 is the inner sh's argument, not ours
-fuse_mounted() {
-    engine_ns_exec sh -c '
-        while read -r _d _m _r; do [ "$_m" = "$1" ] && exit 0; done </proc/self/mounts
-        exit 1' _ "$1"
-}
-
-# `umount -l` only: the VM has no fusermount3, and the server is in a container we are about to
-# remove — there is nobody to answer a clean unmount.
-unmount_fuse() {
-    fuse_mounted "$1" || return 0
-    engine_ns_exec umount -l "$1" || true
-    ! fuse_mounted "$1"
-}
-
-# ── Root lifecycle ────────────────────────────────────────────────
-# Create <root>/mnt owned by <uid>:<gid>, propagating shared. Called once per cold start, before
-# the sidecar. A plain directory cannot be a propagation peer until it is a mount in its own
-# right: bind it to itself, then mark it rshared — idempotent, since the second call finds it
-# already mounted. `chown`: fusermount3 refuses a mountpoint its caller does not own.
-fuse_root_create() { # <root> <uid> <gid>
-    # shellcheck disable=SC2016  # $1..$3 are the inner sh's arguments, not ours
-    engine_ns_exec sh -c '
-        mkdir -p "$1/mnt" || exit 1
-        chmod 755 "$1" "$1/mnt"
-        chown "$2:$3" "$1/mnt" || exit 1
-        grep -q " $1 " /proc/self/mounts || mount --bind "$1" "$1" || exit 1
-        mount --make-rshared "$1"' _ "$1" "$2" "$3" \
-        || die "could not prepare the redaction root inside the VM ($1)." \
-            "kib cannot serve the .kibignore redaction without it, and will not run" \
-            "unprotected. Restart the VM (limactl stop $KIB_VM_NAME) and try again."
-}
-
-# The bind-to-self must go before the rm, or the next launch inherits a stacked mount.
-fuse_root_destroy() { # <root>
-    # shellcheck disable=SC2016  # $1 is the inner sh's argument, not ours
-    engine_ns_exec sh -c 'umount -l "$1" 2>/dev/null; rm -rf "$1"' _ "$1" || true
-}
 
 # ── macOS launch preflight ────────────────────────────────────────
 # Darwin only: fail fast on what would otherwise surface as a confusing mid-launch error. The
-# redaction mount validates itself in host/redaction.sh, so this stays cheap.
+# redaction view validates itself in host/redaction.sh, so this stays cheap.
 
 # The direct .dmg for THIS Mac's cpu. The landing page makes you pick, and picking wrong is a
 # multi-GB download that will not launch.
@@ -314,8 +267,10 @@ preflight_platform() {
 # Keys (all optional; the assignments below are the defaults):
 #   broker              = on | off    — start the credential broker. ON by default; disable
 #                                       here or with KIB_BROKER=0. See broker_wanted().
+#   engine              = vm | rootless — Linux only: rootless runs boxes under the user's
+#                                       rootless Docker, no VM (docs/vm.md, "No-VM mode").
 #
-# `broker` is the ONLY key. This parser also used to accept egress/allow_host_services/
+# No other key. This parser also used to accept egress/allow_host_services/
 # allow_lan/lan_cidrs for a filtering proxy that was never built (README: "deliberately
 # unscheduled"), so `egress = restricted` was accepted in silence and restricted nothing —
 # a dead knob that read as an armed security control. Unknown keys are ignored, so anyone
@@ -326,6 +281,7 @@ preflight_platform() {
 # shellcheck disable=SC2034
 KIB_CONFIG="${KIB_CONFIG:-$HOME/.keep-it-in-your-box/config}"
 KIB_CFG_BROKER=on
+KIB_CFG_ENGINE=vm
 
 read_kib_config() {
     [ -f "$KIB_CONFIG" ] || return 0
@@ -343,6 +299,7 @@ read_kib_config() {
         val="${val%"${val##*[![:space:]]}"}" # rtrim val
         case "$key" in
             broker) KIB_CFG_BROKER="$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" ;;
+            engine) KIB_CFG_ENGINE="$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" ;;
         esac
     done <"$KIB_CONFIG"
 }

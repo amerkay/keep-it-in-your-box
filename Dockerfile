@@ -1,13 +1,19 @@
-# The redacting FUSE view (guest/fuse): built and unit-tested here, so a failing guard test
-# fails `kib build` and no Go toolchain reaches the image. The mount tests run in CI.
-FROM golang:1.27-trixie AS fuse
-WORKDIR /k/guest/fuse
-COPY guest/fuse/go.mod guest/fuse/go.sum ./
+# The redacting view (host/view) runs on the HOST: built and unit-tested here for its OS and
+# CPU, so a failing guard test fails `kib build` and nobody installs Go. tools/build-image.sh
+# exports it (--target view); the image never holds it. The FUSE mount tests run in CI.
+FROM golang:1.27-trixie AS view-build
+ARG VIEW_OS=linux VIEW_ARCH=amd64
+WORKDIR /k/host/view
+COPY host/view/go.mod host/view/go.sum ./
 RUN go mod download
-COPY guest/fuse/ ./
+COPY host/view/ ./
 COPY guest/policy/global.kibignore /k/guest/policy/
 COPY tests/fixtures/redaction /k/tests/fixtures/redaction
-RUN go vet ./... && go test ./... && CGO_ENABLED=0 go build -trimpath -o /fuse .
+RUN go test ./... && export GOOS="$VIEW_OS" GOARCH="$VIEW_ARCH" CGO_ENABLED=0 \
+    && go vet ./... && go build -trimpath -o /kib-view .
+
+FROM scratch AS view
+COPY --from=view-build /kib-view /
 
 FROM debian:trixie
 
@@ -42,8 +48,7 @@ RUN apt-get update && apt-get install -y curl \
     fontconfig fonts-dejavu fonts-liberation \
     # Audio (PulseAudio client for voice mode)
     pulseaudio-utils libpulse0 \
-    # System administration. util-linux is here for nsenter: on macOS the FUSE root lives
-    # inside the engine VM, and kib enters that VM's mount namespace through this image.
+    # System administration
     gosu procps util-linux \
     # Clipboard support (Wayland)
     wl-clipboard \
@@ -53,29 +58,20 @@ RUN apt-get update && apt-get install -y curl \
     direnv \
     # Required for Claude Code's built-in sandbox
     bubblewrap socat \
-    # FUSE runtime (fusermount3) for the .kibignore redacting mount, a Go binary built above.
-    # TODO: drop python3-yaml and its smoke test below; nothing uses it. Wait until this layer
-    # changes anyway: editing it costs a ~10 min rebuild.
-    fuse3 python3-yaml \
     && rm -rf /var/lib/apt/lists/*
 
-# Runtime config for the packages above. Its own RUN so editing either line is a
-# seconds-long cached rebuild rather than a full re-do of the apt layer.
-# user_allow_other lets the sidecar's FUSE mount use -o allow_other, which is what makes the
-# propagated view readable by the agent container's root entrypoint as well as its agent user.
-RUN echo 'user_allow_other' > /etc/fuse.conf \
-    && echo 'eval "$(direnv hook bash)"' >> /etc/bash.bashrc
+# Runtime config for the packages above. Its own RUN so editing it is a seconds-long cached
+# rebuild rather than a full re-do of the apt layer.
+RUN echo 'eval "$(direnv hook bash)"' >> /etc/bash.bashrc
 
 # Smoke-test the layers above. Kept as its own cheap RUN on purpose: editing an
 # assertion then re-runs in seconds off the cache, instead of re-doing the whole
 # ~10-minute apt install. Each check is one an earlier build actually failed on:
 # rsvg-convert/cairosvg have both been silently absent before.
 RUN node --version && npm --version \
-    && python3 -c "import yaml; print('PyYAML', yaml.__version__)" \
     && rsvg-convert --version \
     && python3 -c "import PIL, cairosvg; print('Pillow', PIL.__version__, '/ cairosvg', cairosvg.__version__)" \
-    && python3 -c "from cryptography.hazmat.primitives.asymmetric import padding; print('cryptography OK')" \
-    && grep -qx 'user_allow_other' /etc/fuse.conf
+    && python3 -c "from cryptography.hazmat.primitives.asymmetric import padding; print('cryptography OK')"
 
 # Install packages not available in Debian repos
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
@@ -237,16 +233,14 @@ RUN echo "Installing Claude Code version: ${CLAUDE_VERSION}" && \
 COPY guest/entrypoint/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # The kib package is COPIED here as a fallback, then bind-mounted over at run time from the
 # checkout — in the SIDECARS, which are the only containers that import it (the agent's runs no
-# kib code). So editing a Python sidecar takes effect on the next container with no rebuild;
-# the FUSE view is the Go binary above and needs one. The broker shim in /usr/local/bin is baked
+# kib code). So editing a Python sidecar takes effect on the next container with no rebuild. The broker shim in /usr/local/bin is baked
 # because it never changes: one `exec` line that puts /usr/local/lib on sys.path for that
 # process only. PYTHONPATH is NOT an image ENV — it would leak into every process the
 # agent later runs.
 COPY kib /usr/local/lib/kib
 COPY guest/bin/broker /usr/local/bin/
-COPY --from=fuse /fuse /usr/local/bin/fuse
 # 755, not +x: COPY keeps the checkout's modes, and a 700 script is unreadable to the box's uid.
-RUN chmod 755 /usr/local/bin/docker-entrypoint.sh /usr/local/bin/fuse /usr/local/bin/broker \
+RUN chmod 755 /usr/local/bin/docker-entrypoint.sh /usr/local/bin/broker \
 	&& chmod -R a+rX /usr/local/lib/kib \
 	&& python3 -c "import sys; sys.path.insert(0, '/usr/local/lib'); import kib.broker.cli; print('kib package OK')"
 

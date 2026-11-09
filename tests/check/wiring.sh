@@ -349,25 +349,22 @@ fi
 rm -rf "$sm_stub"
 unset sm_stub sm_out sm_rc
 
-# Build folders go on volumes (host/lifecycle.sh). local_dirs runs in the sidecar, so here a fake
-# `docker exec` runs its script on a scratch tree: /src is the raw project, the view hides one dir.
+# Build folders go on volumes (host/lifecycle.sh). local_dirs finds them in the raw project, then
+# asks the VM's mount of the view; here a fake vm_root runs that check on a scratch "view" tree
+# that hides one dir.
 ld_t="$(mktemp -d)"
 mkdir -p "$ld_t/src/a/node_modules/x/node_modules" "$ld_t/src/.git/node_modules" \
     "$ld_t/src/b/c/.venv" "$ld_t/src/hidden/node_modules" "$ld_t/view/a" "$ld_t/view/b/c"
 : >"$ld_t/src/package.json"
 ld_got="$(
-    # shellcheck disable=SC2317 # called by local_dirs
-    docker() { # exec <container> sh -c <script> _ <view> <names…>
-        local script="${5//cd \/src/cd $ld_t/src}"
-        shift 5
-        sh -c "$script" "$@"
-    }
+    # shellcheck disable=SC2317 # called by vm_view_has
+    vm_root() { "$@" </dev/null; } # as the real one: limactl shell reads no stdin
+    KIB_STATE_ROOT="$ld_t" KIB_HOST_ONLY="$ld_t"
     # shellcheck source=/dev/null
-    . "$KIB_ROOT/host/redaction.sh"
+    . "$KIB_ROOT/host/redaction.sh" && . "$KIB_ROOT/host/vm.sh"
     # shellcheck disable=SC2034 # read by local_dirs
-    FUSE_ROOT="$ld_t" FUSE_CNAME=x
-    ln -s view "$ld_t/mnt"
-    local_dirs | sort | tr '\n' ' '
+    VIEW_MNT="$ld_t/view"
+    cd "$ld_t/src" && local_dirs | sort | tr '\n' ' '
 )"
 if [ "$ld_got" = "a/node_modules b/c/.venv node_modules " ]; then
     pass "build folders are found at any depth, never in .git, a match, or a redacted folder"

@@ -10,8 +10,9 @@ ends.
 
 ```
 bin/kib     host entry: verb dispatch and nothing else
-host/       runs as YOU, on the host. One file per subsystem, loaded by host/_load.sh
-guest/      crosses into a container: baked entrypoints, 3-line shims, the Go FUSE view, policy
+host/       runs as YOU, on the host. One file per subsystem, loaded by host/_load.sh; view/ is
+            the Go redaction view, built by `kib build` for this host
+guest/      crosses into a container: baked entrypoints, 3-line shims, policy
 kib/        the one importable package — shared/ (both sides) host/ guest/ broker/
 tools/      build-image.sh
 tests/      lib.sh + check.sh runner + check/*.sh sections + the pytest suites
@@ -34,8 +35,9 @@ A file's directory says which side of the trust boundary it is on. `kib/shared/`
 - **Edits take effect on the next *container*, not the next terminal.** One long-lived container
   serves every terminal on the project; it is recreated only after the *last* session exits. The
   bind-mounted `kib/` package keeps running its old code until
-  then, and `guest/entrypoint/*`, the `guest/bin/broker` shim and the FUSE view (`guest/fuse`, Go)
-  are **baked into the image** — they need a rebuild, not a relaunch. Before believing a "no change" result, check the
+  then, and `guest/entrypoint/*` and the `guest/bin/broker` shim are **baked into the image** —
+  they need a rebuild, not a relaunch. The view (`host/view`, Go) needs `kib build` too, and runs
+  from the project's next cold start. Before believing a "no change" result, check the
   container's birth time: `ps -o lstart= -p 1` inside it.
 - **Editing a host script while a session is LIVE corrupts that running session.** `bash` reads a
   script incrementally by byte offset, so shortening `bin/kib` or a `host/*.sh` under a running
@@ -96,27 +98,26 @@ Bash reaches Python one way only: `kib_py <module> <args…>` (host/core.sh). Pa
 
 One line each; the full story is in the `docs/design-notes/` file in parentheses.
 
-- **Never root mount propagation at a path the engine serves as a host file share** — a share
-  (virtiofs, 9p) has no mount namespace for the event to land in. In kib's VM the root is
-  `/mnt/kib/…`: VM-local, and not `/run`, which Ubuntu's `fusermount3` AppArmor profile denies.
-  (`macos.md`, `microvm.md`)
-- **VM: never mount `~` — `~/.claude`, kib's dirs and each project opened (its git top), over
-  virtiofs, never a sync.** A new project restarts the VM: `_vm_evict` asks if a session is busy
-  (`kib_sessions`), keeps every running box's project, and each cut session `--resume`s itself.
-  9p writes ~6× slower (refused, not a fallback); the Mutagen sync was replaced.
-  Not kib inside the VM (no `~/.claude.json`, ssh breaks the TUI), not reverse-sshfs. Package
-  caches are per project, never shared (one box would plant a package another's installs).
-  (`microvm.md`)
+- **The redaction view runs on the HOST and serves NFS; VM root mounts it, the box binds that
+  mount. Never a sidecar, a FUSE mount in the VM, or a raw project share.** The VM's shares are
+  fixed (`~/.claude`, kib's dirs, over virtiofs), so it never restarts for a project: a restart
+  lost the user's unsent input, `--resume` or not. Not a host FUSE in front of a share (two FUSE
+  hops), not macFUSE/FUSE-T (installs), not SMB (AGPL), not the Mac's NFS client (stale handles).
+  The view mounts once, by a secret path; `sync` makes a refused write fail at write(2). Its
+  binary and rules live outside every VM share (`KIB_HOST_ONLY`). 9p writes ~6× slower; not kib
+  inside the VM (no `~/.claude.json`, ssh breaks the TUI). Package caches are per project, never
+  shared. (`PLAN_NFS_VIEW.md`, `microvm.md`)
 - **The box runs on gVisor, so it has no Docker DNS, no NIC hot-plug, no host inotify and no
   `docker top`** — the broker is an `--add-host`, the box is created → connected → started,
   watchers poll, readiness is the entrypoint's `/run/kib-ready`. On macOS, Apple's virtiofs
-  reports the asker as owner, so kib's bind sources get bindfs in the VM — never the project. No native
-  path yet: rootless Docker runs gVisor only with `--ignore-cgroups` (no box memory/CPU limits), and
-  rootful Docker's socket is root-equivalent. (`microvm.md`, `PLAN_NFS_VIEW.md`)
+  reports the asker as owner, so kib's bind sources get bindfs in the VM — never the project. The
+  no-VM mode (`engine = rootless`, Linux) is opt-in only: rootless Docker runs gVisor only with
+  `--ignore-cgroups` (no box memory/CPU limits), its box is root (= the user), and its view is a
+  host FUSE mount; rootful Docker's socket is root-equivalent. (`microvm.md`, `docs/vm.md`)
 - **VM memory stays Lima's 4 GiB until an out-of-memory kill; Docker updates only at the idle
   stop** — the VM never hands memory back while running, and a Docker restart kills every
   session's `docker exec`, `live-restore` or not. (`microvm.md`)
-- **Keep build folders off FUSE** (`local_dirs` volumes) — `node_modules` through the view is
+- **Keep build folders off the view** (`local_dirs` volumes) — `node_modules` through the view is
   the whole install cost (pnpm 130 s vs 6 s). (`microvm.md`)
 - **Don't re-split `~/.claude` into a shared + per-project pair** — the destructive migration it
   needs breaks the seamless host⇄box switch (same login, `--resume`, history). Keep canonical
@@ -158,7 +159,7 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
 - **Sleep guard: Claude's own hook state, never a measurement of output** — byte sampling,
   transcript mtime and `claude agents --json` were each tried and removed; a background subagent
   writes almost nothing, so any output metric sleeps the machine mid-work. The verdict is
-  `kib_session_state`, SOURCED by guard, diagnostic and VM restart alike — never copied. Keep the poll
+  `kib_session_state`, SOURCED by guard and diagnostic alike — never copied. Keep the poll
   subprocess-free (markers or nothing), keep `--what=sleep` (`idle` kills lid-shut tasks), keep the
   post-resume SETTLE window, and keep `--who` a space-free `claude-code` token. (`sleep-guard.md`)
 - **Don't re-enable `leftArrowOpensAgents`, and don't re-investigate the ←-key data loss** — the
@@ -170,9 +171,15 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   translating per field instead was tried and thrown away. (`redaction-config-guard.md`)
 - **No `tput reset`** (regression-guarded); keep `|| true` on `tput cols`/`lines` and `read`.
   (`terminal-and-security.md`)
-- **The FUSE view (`guest/fuse`, Go) is specced by `tests/fixtures/redaction`** — change a
-  behaviour there first; `go test` runs in `kib build` (no Go in the image; `./dev.sh` runs it
-  where `go` is on PATH). I/O is `pread`/`pwrite` (a shared fd offset truncates reads), the page
+- **The view (`host/view`, Go) is specced by `tests/fixtures/redaction`, for both front ends** —
+  change a behaviour there first; `go test` runs in `kib build` (`./dev.sh` runs it where `go` is
+  on PATH). Every check lives in the core (`view.go`); `nfs.go` and `fuse.go` only map calls. NFS
+  reopens per WRITE, so the owner may write their own 0444 file (git) and a mirror's size is
+  checked once its writes stop; go-nfs can't serve LINK, so it is refused. gVisor holds files
+  open, so the VM's client moves a replaced or deleted file aside (`.nfs…`): a git config is
+  hard-linked there instead and stays, so git's `config.lock` rename is still checked; any other
+  guarded file refuses (`silly`). FUSE (no-VM mode):
+  I/O is `pread`/`pwrite` (a shared fd offset truncates reads), the page
   cache is kept only while mtime+size hold (never `kernel_cache`: the host edits this tree), only
   the RULE verdict is memoised (existence stays live), `Flush` never fsyncs, and a listing
   re-reads on `Seekdir(0)` and carries `.`/`..` (gVisor rewinds one open dir fd; a replayed
@@ -180,11 +187,6 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   Regression-guarded. (`redaction-config-guard.md`)
 - **No FUSE passthrough, no writeback cache — both measured.** Passthrough needs a root daemon and
   speeds reads only; writeback never showed the box a host edit that changed a file's size.
-- **The sidecar's `RLIMIT_NOFILE` soft limit is raised at startup (the Go runtime does it) — don't
-  add `--ulimit` alongside it.** Its fd table is the container-global ceiling on concurrently-open
-  project files, and containerd's 1024 soft default killed parallel JS builds with `EMFILE` naming
-  project paths. In-box `ulimit -n` hides this — Node raises its own soft limit, so every shell
-  reads 524288; `/proc/1/limits` is the honest one. (`redaction-config-guard.md`)
 - **Never `kill -TERM "-$pid"` from a pidfile — call `kill_pgrp`**, and never require `KIB_ROOT`
   from the environment in an *executed* host script (`detach_pgrp` gives it a fresh env; derive it
   from `$0`). A dead detached child's pid gets recycled into the next launch's own process group,
@@ -193,7 +195,7 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
 - **Never unlink lock files**, and every backgrounded host process must close fds 200/201
   (`200>&- 201>&-`) — one miss strands every project's containers. Lock fds are allocated, not
   picked: 200/201 project + boot, 202 teardown's exclusive re-take, 203 canonical `.claude.json`,
-  204 the rule restage, 205 the Lima VM's session count, 206 its boot (taken before 205). Reusing one that is held higher up the call stack releases it.
+  204 the rule restage, 205 the Lima VM's session count, 206 its boot. Reusing one that is held higher up the call stack releases it.
   (`container-lifecycle.md`)
 - **The host-executed-config guard is two tiers, split by WHEN a file fires — ambient trigger vs
   deliberate `claude` launch.** `[protect]` refuses the write, so it is only worth it where no

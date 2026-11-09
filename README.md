@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-3fb950?style=flat-square" alt="Platform: Linux and macOS">
   <img src="https://img.shields.io/badge/requires-Docker-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Requires Docker">
-  <img src="https://img.shields.io/badge/isolation-FUSE%20%2B%20cap--drop%3DALL-e3b341?style=flat-square" alt="Isolation: FUSE plus cap-drop ALL">
+  <img src="https://img.shields.io/badge/isolation-gVisor%20%2B%20cap--drop%3DALL-e3b341?style=flat-square" alt="Isolation: gVisor plus cap-drop ALL">
   <img src="https://img.shields.io/badge/--dangerously--skip--permissions-safe-3fb950?style=flat-square" alt="Safe to run with dangerously-skip-permissions">
   <img src="https://img.shields.io/badge/license-MIT-8b949e?style=flat-square" alt="MIT licensed">
 </p>
@@ -47,7 +47,7 @@ And it reads untrusted text all day — a dependency's README, an issue thread, 
   <img src="docs/assets/readme/env-redacted.svg" width="100%" alt="Running cat .env on the host prints real values for STRIPE_KEY, DATABASE_URL, OPENAI_API_KEY and SESSION_SECRET. The same command inside the box prints the same key names with every value replaced by the word redacted. Writes are refused, files created after launch are covered, and dotenv, JSON and YAML are all recognised.">
 </p>
 
-The file stays where it is; what changes is what comes back when the agent reads it. Your project reaches the box through a FUSE layer, so a read of a secrets file returns the **key names with every value replaced**, and a write to one is refused.
+The file stays where it is; what changes is what comes back when the agent reads it. Your project reaches the box through a filtered view, so a read of a secrets file returns the **key names with every value replaced**, and a write to one is refused.
 
 - **Recognised by shape, not by filename.** dotenv, JSON and YAML are identified by actually parsing them, so a project's own `env_vars/env_prod` or `sls_config/env-dev.yml` redacts exactly like `.env` does, which guessing from the filename would miss.
 - **Files created *after* launch are covered.** It's a live view, not a bind mount — nothing is enumerated at startup, so a secret written an hour into the session is redacted the same way. No other sandbox in the [comparison below](#compare) does this.
@@ -101,7 +101,7 @@ Now `cd` into any project and run `cc`. The image builds itself on first run, an
 
 Nothing to set up and nothing to migrate: your `~/.claude` stays exactly as it is, and each project's session is assembled from it per launch and merged back on exit — so a host `claude` and a boxed `cc` share one login, one `--resume` list and one history, while no project's box can see another's.
 
-**Requirements:** `git`, `bash`, `python3` and `perl` (stock macOS has them all, no Homebrew). The first launch offers to install [Lima](https://lima-vm.io) and the `docker` command into `~/.local`, no sudo and no Docker Desktop, and every box runs on gVisor in a VM. Linux also needs QEMU, KVM and virtiofsd, once ([`docs/vm.md`](docs/vm.md)). Projects must live under your home folder. `wl-clipboard` on Linux is optional; without it you just lose clipboard paste.
+**Requirements:** `git`, `bash`, `python3` and `perl` (stock macOS has them all, no Homebrew). The first launch offers to install [Lima](https://lima-vm.io) and the `docker` command into `~/.local`, no sudo and no Docker Desktop, and every box runs on gVisor in a VM. Linux also needs QEMU, KVM and virtiofsd, once ([`docs/vm.md`](docs/vm.md)). `wl-clipboard` on Linux is optional; without it you just lose clipboard paste.
 
 <h2 id="use"><img src="docs/assets/readme/section-use.svg" width="100%" alt="Everyday use"></h2>
 
@@ -143,7 +143,7 @@ No project here does everything. `kib` is the only one that **validates `.git/co
 <h2 id="hood"><img src="docs/assets/readme/section-hood.svg" width="100%" alt="Under the hood"></h2>
 
 - **One long-lived container per project**, `sleep infinity` as PID 1. Every terminal `docker exec`s into the same one, so `/resume`, prompt history and background jobs are shared across tabs for free; it's torn down when the last session exits.
-- **A FUSE sidecar serves the redacted view**, which the sandbox sees over your project path by mount propagation. Only the sidecar gets `CAP_SYS_ADMIN` and `/dev/fuse` — the sandbox is created without them and has no unredacted path to your project. Same topology on Linux and macOS.
+- **A host process serves the redacted view over NFS**, one per project. The VM mounts it and the box sees it at your project path. Neither the VM nor the box ever gets the raw project, and no container needs `CAP_SYS_ADMIN` or `/dev/fuse`. Same topology on Linux and macOS.
 - **The clipboard is a one-file-at-a-time bridge, not a socket.** *Reads* pass through, so image paste works; a *write* arrives as plain text with control characters stripped, because verbatim it would be host code execution at your next paste.
 - **Host-side at every launch:** a `settings.json` validator that rejects inline `hooks[].command`, an audit gate that refuses to start a session into a poisoned git config, and — on Linux — a DNS watcher that keeps the container following your wifi and VPN changes.
 

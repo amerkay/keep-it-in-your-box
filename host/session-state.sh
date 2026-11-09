@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Each session's activity verdict, read from the marker tree guest/policy/sleep-hook.py writes.
-# SOURCED by the sleep guard, its diagnostic host/sleep-monitor.sh and kib's VM restart
-# (host/vm.sh) — never copied: a copy drifts, and then one judges a session by a different
-# verdict than the others act on. bash-3.2/BSD-clean.
+# SOURCED by the sleep guard and its diagnostic host/sleep-monitor.sh — never copied: a copy
+# drifts, and then one judges a session by a different verdict than the other acts on.
+# bash-3.2/BSD-clean.
 #
 # Replaced the `wchar` TUI-byte sampler. That measured bytes written to the terminal, so a
 # background subagent — which writes almost nothing there — read as idle and let the machine
@@ -70,33 +70,6 @@ kib_session_state() { # $1 = state root, $2 = session tag
         return
     fi
     printf 'idle'
-}
-
-# The verdict of every live session on this machine, one per line: each project's marker tree
-# (<state dir>/<project>.sleep/<tag>) whose kib, the pid in its tag (kib-<pid>-<epoch>), runs.
-kib_sessions() { # $1 = kib's state dir
-    local d p
-    for d in "$1"/*.sleep/kib-*; do
-        p="${d##*/kib-}"
-        kill -0 "${p%%-*}" 2>/dev/null || continue
-        printf '%s\n' "$(kib_session_state "${d%/*}" "${d##*/}")"
-    done
-}
-
-# The Claude session id the hook names in an empty `sid.<id>` marker, if it is one: a name, so
-# nothing the box wrote is ever read.
-kib_session_id() { # $1 = state root, $2 = session tag
-    local f
-    { [ -n "$2" ] && [ ! -L "$1/$2" ]; } || return 1
-    for f in "$1/$2"/sid.*; do
-        f="${f##*/sid.}"
-        case "$f" in *[!0-9a-f-]*) continue ;; esac
-        [ "${#f}" -ne 36 ] || {
-            echo "$f"
-            return 0
-        }
-    done
-    return 1
 }
 
 # NOTHING ELSE FEEDS THE VERDICT. The markers are the only input: no byte sampling, no transcript

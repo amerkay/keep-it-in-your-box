@@ -258,16 +258,6 @@ t_sleep_state() {
 
     is "session_state: empty tag → unknown" unknown "$(kib_session_state "$d" '')"
 
-    # The VM restart's question: every live session on the machine, a dead kib's tag not counted.
-    local s="$d/st" id=0123abcd-0000-4000-8000-0123456789ab
-    mkdir -p "$s/p.sleep/kib-$$-1" "$s/p.sleep/kib-999999999-1" "$s/q.sleep/kib-$$-2"
-    touch "$s/p.sleep/kib-$$-1/live" "$s/p.sleep/kib-999999999-1/live" "$s/q.sleep/kib-$$-2/live" \
-        "$s/q.sleep/kib-$$-2/turn"
-    is "sessions: each live kib's verdict, none for a dead one" "busy idle" \
-        "$(kib_sessions "$s" | sort | tr '\n' ' ' | sed 's/ $//')"
-    touch "$s/p.sleep/kib-$$-1/sid.$id" "$s/q.sleep/kib-$$-2/sid.not-an-id"
-    is "session id: the hook's marker names it" "$id" "$(kib_session_id "$s/p.sleep" "kib-$$-1")"
-    is "session id: a name that is not one is no id" "" "$(kib_session_id "$s/q.sleep" "kib-$$-2")"
     rm -rf "$d"
 }
 

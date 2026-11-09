@@ -31,25 +31,11 @@ gone. Measured on Linux and macOS (`sn-frontend`):
   memory and CPU limits (measured 2026-11-09, `PLAN_NFS_VIEW.md` Test 11), and rootful Docker's
   socket is root-equivalent. So one route: the VM, rootful inside, on both OSes.
 
-**Changed 2026-11-09: the VM no longer mounts `~`** (`_vm_mounts`): `~/.ssh`, `~/.aws` and
-the rest stay out of it. It shares `~/.claude`, kib's own dirs and each project opened: its git
-top (`vm-roots`), never `~` or a folder holding it. Not the project's parent: that shared every
-sibling to save a restart, and restarts now resume. Lima can't add a mount to a running VM, so a
-new project restarts it (`_vm_evict`):
-- asks `[y/N]` only if a session is mid-work, by the sleep guard's own verdict (`kib_sessions`);
-- keeps every running box's project (its FUSE sidecar's `/src`), or each resumed session would
-  restart the VM again for its own;
-- stops every box, waits for their kibs on fd 205 (boot, fd 206, is taken first, so a waiting
-  kib holds no share of it), then re-mounts;
-- each cut `kib claude` reads `$VM_RESTART` before it lets go of 205, and relaunches as
-  `--resume <id>`, the id named by the hook's `sid.<id>` marker (`vm_down`, `vm_resume`), with
-  its own flags minus any prompt or session pick (`_vm_resume_args`).
-Rejected: a QEMU hot-plugged virtiofs device (Linux only, untested, against Lima's internals), a
-host-side filtered FUSE view (two FUSE hops, no stock FUSE on macOS), one VM per project (RAM).
+**Changed 2026-11-09: the VM no longer mounts `~`, nor any raw project** (`_vm_mounts`). It shares `~/.claude` and kib's own dirs, a fixed set, so it never restarts. Each project reaches it only as its redacted view: the view runs on the host as an NFS server, VM root mounts it, the box binds that mount (`PLAN_NFS_VIEW.md`). A first try shared each opened project and restarted the VM for a new one, resuming the sessions it cut; the user lost unsent input, so it was removed. The FUSE sidecar went with it.
 
 A shared lock on fd 205 counts sessions. The last one out starts a 10-minute timer; it stops the
-VM only if no session holds fd 205 by then and no later close has replaced it. The FUSE root is
-`/mnt/kib` (Ubuntu's `fusermount3` AppArmor profile denies `/run`).
+VM only if no session holds fd 205 by then and no later close has replaced it. Views mount at
+`/mnt/kib/<hash>` in the VM.
 
 **Memory: Lima's 4 GiB, doubled after an out-of-memory kill** (`_vm_oom`: the VM's
 `/proc/vmstat` read at each session close, applied at the next boot, up to half the host's RAM).
@@ -77,7 +63,7 @@ kib's risks cross the boundary through **files the host executes later**, never 
 
 Every substrate below shares the workspace back to the host at the same absolute path — that is
 the product. A hypervisor changes *how* those bytes travel (virtiofs, not a bind); it does not
-change that they arrive, or that the host runs them afterwards. **The FUSE guard remains the only
+change that they arrive, or that the host runs them afterwards. **The view's guard remains the only
 mechanism against this class, on any substrate.**
 
 What a microVM does close is host-**kernel** exploitation. Real, but the agent already runs with an
@@ -117,23 +103,19 @@ re-platforming, not a flag.
 
 ## gVisor
 
-Adopted 2026-11-07, probed first. The FUSE sidecar and broker stay on
-runc. The seams the 2026-10-04 review listed, and their answers:
+Adopted 2026-11-07, probed first. The broker stays on runc. The seams the 2026-10-04 review listed, and their answers:
 
 - **Broker net:** runsc wires NICs only at start → `docker create`, `network connect`, `start`.
 - **Embedded DNS (`127.0.0.11`):** unreachable → the broker is an `--add-host` entry and the box
   gets the VM's resolvers as its `resolv.conf` (`vm_resolv`).
 - **inotify:** host edits raise no event → `CHOKIDAR_USEPOLLING`, `WATCHPACK_POLLING`.
-- **FUSE view:** works because the mount exists before start. The box sees a gofer mount, so the
-  attach check asks the VM's mount table and lists `$PWD` from the box.
+- **The view:** the VM's NFS mount of it, bound in before start. The box sees a gofer mount, so the attach check asks whether the host's view process lives and lists `$PWD` from the box. gVisor checks file modes itself, since the view runs as the host user.
 - **`docker top`:** gVisor cannot answer it → readiness is the entrypoint's `/run/kib-ready`.
 - **Wayland socket:** gone; the clipboard is the spool bridge on both OSes, so no
   `--host-uds`. Docker's seccomp profile is enforced inside (`--oci-seccomp`).
 - **macOS file owners:** Apple's virtiofs reports the asker as a file's owner (cached per inode),
   so gVisor's root gofer saw kib's `700` dirs as root's → bindfs in the VM over `~/.claude` and
-  kib's state (`_vm_owners`). Never over a project: its redaction view reports the box user
-  already, and bindfs over kib's own checkout hung the sidecar's `docker run` when kib was the
-  project. Kib's checkout and the Node cache are world-readable, so they need none. Always
+  kib's state (`_vm_owners`). Never over a project: the VM's NFS client sees real owners, and bindfs over kib's own checkout hung `docker run` when kib was the project. Kib's checkout and the Node cache are world-readable, so they need none. Always
   `--multithreaded`: single-threaded, bindfs hung on the first stat of a transcript, as root and
   as the user (multithreaded: 240 files in 0.1 s). Its open-file limit is raised to 1048576: it holds an fd
   per open directory, gVisor keeps one open per cached directory, and the default 1024 ran out on

@@ -23,7 +23,7 @@ the kib container, a CLI on the host) — never duplicate a setting into an edit
 | Line length, charset, EOL, final newline | `.editorconfig` | **100 columns**, everywhere, prose included |
 | Python tool versions | `requirements-dev.txt` | exact `==` pins (ruff, mypy, pytest) |
 | Shell tool versions | `Dockerfile` `ARG SHFMT_VERSION` / `ARG SHELLCHECK_VERSION` | pinned release binaries; keep in step with `.github/workflows/lint.yml` |
-| Go (guest/fuse) | `guest/fuse/go.mod` `go` line, Dockerfile `FROM golang:…` | keep the two in step; CI reads `go.mod`, and `go.sum` pins the modules |
+| Go (host/view) | `host/view/go.mod` `go` line, Dockerfile `FROM golang:…` | keep the two in step; CI reads `go.mod`, and `go.sum` pins the modules |
 
 Bump a pin deliberately and in every place it appears. A floating version means the same code
 passes in one environment and fails in another.

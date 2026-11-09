@@ -126,7 +126,7 @@ elif [ -z "$_lsm_label" ]; then
     skip "AppArmor label" "no AppArmor in this kernel (LinuxKit / Docker Desktop)"
 else
     # docker-default, NOT unconfined. Its `deny mount,` is incompatible with mounting inside
-    # this container — which is exactly why the FUSE server lives in the sidecar instead.
+    # this container — which is why the view is served from the host instead.
     case "$_lsm_label" in
         docker-*) pass "AppArmor confined by docker-default ($_lsm_label)" ;;
         *) fail "AppArmor label is '$_lsm_label', not a docker-* profile" ;;
@@ -157,53 +157,20 @@ is "mount(2) refused" "Operation not permitted" "$(syscall_errno mount)"
 is "unshare(2) refused" "Operation not permitted" "$(syscall_errno unshare)"
 
 # ═════════════════════════════════════════════════════════════════
-section "FUSE redaction (served by the sidecar, propagated in)"
+section "Redaction view (served from the host, mounted by the VM)"
 
-# The view is mounted in the SIDECAR's container and reaches this one by mount propagation.
-# readlink -f is kept because the mount is recorded under the resolved path either way.
-fuse_at_pwd() {
-    local p
-    p="$(readlink -f "$PWD")"
-    awk -v p="$p" '$2==p && $3 ~ /^fuse/ {print "fuse"; exit}' /proc/self/mounts
-}
-if on_gvisor; then
-    # The box sees gVisor's gofer mount; the guard checks below prove the view behind it.
-    skip "redaction is a FUSE mount at the project root" "gVisor shows its own mount type"
-else
-    is "redaction is a FUSE mount at the project root" "fuse" "$(fuse_at_pwd)"
-fi
-
-# There is no second, unredacted path to the project here. The sidecar topology means the real
-# tree is only ever mounted in the OTHER container, so nothing to fence off and nothing to
-# traverse into — /kib should not exist at all.
+# There is no second, unredacted path to the project here: the raw tree never enters the VM, and
+# the view reaches this box as a bind of the VM's NFS mount — /kib should not exist at all.
 is "no unredacted copy of the project in this container" "absent" \
     "$([ -e /kib ] && echo present || echo absent)"
 
-# …and no FUSE server beside the agent to pivot into. Asserted STRUCTURALLY, on the device: a
-# FUSE server cannot run without /dev/fuse, so its absence proves the property outright. A
-# `pgrep -f fuse` cannot — it matches the command line of any process that merely
-# mentions the string, this suite's own shell included, and reads as a leak that is not there.
-if on_gvisor; then
-    # gVisor's own /dev/fuse, served by its kernel: useless without mount(2), refused above.
-    skip "no /dev/fuse in this container" "gVisor's own device; mount(2) is refused"
-else
-    is "no /dev/fuse, so no FUSE server can run in this container" "absent" \
-        "$([ -e /dev/fuse ] && echo present || echo absent)"
-fi
+# The view mounts once, by a secret path (host/view/nfs.go). The box sees gVisor's own mount
+# table, so neither the host's address nor that secret may show in it.
+is "the view's NFS source and its secret are not visible here" "" \
+    "$(grep -hoE '[0-9.]+:/[0-9a-f]{32}' /proc/self/mountinfo /proc/self/mounts 2>/dev/null)"
 
-# The server's syscalls run as ITS uid, not the caller's. default_permissions is what makes the
-# kernel re-check owner and mode against the CALLER — without it nothing inside the project is
-# permission-checked at all.
-if on_gvisor; then
-    skip "the view is mounted default_permissions" "gVisor shows its own mount options"
-else
-    is "the view is mounted default_permissions (POSIX perms are enforced)" "yes" \
-        "$(awk -v p="$(readlink -f "$PWD")" '$2==p && $4 ~ /(^|,)default_permissions(,|$)/ {
-            print "yes"; exit }' /proc/self/mounts)"
-fi
-
-# Proven live, not just by the mount flag: a mode on a file the agent owns must gate it. A
-# chmod that silently failed leaves the file MORE permissive, so each deny still fails loudly.
+# A mode on a file the agent owns must gate it: gVisor checks it, since the view runs as the host
+# user. A chmod that silently failed leaves the file MORE permissive, so each deny fails loudly.
 _perm="$PWD/.kib-perm-probe.$$"
 if printf 'probe\n' >"$_perm" 2>/dev/null; then
     chmod 000 "$_perm" 2>/dev/null
@@ -334,7 +301,13 @@ allow "regression: benign git config write" git -C "$REPO" config user.name 'Tes
 allow "regression: git config read" git -C "$REPO" config --get user.name
 allow "regression: git status" git -C "$REPO" status --short
 allow "regression: git remote add" bash -c "git -C '$REPO' remote remove o 2>/dev/null; git -C '$REPO' remote add o https://example.invalid/r.git"
-allow "regression: ordinary hardlink" bash -c "echo x > '$ARTIFACTS/hl-src'; ln -f '$ARTIFACTS/hl-src' '$ARTIFACTS/hl-dst'"
+# Over NFS every hard link is refused: go-nfs cannot serve LINK (host/view/nfs.go), and git falls
+# back to a rename. Under the no-VM mode's FUSE view an ordinary one still works.
+if [ "${KIB_ROOTLESS:-0}" = 1 ]; then
+    allow "regression: ordinary hardlink" bash -c "echo x > '$ARTIFACTS/hl-src'; ln -f '$ARTIFACTS/hl-src' '$ARTIFACTS/hl-dst'"
+else
+    skip "regression: ordinary hardlink" "refused over NFS; git renames instead"
+fi
 
 # ═════════════════════════════════════════════════════════════════
 section "Host-executed config guard — non-git paths"
@@ -367,8 +340,30 @@ done
 # Protection covers DELETION too — a delete is half of a replace, and what is removed here is
 # what a host `git checkout` puts straight back. Probed on a FIXTURE .git/config: if the guard
 # ever regressed the only casualty is one the next run rebuilds. A NESTED guarded path whose
-# root twin exists is deletable (see the mirror section below); an anchor never is.
-deny "a guarded path cannot be DELETED, only read" rm -f "$REPO/.git/config"
+# root twin exists is deletable (see the mirror section below); an anchor never is. The VM's NFS
+# client may report the rm done (it moves an open file aside; the view keeps a git config in
+# place), so what is asserted is that the file is still there.
+is "a guarded path cannot be DELETED, only read" "kept" \
+    "$(
+        rm -f "$REPO/.git/config" 2>/dev/null
+        [ -f "$REPO/.git/config" ] && echo kept || echo DELETED
+    )"
+
+# What the VM's NFS client does with an open file before replacing or deleting it: a rename to
+# .nfs<24 hex>. For a git config the view links that name instead, so it must never be writable
+# (it is the config itself), and the box may never make one of its own.
+_silly=""
+for _f in "$REPO"/.git/.nfs*; do [ -e "$_f" ] && _silly="${_f##*/}" && break; done
+if [ -n "$_silly" ]; then
+    deny "the .nfs alias of a kept .git/config refuses writes" \
+        bash -c "printf '[core]\\n\\tfsmonitor = /tmp/x\\n' >> '$REPO/.git/$_silly'"
+else
+    skip "the .nfs alias of a kept .git/config refuses writes" "no alias in this run"
+fi
+deny "the box cannot create an .nfs name" \
+    bash -c "echo x > '$REPO/.git/.nfs0123456789abcdef01234567'"
+resolves_to_nothing "…and core.fsmonitor still resolves to nothing" "$REPO" core.fsmonitor
+unset _silly _f
 
 # ═════════════════════════════════════════════════════════════════
 section "Mirrors — reproduce, never author"
@@ -400,6 +395,8 @@ else
         ln -sfn /etc/passwd "$WT/.vscode/settings.json"
     deny "a hardlink cannot alias a payload onto one" \
         bash -c "echo evil > '$WT/spare2'; ln -f '$WT/spare2' '$WT/.vscode/settings.json'"
+    # Re-made first: the hardlink probe above deletes the mirror (allowed) before its link fails.
+    rm -f "$WT/.vscode/settings.json" && cp "$ANCHOR" "$WT/.vscode/settings.json" 2>/dev/null
     deny "a mirror cannot be TRUNCATED to a shorter script" \
         bash -c ": > '$WT/.vscode/settings.json'"
     # Deleting a mirror is deliberate: git worktree remove needs it, and the only thing that
@@ -416,6 +413,17 @@ else
 fi
 deny "the ROOT copy stays immutable — a mirror never unlocks its anchor" \
     bash -c "printf x >> '$ANCHOR'"
+# …nor can it be moved aside under the NFS client's own silly-rename name.
+deny "the ROOT copy cannot be moved aside as an .nfs file" \
+    mv "$ANCHOR" "${ANCHOR%/*}/.nfs0123456789abcdef01234567"
+# NFS has no close: a short copy is allowed to land, then removed once its writes stop (2 s).
+if [ -f "$ANCHOR" ] && [ -d "$WT/.vscode" ]; then
+    rm -f "$WT/.vscode/settings.json"
+    head -c 4 "$ANCHOR" >"$WT/.vscode/settings.json" 2>/dev/null
+    sleep 4
+    is "a short mirror is removed once its writes stop" "removed" \
+        "$([ -e "$WT/.vscode/settings.json" ] && echo KEPT || echo removed)"
+fi
 
 # ═════════════════════════════════════════════════════════════════
 section "Redaction — .env and .kibignore"
@@ -548,7 +556,7 @@ rm -rf "$CFG/skills/.sectest" "$CFG/agents/.sectest.md" \
 # kib assembles each box from only this project's slice; a leak would surface another
 # project's data here. Compared, NEVER printed (other project paths are PII).
 #
-# The key is the path Claude RESOLVES to in here. The sidecar binds the project at its own
+# The key is the path Claude RESOLVES to in here. The view is bound at the project's own
 # host path, so that resolved path IS canonical's key and config_scope translates nothing.
 # `pwd -P` is the resolved path by definition — read it, never $HOST_PWD, which is a host
 # spelling that would compare the wrong string if the two ever came apart again.
@@ -678,7 +686,7 @@ if [ -f "$KIB_ROOT/host/config.sh" ] && command -v python3 >/dev/null; then
         validator '{"env":{"EDITOR":"vim","PAGER":"less","LANG":"en_US.UTF-8"}}'
     allow "malformed JSON warns, does not block" validator '{not json'
 
-    # MAC-M1: the open prompt trees are host-backed and outside the redaction FUSE, so a
+    # MAC-M1: the open prompt trees are host-backed and outside the redaction view, so a
     # SKILL.md symlinked at a host file is read by every future session and by the host's own
     # claude. The scanner is the backstop; a benign target here, never a real key.
     # shellcheck disable=SC2317,SC2329  # invoked indirectly — `deny` runs it via "$@"
@@ -697,7 +705,7 @@ if [ -f "$KIB_ROOT/host/config.sh" ] && command -v python3 >/dev/null; then
     allow "regression: an in-tree symlink is not flagged" asset_probe real.md
 
     # MAC-H2: `.claude.json` is box-writable (it is what `claude mcp add` writes) and lives
-    # outside the FUSE-guarded tree, so the merge-out is the only thing between a session and
+    # outside the guarded view, so the merge-out is the only thing between a session and
     # the next HOST claude's MCP servers and trust flags. Driven against throwaway files; the
     # real ~/.claude.json is never opened.
     # shellcheck disable=SC2317,SC2329  # invoked indirectly — `is` runs it via "$@"

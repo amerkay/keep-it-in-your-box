@@ -79,7 +79,7 @@ counted is worse than no number.
 A guard on `.git/config` and a stub over `.env` buy nothing while `~/.aws/credentials` and every
 unrelated repo are one `cat` away.
 
-`kib` confines structurally: the project arrives at `$PWD` through the FUSE view and **nothing else
+`kib` confines structurally: the project arrives at `$PWD` through the redacting view and **nothing else
 of the host `$HOME` is mounted** — no `~/.ssh`, `~/.aws`, `~/.gnupg`, no SSH-agent socket, not even
 `~/.gitconfig` (git identity is read host-side and passed as `GIT_AUTHOR_*`). The container's `$HOME`
 is a container path.
@@ -165,7 +165,7 @@ alternate layouts. Submodule and worktree gitdirs — `kib` and `container-use` 
 `sandbox-runtime` skips the deny **entirely** when `.git` is a file, which is exactly the worktree
 case, while Claude Code's docs claim the opposite; `agent-safehouse` grants the *main* repo's whole
 `.git` read-write to a linked worktree; `cco` auto-grants worktree common dirs. And
-`include`/`includeIf` indirection — `kib` refuses newly-added includes at the FUSE rename and
+`include`/`includeIf` indirection — `kib` refuses newly-added includes at the view's rename and
 resolves them host-side at the audit gate (`git config --list --includes`); `aicontainer` excludes
 them from config seeding; nobody else addresses it.
 
@@ -191,7 +191,7 @@ non-existent ones, and Landlock is allow-only**. Only its macOS Seatbelt globs a
 cover after-launch files. `sandbox-runtime` has fixed the equivalent gap on **Windows**, leaving
 Linux as its sole affected platform.
 
-So on Linux, `kib` is alone. FUSE sees the `create()` call; the guard rules are evaluated per syscall
+So on Linux, `kib` is alone. The view sees the `create()` call; the guard rules are evaluated per syscall
 against a live view, and cover `sub/.git/config`, `.git/modules/<name>/config` and
 `.git/worktrees/<name>/config` in repos that did not exist at launch.
 
@@ -199,7 +199,7 @@ against a live view, and cover `sub/.git/config`, `.git/modules/<name>/config` a
 
 | Project | Mechanism | Enforced below the agent? | On by default? | Covers files created after launch? |
 |---|---|---|---|---|
-| **`kib`** | FUSE — key names on read with values replaced for any dotenv/JSON/YAML file by shape, stub otherwise, `EPERM` on write | ✅ | ✅ | ✅ |
+| **`kib`** | Host NFS view — key names on read with values replaced for any dotenv/JSON/YAML file by shape, stub otherwise, refused on write | ✅ | ✅ | ✅ |
 | [cplt](https://github.com/navikt/cplt) | Kernel deny on 6 patterns (`.env*`, `.pem`, `.key`, `.p12`, `.pfx`, `.jks`) | ✅ **macOS only** | ✅ | macOS ✅ / Linux n/a |
 | [aicontainer](https://github.com/stefanoginella/aicontainer) | `PreToolUse` hook blocks `.env*` reads | ❌ agent-level | ✅ | ✅ (pattern-based) |
 | [yoloai](https://github.com/kstenerud/yoloai) | Copy honours `.gitignore` — excluded files simply absent | ✅ by omission | ✅ | ❌ create-time filter |
@@ -234,8 +234,7 @@ input. A *read* is just a paste.
 
 ### 5. The enforcement privilege lives outside the agent's container
 
-`kib` runs the FUSE server in its **own** sidecar. Only that sidecar holds `SYS_ADMIN`, `/dev/fuse`
-and an AppArmor override — and it runs `--network none`, `--userns=host`, `cap-drop=ALL` otherwise.
+`kib` runs the redacting view on the **host**, as the user, outside the VM and every container (2026-11-09; it was a FUSE sidecar with `SYS_ADMIN` before). No container holds `SYS_ADMIN` or `/dev/fuse`, and none overrides AppArmor.
 The agent's container is **capless at creation**: `cap-drop=ALL` with five caps back for entrypoint
 user setup only, `no-new-privileges`, and `docker-default`'s `deny mount,` intact. There is no second,
 unredacted path to the project.
@@ -329,6 +328,8 @@ no opt-in mode to reach for, and an opt-in costs nothing when off. That, not the
 part still open.
 
 ### Kernel boundary
+
+**2026-11-09:** superseded. kib now runs every box on gVisor in one Lima VM, and the view reaches it over NFS from the host (`PLAN_NFS_VIEW.md`), so the sidecar argument below no longer holds.
 
 **Verdict: not planned.** [`microvm.md`](design-notes/microvm.md) holds the four gates and the option
 table; two findings here harden it.
@@ -428,7 +429,7 @@ group 4 the long tail.
 | | `kib` | fence | sandbox-runtime | cplt | yoloAI | aicontainer | agent-safehouse | cc-devcontainer |
 |---|---|---|---|---|---|---|---|---|
 | **Host `$HOME` unreachable** | ✅ | ⚠️ opt-in `denyRead` | ❌ reads open | ⚠️ home-shaped allowlist | ⚠️ refuses `$HOME`, mounts `~/.claude` | ✅ | ✅ | ⚠️ 4 ro binds |
-| **Project secrets** | Keys-not-values (FUSE) | `denyWrite` only | Sentinel (**Linux only**) | Deny — **macOS only** | Excluded by `.gitignore` | Tool-layer hook | ❌ verified absent | ❌ verified absent |
+| **Project secrets** | Keys-not-values (view) | `denyWrite` only | Sentinel (**Linux only**) | Deny — **macOS only** | Excluded by `.gitignore` | Tool-layer hook | ❌ verified absent | ❌ verified absent |
 | **Masking, not just denial** | ✅ | ⚠️ empties | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | **Covers files created after launch** | ✅ | ⚠️ **macOS/hooks only** | ❌ Linux | ❌ Linux | ❌ create-time | ⚠️ hook yes, binds no | ⚠️ workdir yes | ❌ |
 | **Reads default to** | Allow in-project only | Allow | Allow | Deny (listed) | n/a (copy) | Allow | **Deny** | Allow |
@@ -482,7 +483,7 @@ group 4 the long tail.
 | | `kib` | microsandbox | matchlock | cleanroom | cco | sandbox-shell | agent-seatbelt | container-use |
 |---|---|---|---|---|---|---|---|---|
 | **Host `$HOME` unreachable** | ✅ | ✅ "no implicit passthrough" | ❓ backing dir unstated | ⚠️ copy-in scope unstated | ❌ entire host ro (`--safe` opts out) | ✅ deny-default reads | ❌ enumerated denies only | ✅ fresh image + tree copy |
-| **Project secrets** | Keys-not-values (FUSE) | ❌ no `.env` support | ⚠️ opt-in VFS hooks, none default | ✅ host-side refs, never in guest | ❌ **explicitly not covered** | ⚠️ `deny_read` patterns | ⚠️ `~/.env` only, not project | ⚠️ log stripping only |
+| **Project secrets** | Keys-not-values (view) | ❌ no `.env` support | ⚠️ opt-in VFS hooks, none default | ✅ host-side refs, never in guest | ❌ **explicitly not covered** | ⚠️ `deny_read` patterns | ⚠️ `~/.env` only, not project | ⚠️ log stripping only |
 | **Masking, not just denial** | ✅ | ⚠️ sentinel substitution | ⚠️ both expressible | ❌ denial | ❌ | ❌ denial | ❌ denial | ⚠️ output only |
 | **Covers after-launch files** | ✅ | ❓ | ⚠️ glob matches `create` | ❓ | ❓ | ✅ subtree rules | ❓ | ❓ |
 | **Reads default to** | Allow in-project only | Allow (mounts rw+exec+suid) | ❓ | ❓ | Allow (native mode) | **Deny** | Allow | Allow in-container |
@@ -536,7 +537,7 @@ group 4 the long tail.
 | | `kib` | agent-sandbox | claudebox | sandvault | sculptor | packnplay | vibebox | sbox |
 |---|---|---|---|---|---|---|---|---|
 | **Host `$HOME` unreachable** | ✅ | ✅ no global gitconfig | ⚠️ **`~/.ssh` `:ro`** | ✅ two mechanisms, tested | ❌ "agents act with your access" | ⚠️ creds opt-in, `~/.claude` always rw | ❌ `~/.claude` + `~/.codex` rw | ⚠️ selective mounts |
-| **Project secrets** | Keys-not-values (FUSE) | ❌ secrets dir must be outside | ❌ `.env` ro passthrough | ❌ coarse, path-based | ❌ reads `.sculptor/.env` | ❓ | ❓ | ⚠️ named env passthrough |
+| **Project secrets** | Keys-not-values (view) | ❌ secrets dir must be outside | ❌ `.env` ro passthrough | ❌ coarse, path-based | ❌ reads `.sculptor/.env` | ❓ | ❓ | ⚠️ named env passthrough |
 | **Masking, not just denial** | ✅ | ⚠️ header injection | ❌ | ❌ | ❌ | ❌ | ⚠️ tmpfs mask | ❌ |
 | **Covers after-launch files** | ✅ | ✅ no caching | ❌ | ✅ path rules | ❓ | ❓ | ✅ live virtiofs | ⚠️ unstated |
 | **Reads default to** | Allow in-project only | Allow in-project | Allow | Allow + deny list | Allow (host access) | Allow mounted paths | Allow | Allow |
@@ -590,7 +591,7 @@ group 4 the long tail.
 | | `kib` | SandboxedClaudeCode | agent-seatbelt-sandbox | chamber | enclave | sandclaude | FoamoftheSea/ccs | textcortex/ccs |
 |---|---|---|---|---|---|---|---|---|
 | **Host `$HOME` unreachable** | ✅ | ⚠️ 8+ subpaths bound, several rw | ❌ **only `~/.secrets` denied** | ✅ cwd only, env stripped | ❌ `(allow default)` | ⚠️ enumerated subpaths | ✅ | ❌ auto-copied in |
-| **Project secrets** | Keys-not-values (FUSE) | ❓ | ⚠️ `SECRETS_DIR` only | ❓ | ❓ | ❌ | ❌ `Read(*)` allowed | ⚠️ plain `.env` loader |
+| **Project secrets** | Keys-not-values (view) | ❓ | ⚠️ `SECRETS_DIR` only | ❓ | ❓ | ❌ | ❌ `Read(*)` allowed | ⚠️ plain `.env` loader |
 | **Masking, not just denial** | ✅ | ❌ | ❌ denial | ❓ | ❌ | ❌ | ❌ denial | ❌ |
 | **Covers after-launch files** | ✅ | ✅ live bind | ❓ | ✅ live mount, no filter | ✅ path predicates | ❌ | ❌ `Read` not denied | ❌ one-time copy |
 | **Reads default to** | Allow in-project only | Allow bound paths | **Allow** | Allow cwd | **Allow** | Allow mounted | Allow (`bypassPermissions`) | Allow |
@@ -679,7 +680,7 @@ shipping no LICENSE file** — GitHub detects no license for any of the three. `
 
 | Project | Why it matters to `kib` |
 |---|---|
-| [navikt/cplt](https://github.com/navikt/cplt) | **Closest philosophical match**, and the most candid SECURITY.md in the field — it documents **24+** of its own bypasses. Kernel-enforced via Landlock instead of FUSE, plus the egress allowlist `kib` lacks. Critical for any Linux comparison: its kernel-blocked rows are macOS-only, because Landlock cannot deny a subpath inside an allowed directory. Its Linux kernel test suite does exist (`tests/integration_linux.rs`, 59 tests). See [`docs/security/compare-to-cplt.md`](security/compare-to-cplt.md). |
+| [navikt/cplt](https://github.com/navikt/cplt) | **Closest philosophical match**, and the most candid SECURITY.md in the field — it documents **24+** of its own bypasses. Kernel-enforced via Landlock instead of a filtering view, plus the egress allowlist `kib` lacks. Critical for any Linux comparison: its kernel-blocked rows are macOS-only, because Landlock cannot deny a subpath inside an allowed directory. Its Linux kernel test suite does exist (`tests/integration_linux.rs`, 59 tests). See [`docs/security/compare-to-cplt.md`](security/compare-to-cplt.md). |
 | [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime) | Anthropic's mandatory deny-write list remains the most complete path enumeration in the field, and its Linux existing-files-only caveat is the sharpest self-documented limitation anywhere. Note two things its own README does not tell you: the entire credential subsystem is documented only on the Claude Code docs site, and its default `onExtractNoMatch: warn` fails open. |
 | [aicontainer](https://github.com/stefanoginella/aicontainer) | The closest match to `kib`'s thesis, and the only other container project treating cross-project config poisoning as first-class. Its digest-pinned Docker socket proxy exposes exactly `ping` and `version`. Two acknowledged holes: VS Code runs a repo's `initializeCommand` on the host before it can validate anything, and its `:ro` guards cannot cover a repo cloned mid-session. |
 | [yoloai](https://github.com/kstenerud/yoloai) | A working audit trail of its own escapes, including a fixed critical host-RCE via agent-controlled `.git/config` filter drivers. Read `findings-unresolved.md` before trusting the review gate: **DF136**, reproduced 2026-07-20 and unfixed, lets an agent on the macOS backends redirect `apply` to any user-writable path. |
@@ -735,7 +736,7 @@ That is a 30-second test and it is most of the decision.
 
 ## Where this leaves `kib`
 
-**Keep:** the FUSE sidecar — it is what makes stub-on-read, after-launch coverage and a capless agent
+**Keep:** the redacting view — it is what makes stub-on-read, after-launch coverage and a capless agent
 container possible at the same time, and it is the only mechanism in the field that does all three.
 The `.git/config` validator. The clipboard read/write split. The broker.
 Confinement by bind mount rather than deny-list. A regression suite that re-tests the *legitimate*
@@ -825,6 +826,6 @@ CVE-2026-48124 (Cursor) · GHSA-v4xv-rqh3-w9mc (Docker socket chain)
 [Development containers](https://code.claude.com/docs/en/devcontainer)
 
 **`kib`** · this repository: `CLAUDE.md`, `bin/kib`, the `host/` units,
-`guest/policy/global.kibignore`, `kib/guest/fuse.py`, `kib/shared/dangerous.py`,
+`guest/policy/global.kibignore`, `host/view/`, `kib/shared/dangerous.py`,
 `kib/guest/wayland_guard.py`, `kib/host/gitaudit.py`, `kib/broker/`, `tests/security-test.sh`,
 `docs/design-notes/platform-matrix.md`

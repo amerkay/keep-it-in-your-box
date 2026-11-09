@@ -47,6 +47,9 @@ The container hardening is excellent — every classic escape class was tested a
 > [!CAUTION]
 > The most important chains fired on the **host's next `git status` / `git add` / `git commit`** — the exact commands you run to *review the sandbox's diff before trusting it*. `core.fsmonitor` executes on a bare `git status`, before a human sees anything, and a redirected `core.hooksPath` routed git past the repo's own pre-commit hook (since replaced by the host-side audit gate). The review step the whole model relies on was where the payload detonated.
 
+> [!NOTE]
+> **2026-11-09: the redaction view moved to the host.** The FUSE sidecar audited here is gone. The view (`host/view`, binary `kib-view`) now runs on the host as an NFS server that the VM mounts, and no container holds `SYS_ADMIN` or `/dev/fuse`. Rows naming FUSE or the sidecar describe the design audited. In the box, a view refusal now reads as EACCES (or EIO on a write), not EPERM. See `PLAN_NFS_VIEW.md`.
+
 <sub>**Scope** (every host- and guest-side control; file paths below name the CURRENT tree, which was reorganised after the audit — see `CLAUDE.md`)**:** the launcher and its `host/` units, both entrypoints, the `Dockerfile`, the FUSE guard, the shipped guard rules, the host-side audit gate, the DNS watcher and the sleep guard · **Method:** static analysis of every control plus **live exploitation from inside a running sandbox**, each finding re-verified by an adversarial second pass · **Non-destructive throughout:** exploitability was proven via config *resolution* (`git config --get`), a permitted write-*open* with nothing written, `stat`, or resolved-state reads — never by executing host code or reading a real secret.</sub>
 
 ---

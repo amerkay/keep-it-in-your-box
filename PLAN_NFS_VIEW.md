@@ -1,6 +1,15 @@
 # Plan: the redaction view runs on the host and serves NFS; the VM never sees a raw project
 
-**Status 2026-11-09: proposed, not implemented.** Replaces the per-project VM shares and the restart-and-resume path from `3a5d9c5`. Test scripts (untracked): `tmp/nfs-bench-linux.py`, `tmp/nfs-bench-mac.py`, `tmp/gvisor-rootless-test.sh`, `tmp/rootless-view-test.sh`.
+**Status 2026-11-09: implemented, all four phases; not yet run end to end** (`host/view`, `host/redaction.sh`, `host/vm.sh`). Replaces the per-project VM shares and the restart-and-resume path from `3a5d9c5`. Where the build differs from the design below:
+
+- **The mount needs a secret path as well as being one-shot.** One-shot alone left a race: a box polling ports could mount a view before kib did. The view prints `<port> <secret>`; the VM mounts `192.168.5.2:/<secret>`.
+- **Hard links are refused, not supported.** go-nfs v0.0.4 parses LINK's arguments as SYMLINK's, so it can't be fixed without patching it. git falls back to a rename.
+- **The VM mounts with `sync`.** Otherwise a refused write is buffered and fails only at a later flush, whose error gVisor may drop.
+- **Refusals reach the box as `EACCES` (or `EIO` on a write), not `EPERM`:** go-nfs maps every error that way. The box's policy text says so.
+- **The binary and the view's state live in `~/.local/share/keep-it-in-your-box`** (`KIB_HOST_ONLY`), not `$KIB_STATE_ROOT/bin`. The state dir is a VM share, so VM root could have replaced a binary the host runs, or the rules the view serves.
+- **A short mirror is removed 2 s after its last write.** NFS has no close to check it at.
+- **Silly renames are served.** gVisor keeps every file it has read open, so before a rename replaces it, or an unlink deletes it, the VM's client moves it to `.nfs<24 hex>`. A git config is hard-linked there instead and stays put, so git's `config.lock` rename is still checked against it; the `.nfs` alias refuses writes. Every `.nfs` name the view made is removed when it stops: the client deletes one at its last close, which raced teardown and left debris in a project. Any other undeletable guarded file refuses the move. Found by `security-test.sh` on the first real launch: every `git config` write failed with "Text file busy".
+- **The no-VM mode is opt-in** (`engine = rootless` in `~/.keep-it-in-your-box/config`, `docs/vm.md`). Test scripts (untracked): `tmp/nfs-bench-linux.py`, `tmp/nfs-bench-mac.py`, `tmp/gvisor-rootless-test.sh`, `tmp/rootless-view-test.sh`.
 
 ## Goals
 
@@ -166,6 +175,22 @@ Script: `tmp/gvisor-rootless-test.sh`. It adds runtimes to `~/.config/docker/dae
 | Plain folder, box as root | | ✅ read + write |
 
 Rootless Docker runs inside a user namespace, where Linux refuses NFS mounts. The host user is root inside a rootless box, so a FUSE mount owned by that user needs no `allow_other`, as long as the box runs as root. kib's old rootless support already did that (`platform-matrix.md`: `box_uid` 0, `IS_SANDBOX=1`). Script: `tmp/rootless-view-test.sh`.
+
+### Test 13: Linux, the built view end to end (`tmp/nfs-view-live-test.sh`)
+
+The real `kib-view` on a scratch repo, VM root mounting it as kib does, a gVisor box from kib's image as the user.
+
+| | `sync` (shipped) | no `sync` |
+|---|---|---|
+| Second mount, real secret / wrong path | refused / refused | refused / refused |
+| `.env` reads | `K=<redacted>` | same |
+| Write `.env`, create `.git/hooks/pre-commit` | refused, refused | same |
+| Append to `.git/config` | refused | **reported WRITTEN** (host untouched) |
+| Edit, `git add` + `commit` (0444 objects) | ok | ok |
+| `git status` ×5 (tiny repo) | 143 ms | 101 ms |
+| 200 small writes | 373 ms | 286 ms |
+
+Without `sync` a refused write looks like it succeeded in the box, so `sync` stays: about 30% on small writes.
 
 ## Decision
 

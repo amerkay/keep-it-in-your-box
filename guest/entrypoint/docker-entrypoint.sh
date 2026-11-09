@@ -248,14 +248,17 @@ SHIM
 }
 
 # Which pass is this? Container creation runs as root and builds the box; a session re-enters
-# through gosu (host/lifecycle.sh kib_run_session) already as the target user.
-if [ -n "${KIB_SESSION_TAG:-}" ] || [ "$(id -u)" = "$HOST_UID" ]; then
+# through gosu (host/lifecycle.sh kib_run_session) already as the target user. Under rootless
+# Docker both are uid 0, so KIB_SESSION_TAG, set per exec, tells them apart.
+if [ -n "${KIB_SESSION_TAG:-}" ] \
+    || { [ "$(id -u)" = "$HOST_UID" ] && [ "${KIB_ROOTLESS:-0}" != 1 ]; }; then
     USER_HOME=$(getent passwd "$HOST_UID" | cut -d: -f6)
     if [ -z "$USER_HOME" ]; then
         echo "✗ Failed to resolve home directory for UID $HOST_UID" >&2
         exit 1
     fi
-    if [ "$HOST_UID" = "0" ]; then
+    # Root only as rootless Docker's root, which is the unprivileged host user outside.
+    if [ "$HOST_UID" = "0" ] && [ "${KIB_ROOTLESS:-0}" != 1 ]; then
         echo "✗ Refusing to run tool command as root" >&2
         exit 1
     fi
@@ -280,6 +283,12 @@ echo "▶ Setting up container user with UID:GID ${HOST_UID}:${HOST_GID}..." >/d
 # Create group if needed
 if ! getent group "$HOST_GID" >/dev/null 2>&1; then
     groupadd -g "$HOST_GID" hostgroup
+fi
+
+# Rootless: the target user IS root. Point its home at the one spelling everything here assumes;
+# in place, since usermod refuses while process 1 runs as that user.
+if [ "${KIB_ROOTLESS:-0}" = 1 ]; then
+    sed -i 's|^root:x:0:0:root:/root:|root:x:0:0:root:/home/hostuser:|' /etc/passwd
 fi
 
 # Handle user creation/modification
@@ -512,12 +521,13 @@ fi
 export HOME="$USER_HOME"
 export PATH="$KIB_SHIM_DIR:$USER_HOME/.local/bin:${KIB_PREPEND_PATH:+$KIB_PREPEND_PATH:}$PATH"
 
-# Switch to the host project directory — which is the sidecar's redacted view, propagated in.
-# kib refuses to start the container at all if that mount is not up, so there is nothing to
-# check here.
+# Switch to the host project directory — the redacted view. kib refuses to start the container
+# at all if that mount is not up, so there is nothing to check here.
 cd "${HOST_PWD:-/workspace}"
 
 # kib waits for this before its first `docker exec` (container_ready): setup is done.
 : >/run/kib-ready
-# exec gosu preserves the TTY properly (unlike su -c which wraps in a subshell).
+# exec gosu preserves the TTY properly (unlike su -c which wraps in a subshell). Not to the uid we
+# already are: gosu's setuid needs CAP_SETUID even then, which a rootless box does not have.
+[ "$(id -u)" != "$HOST_UID" ] || exec "$@"
 exec gosu "$HOST_UID:$HOST_GID" "$@"

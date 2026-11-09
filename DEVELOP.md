@@ -45,7 +45,7 @@ What to annotate, when a `# noqa` earns its place, and the shell rules are in
 ## Editor setup (VS Code)
 
 Run VS Code **on the host**, against the real directory — not attached to the box. The sandbox's
-redacted view exists only inside the container, so the editor sees ordinary files.
+redacted view exists only inside the VM and the box, so the editor sees ordinary files.
 
 [`.vscode/extensions.json`](.vscode/extensions.json) and [`.vscode/settings.json`](.vscode/settings.json)
 are checked in — a fresh clone gets prompted to install, and they wire straight into the same
@@ -62,7 +62,7 @@ code --install-extension EditorConfig.EditorConfig
 Five things that will bite otherwise:
 
 - **`.vscode/` is write-denied from inside the box** — it's on the host-executed-config guard list.
-  An agent in the sandbox getting EPERM if it edits these files is the guard working, not a bug;
+  An agent in the sandbox getting "Permission denied" (EACCES) if it edits these files is the guard working, not a bug;
   edit them from a host terminal.
 - **Point VS Code at `.venv`** (`Python: Select Interpreter`). `fromEnvironment` resolves ruff and
   mypy through the selected interpreter; without it both fall back to bundled versions and you get
@@ -83,7 +83,7 @@ Five things that will bite otherwise:
 
 The mypy extension writes a `.mypy_cache/` into the repo. That's gitignored and harmless on the
 host, but it is the reason a bare `mypy` **inside** the box dies with SIGBUS — its cache is mmap'd
-and mmap over the FUSE view faults. In the box, go through `./dev.sh`, which points
+and mmap over the redacted view faults. In the box, go through `./dev.sh`, which points
 `MYPY_CACHE_DIR` outside the mount.
 
 ## Tests
