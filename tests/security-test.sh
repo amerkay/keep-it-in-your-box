@@ -189,7 +189,8 @@ async def probe(port, sem):
             return
         try:
             w.write(null)
-            if (await asyncio.wait_for(r.read(4), 0.5))[:1] == b"\x80":
+            # A REPLY (type 1): Lima's host side sometimes self-connects and echoes our CALL.
+            if (await asyncio.wait_for(r.readexactly(12), 0.5))[8:] == b"\0\0\0\1":
                 print(port, end=" ")
         except Exception:
             pass
