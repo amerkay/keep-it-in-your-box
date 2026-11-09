@@ -304,6 +304,7 @@ rootless_use() {
     docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless \
         || die "engine = rootless needs rootless Docker running (docs/vm.md, \"No-VM mode\")."
     _KIB_ROOTLESS=1
+    KIB_HOST_GATEWAY=10.0.2.2 # RootlessKit's host loopback; Docker 29 writes `invalid IP` for host-gateway
     _vm_has_gvisor || _rootless_gvisor
 }
 

@@ -133,7 +133,9 @@ else
     esac
 fi
 unset _lsm_label
-if on_gvisor; then
+if [ "${KIB_ROOTLESS:-0}" = 1 ]; then
+    skip "no /proc/sys entry is writable" "no-VM mode: the box is root, and gVisor's /proc/sys is the sandbox's own"
+elif on_gvisor; then
     # gVisor's /proc/sys is its own, not a mount: what matters is that no entry takes a write.
     is "no /proc/sys entry is writable" "" "$(for f in /proc/sys/*/* /proc/sys/*/*/*; do
         [ -d "$f" ] || ! (printf '' >>"$f") 2>/dev/null || echo "$f"
@@ -834,7 +836,7 @@ allow "the box's ~/.cache is the project's own package-cache volume" \
     grep -q " $HOME/.cache " /proc/self/mountinfo
 # A kernel exploit here meets gVisor's kernel first, then the VM's — never the host's.
 allow "the box runs on gVisor" on_gvisor
-allow "host.docker.internal resolves (the host, through the VM)" getent hosts host.docker.internal
+allow "host.docker.internal resolves (the host)" getent hosts host.docker.internal
 is "dev servers watch by polling (gVisor sees no host edit's inotify event)" "1 true" \
     "${CHOKIDAR_USEPOLLING:-} ${WATCHPACK_POLLING:-}"
 

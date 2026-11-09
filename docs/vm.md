@@ -78,6 +78,7 @@ The first `kib` then asks once to add gVisor to `~/.config/docker/daemon.json` a
 - **One barrier instead of two.** A gVisor bug alone reaches your machine, as your user (rootless Docker never had root).
 - **No memory or CPU limits for boxes.** Rootless Docker runs gVisor only with `--ignore-cgroups`, so one box can use all your memory.
 - **The box runs as root inside its container,** which is your own user outside. The redaction view is a FUSE mount on your machine, since rootless Docker cannot mount NFS. Everything kib refuses is still refused.
+- **Host dev servers** are at `host.docker.internal` (RootlessKit's `10.0.2.2`), and only if rootless Docker allows host loopback: `DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false` in its user unit.
 - **Needs** `fusermount3` (package `fuse3`) and systemd-resolved (kib reads `/run/systemd/resolve/resolv.conf` for the box's DNS).
 
 Remove the line to go back to the VM.
