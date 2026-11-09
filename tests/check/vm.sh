@@ -9,7 +9,7 @@
 section "Lima VM engine (host/vm.sh)"
 
 _vm_dir="$(mktemp -d)"
-mkdir -p "$_vm_dir/bin" "$_vm_dir/home/devel/proj" "$_vm_dir/lima"
+mkdir -p "$_vm_dir/bin" "$_vm_dir/home/devel/proj" "$_vm_dir/home/other/app" "$_vm_dir/lima"
 # Fake limactl: an existing, running VM; stops, edits and root shells are logged. A root shell
 # that runs `runsc install` registers the runtime it names (its last argument) with fake docker.
 cat >"$_vm_dir/bin/limactl" <<EOF
@@ -149,6 +149,10 @@ is "a running box's project and the new one stay shared; the restart's marker is
     "$_vm_h/devel/proj $_vm_h/other/app" "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_released | tr '\n' ' ' | sed 's/ $//')"
 is "then the VM is re-mounted with them" "2" "$(_vm_edits)"
 is "a project opened before needs no restart" "none" "$(_vm_run "$PATH" _vm_t_root "$_vm_h/devel/proj")"
+_vm_t_roots() { _vm_roots; }
+echo "$_vm_dir/gone" >>"$_vm_h/.local/state/kib/vm-roots"
+is "a deleted project leaves the shares, and is not recreated" "$_vm_h/devel/proj $_vm_h/other/app" \
+    "$(_vm_run "$PATH" _vm_t_roots | tr '\n' ' ' | sed 's/ $//')"
 rm -rf "$_vm_tag" "$_vm_spec" && mv "$_vm_dir/spec" "$_vm_spec"
 _vm_run "$_vm_dir/bin:$PATH" _vm_t_up >/dev/null # back to the plain mount set
 

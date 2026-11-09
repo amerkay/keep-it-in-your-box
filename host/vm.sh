@@ -39,11 +39,13 @@ _vm_mounts() {
 _vm_mount() { # <dir[:w]>
     _vm_under "${1%:w}" "${VM_MOUNTS[@]}" || VM_MOUNTS+=(--mount-only "$1")
 }
-_vm_roots() { # sorted, so a folder comes before any inside it
+# Sorted, so a folder comes before any inside it. A deleted project drops out: never recreated.
+_vm_roots() {
+    local p
     {
         cat "$VM_ROOTS" 2>/dev/null || true
         [ -z "${VM_NEW_ROOT:-}" ] || echo "$VM_NEW_ROOT"
-    } | LC_ALL=C sort -u
+    } | LC_ALL=C sort -u | while IFS= read -r p; do [ ! -d "$p" ] || echo "$p"; done
 }
 _vm_under() { # <path> <dir[:w]…>: the path is one of the dirs, or inside one
     local p="$1/" d
