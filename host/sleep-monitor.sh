@@ -10,8 +10,8 @@
 # whether ORPHANED, its hook state); phantom input; AC/battery/lid/kernel suspend counter; and
 # matching journal lines interleaved.
 #
-# The verdict line is the point. It RECONSTRUCTS THE GUARD'S OWN METRIC — kib_sleep_state from
-# host/sleep-state.sh, reading the same hook markers the guard acts on — and says whether a
+# The verdict line is the point. It RECONSTRUCTS THE GUARD'S OWN METRIC — kib_session_state from
+# host/session-state.sh, reading the same hook markers the guard acts on — and says whether a
 # session really is busy (turn in flight, or a background subagent running) or the guard is
 # holding with every session idle (stuck/orphaned = the bug).
 #
@@ -39,10 +39,10 @@ if is_macos; then
     echo "so the equivalent diagnostic is:  pmset -g assertions" >&2
     exit 2
 fi
-# shellcheck source=SCRIPTDIR/sleep-state.sh
+# shellcheck source=SCRIPTDIR/session-state.sh
 # The guard's metric — SOURCED, never copied, so this diagnostic cannot drift into judging the
 # guard against a different verdict than the one it acts on.
-. "$HOST_DIR/sleep-state.sh"
+. "$HOST_DIR/session-state.sh"
 
 INTERVAL="${1:-10}"                   # seconds between samples (min effective = INPUT_WINDOW)
 IDLE_FLAG="${2:-55}"                  # flag if idle exceeds this (s) but still awake (< your 60s suspend)
@@ -270,7 +270,7 @@ while true; do
             gtag=$(guard_tag "${guard:-0}")
             groot=$(guard_state_root "${guard:-0}")
             # THE guard's metric, read from the same markers it acts on.
-            ghook=$(kib_sleep_state "${groot:-/nonexistent}" "${gtag:-none}")
+            ghook=$(kib_session_state "${groot:-/nonexistent}" "${gtag:-none}")
             orphan=""
             { [ "${gppid:-1}" = "1" ] || [ -z "$gtty" ] || [ "$gtty" = "?" ]; } && orphan="  <<< ORPHANED (ppid=$gppid tty=${gtty:-?})"
             case "$ghook" in
@@ -301,7 +301,7 @@ while true; do
             while read -r ip; do
                 [ -n "$ip" ] || continue
                 g=$(awk '{print $4}' "/proc/$ip/stat" 2>/dev/null)
-                st=$(kib_sleep_state "$(guard_state_root "${g:-0}")" "$(guard_tag "${g:-0}")")
+                st=$(kib_session_state "$(guard_state_root "${g:-0}")" "$(guard_tag "${g:-0}")")
                 if [ "$st" = busy ]; then
                     anyhook=busy
                     break

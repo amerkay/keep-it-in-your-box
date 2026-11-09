@@ -100,8 +100,10 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   (virtiofs, 9p) has no mount namespace for the event to land in. In kib's VM the root is
   `/mnt/kib/…`: VM-local, and not `/run`, which Ubuntu's `fusermount3` AppArmor profile denies.
   (`macos.md`, `microvm.md`)
-- **VM: `~` is mounted once over virtiofs, never a project, never a sync** — per-project mounts
-  restart the VM; 9p writes ~6× slower (refused, not a fallback); the Mutagen sync was replaced.
+- **VM: never mount `~` — `~/.claude`, kib's dirs and each project opened (its git top), over
+  virtiofs, never a sync.** A new project restarts the VM: `_vm_evict` asks if a session is busy
+  (`kib_sessions`), keeps every running box's project, and each cut session `--resume`s itself.
+  9p writes ~6× slower (refused, not a fallback); the Mutagen sync was replaced.
   Not kib inside the VM (no `~/.claude.json`, ssh breaks the TUI), not reverse-sshfs. Package
   caches are per project, never shared (one box would plant a package another's installs).
   (`microvm.md`)
@@ -155,7 +157,7 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
 - **Sleep guard: Claude's own hook state, never a measurement of output** — byte sampling,
   transcript mtime and `claude agents --json` were each tried and removed; a background subagent
   writes almost nothing, so any output metric sleeps the machine mid-work. The verdict is
-  `kib_sleep_state`, SOURCED by guard and diagnostic alike — never copied. Keep the poll
+  `kib_session_state`, SOURCED by guard, diagnostic and VM restart alike — never copied. Keep the poll
   subprocess-free (markers or nothing), keep `--what=sleep` (`idle` kills lid-shut tasks), keep the
   post-resume SETTLE window, and keep `--who` a space-free `claude-code` token. (`sleep-guard.md`)
 - **Don't re-enable `leftArrowOpensAgents`, and don't re-investigate the ←-key data loss** — the
@@ -190,7 +192,7 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
 - **Never unlink lock files**, and every backgrounded host process must close fds 200/201
   (`200>&- 201>&-`) — one miss strands every project's containers. Lock fds are allocated, not
   picked: 200/201 project + boot, 202 teardown's exclusive re-take, 203 canonical `.claude.json`,
-  204 the rule restage, 205 the Lima VM's session count, 206 its boot. Reusing one that is held higher up the call stack releases it.
+  204 the rule restage, 205 the Lima VM's session count, 206 its boot (taken before 205). Reusing one that is held higher up the call stack releases it.
   (`container-lifecycle.md`)
 - **The host-executed-config guard is two tiers, split by WHEN a file fires — ambient trigger vs
   deliberate `claude` launch.** `[protect]` refuses the write, so it is only worth it where no

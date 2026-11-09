@@ -58,6 +58,9 @@ need_python() {
 # ~/.keep-it-in-your-box/. Deliberately OUTSIDE the checkout — inside the repo root,
 # build.log/lock/pid would show up in `git status` and in the sandbox's view of the project.
 KIB_STATE_ROOT="${KIB_STATE_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/keep-it-in-your-box}"
+# Host-only state (the staged redaction patterns, the macOS clipboard spool, the witnesses, each
+# session's markers). Out of the bind-mounted dirs, like the locks: none of it is the sandbox's.
+STATE_DIR="$KIB_STATE_ROOT/.state"
 KIB_BUILD_DIR="$KIB_STATE_ROOT/build"
 KIB_LOG_DIR="$KIB_STATE_ROOT/logs"
 

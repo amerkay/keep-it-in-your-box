@@ -13,7 +13,7 @@ working — releasing 30s after it goes idle. Tunables: `SLEEP_GUARD_GRACE`, `SL
 `guest/policy/managed-settings.json` registers `guest/policy/sleep-hook.py` on the lifecycle
 events; both are bound `:ro` into `/etc/claude-code/`, the Linux **managed-policy** directory that
 already carries the sandbox `CLAUDE.md`. The hook writes marker files into `$SLEEP_STATE`
-(bind-mounted rw at `/run/kib/sleep`), and `host/sleep-state.sh` reads them.
+(bind-mounted rw at `/run/kib/sleep`), and `host/session-state.sh` reads them.
 
 - **Managed settings, never `~/.claude/settings.json`.** `hooks[].command` there is host code
   execution, the box can write that file, and it loads in every project *and* a host `claude` —
@@ -25,6 +25,7 @@ already carries the sandbox `CLAUDE.md`. The hook writes marker files into `$SLE
   `SubagentStart`/`SubagentStop` never have to pair up in a single number.
 
       <root>/<tag>/live          hooks are working at all (SessionStart)
+      <root>/<tag>/sid.<id>      Claude's session id: a VM restart resumes it (SessionStart)
       <root>/<tag>/turn          a turn is in flight (UserPromptSubmit → Stop/StopFailure)
       <root>/<tag>/wait          blocked on the USER (question tool, permission prompt)
       <root>/<tag>/agents/<id>   one file per live subagent

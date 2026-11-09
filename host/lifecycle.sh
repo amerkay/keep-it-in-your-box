@@ -520,6 +520,7 @@ kib_cleanup() {
     # erasing a short command's output the instant it exits. Claude's TUI manages its own
     # screen, as it does on the host, so kib leaves the terminal alone. Regression-guarded.
     [ -z "$notes" ] || printf '\n🛡️  kib: said before the session:\n%s' "$notes" >&2
+    vm_resume
 }
 
 # ── Run this terminal's session inside the project container ─────

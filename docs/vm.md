@@ -26,16 +26,19 @@ If `/dev/kvm` is missing, turn on virtualization (VT-x / AMD-V) in your BIOS. If
 - **kib stays on your machine; only Docker moves into the VM.** Same `~/.claude`, login,
   `--resume` history and broker routes.
 - **One VM, `kib-vm`.** It starts with your first session and stops 10 minutes after the last
-  one closes, so a quick reopen skips the boot. Opening and closing projects never restarts it.
+  one closes, so a quick reopen skips the boot.
 - **4 GiB of memory, more only when needed.** The VM keeps what it has used until it stops, so
   kib starts it small, with compressed swap inside it so a spike slows a box down instead of
   stopping it. If it still runs out, kib tells you and doubles it from its next start, up to
   half your RAM.
 - **It stays up to date.** Ubuntu installs security updates, kernel included, in the background;
   Docker updates when the VM stops, the one moment it cuts no session. Both apply at the next start.
-- **The VM mounts your home folder**, once, over virtiofs. The box sees your project only through
-  kib's redaction view, so `.env` values stay hidden and `.git/hooks` stays read-only. Projects
-  outside your home folder are refused.
+- **The VM never mounts your home folder.** It shares `~/.claude`, kib's own folders and each
+  project you have opened, over virtiofs. `~/.ssh`, `~/.aws` and the rest
+  stay out of it. The box sees your project only through kib's redaction view, so `.env` values
+  stay hidden and `.git/hooks` stays read-only.
+- **A project's first launch restarts the VM once.** If a session is mid-work, kib asks first.
+  Every session it stops comes back by itself, with `claude --resume`.
 - **Edits are live both ways.** A host edit raises no file-watch event in the box, so dev servers
   there watch by polling.
 - **Build folders stay in the VM**, built there for Linux: `node_modules`, `.pnpm-store`, `.venv`,
@@ -45,14 +48,15 @@ If `/dev/kvm` is missing, turn on virtualization (VT-x / AMD-V) in your BIOS. If
 
 ## Limits
 
-- **gVisor and VM root can read and write your home folder** if an exploit gets that far: it
-  would need a gVisor bug and then a VM kernel bug.
+- **gVisor and VM root can read and write what the VM shares** if an exploit gets that far: the
+  projects you have opened, `~/.claude` and kib's state, including the broker tokens in use. It would
+  need a gVisor bug and then a VM kernel bug.
 - **Small-file writes are ~1.6–2× slower** in the box than on the host. Installs stay fast
   because build folders are VM volumes.
 - **macOS reports every file as owned by whoever asks.** gVisor asks as root, so kib puts bindfs
   over `~/.claude` and its own state folder to report you as their owner.
-- **A kib update that changes the VM's mounts** restarts it once, and waits until no session is
-  open.
+- **A restart ends `kib exec` shells and in-flight turns.** Sessions resume from their last
+  saved message.
 
 ## Licenses
 

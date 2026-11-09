@@ -197,66 +197,77 @@ t_kill_pgrp() {
 # guard and the diagnostic both source. Each case here is a failure the old sampler actually
 # had, so they are regressions, not illustrations.
 t_sleep_state() {
-    # shellcheck source=SCRIPTDIR/../../host/sleep-state.sh
-    . "$KIB_ROOT/host/sleep-state.sh"
+    # shellcheck source=SCRIPTDIR/../../host/session-state.sh
+    . "$KIB_ROOT/host/session-state.sh"
     local d
     d="$(mktemp -d)"
 
-    is "sleep_state: no dir at all → unknown" unknown "$(kib_sleep_state "$d" nosuch)"
+    is "session_state: no dir at all → unknown" unknown "$(kib_session_state "$d" nosuch)"
     mkdir -p "$d/tag"
-    is "sleep_state: dir but no SessionStart marker → unknown" unknown "$(kib_sleep_state "$d" tag)"
+    is "session_state: dir but no SessionStart marker → unknown" unknown "$(kib_session_state "$d" tag)"
 
     : >"$d/tag/live"
-    is "sleep_state: hooks live, nothing running → idle" idle "$(kib_sleep_state "$d" tag)"
+    is "session_state: hooks live, nothing running → idle" idle "$(kib_session_state "$d" tag)"
 
     : >"$d/tag/turn"
-    is "sleep_state: turn in flight → busy" busy "$(kib_sleep_state "$d" tag)"
+    is "session_state: turn in flight → busy" busy "$(kib_session_state "$d" tag)"
 
     # An INTERRUPTED turn fires no Stop and writes nothing at all, so `turn` stays for the life
     # of the session — the laptop-on-all-night bug. Every event refreshes its mtime, so one
     # nothing has touched is over. `touch -t` is POSIX, spelled the same on GNU and BSD.
     touch -t 200001010000 "$d/tag/turn"
-    is "sleep_state: interrupted turn went stale → idle" idle "$(kib_sleep_state "$d" tag)"
+    is "session_state: interrupted turn went stale → idle" idle "$(kib_session_state "$d" tag)"
 
     # …unless a tool call is still running. Its own timeout is in the name, so a silent build
     # holds the lock while a quiet turn does not — the reason `turn` can expire in 2 min.
     mkdir -p "$d/tag/tools"
     : >"$d/tag/tools/t1.10"
-    is "sleep_state: stale turn but a tool is in flight → busy" busy "$(kib_sleep_state "$d" tag)"
+    is "session_state: stale turn but a tool is in flight → busy" busy "$(kib_session_state "$d" tag)"
     touch -t 200001010000 "$d/tag/tools/t1.10" # interrupting one fires no PostToolUse either
-    is "sleep_state: tool call outlived its budget → idle" idle "$(kib_sleep_state "$d" tag)"
+    is "session_state: tool call outlived its budget → idle" idle "$(kib_session_state "$d" tag)"
     rm -f "$d/tag/tools/t1.10"
     : >"$d/tag/turn"
 
     # The AskUserQuestion / permission case: a turn is open but Claude is blocked on a human, so
     # the machine must be allowed to sleep. Byte sampling could never separate this from a think.
     : >"$d/tag/wait"
-    is "sleep_state: turn + waiting on the user → idle" idle "$(kib_sleep_state "$d" tag)"
+    is "session_state: turn + waiting on the user → idle" idle "$(kib_session_state "$d" tag)"
 
     # …unless a background subagent is still working, which outlives the parent's turn and is
     # the case that let the machine sleep mid-work.
     mkdir -p "$d/tag/agents"
     : >"$d/tag/agents/agent-1"
-    is "sleep_state: waiting on the user but a subagent runs → busy" busy "$(kib_sleep_state "$d" tag)"
+    is "session_state: waiting on the user but a subagent runs → busy" busy "$(kib_session_state "$d" tag)"
 
     rm -f "$d/tag/turn"
-    is "sleep_state: turn over, subagent still running → busy" busy "$(kib_sleep_state "$d" tag)"
+    is "session_state: turn over, subagent still running → busy" busy "$(kib_session_state "$d" tag)"
 
     # Same rule for an ABORTED subagent: no SubagentStop, so the marker outlives the work, and
     # only its own tool events keep it warm.
     touch -t 200001010000 "$d/tag/agents/agent-1"
-    is "sleep_state: aborted subagent's marker went stale → idle" idle "$(kib_sleep_state "$d" tag)"
+    is "session_state: aborted subagent's marker went stale → idle" idle "$(kib_session_state "$d" tag)"
 
     rm -f "$d/tag/agents/agent-1"
-    is "sleep_state: last subagent finished → idle" idle "$(kib_sleep_state "$d" tag)"
+    is "session_state: last subagent finished → idle" idle "$(kib_session_state "$d" tag)"
 
     # The tree is bind-mounted rw into the box, so a hostile session can replace its own dir
     # with a link. Refusing it costs that session its inhibitor and nothing else.
     rm -rf "$d/tag"
     ln -s /etc "$d/tag"
-    is "sleep_state: session dir is a symlink → unknown" unknown "$(kib_sleep_state "$d" tag)"
+    is "session_state: session dir is a symlink → unknown" unknown "$(kib_session_state "$d" tag)"
 
-    is "sleep_state: empty tag → unknown" unknown "$(kib_sleep_state "$d" '')"
+    is "session_state: empty tag → unknown" unknown "$(kib_session_state "$d" '')"
+
+    # The VM restart's question: every live session on the machine, a dead kib's tag not counted.
+    local s="$d/st" id=0123abcd-0000-4000-8000-0123456789ab
+    mkdir -p "$s/p.sleep/kib-$$-1" "$s/p.sleep/kib-999999999-1" "$s/q.sleep/kib-$$-2"
+    touch "$s/p.sleep/kib-$$-1/live" "$s/p.sleep/kib-999999999-1/live" "$s/q.sleep/kib-$$-2/live" \
+        "$s/q.sleep/kib-$$-2/turn"
+    is "sessions: each live kib's verdict, none for a dead one" "busy idle" \
+        "$(kib_sessions "$s" | sort | tr '\n' ' ' | sed 's/ $//')"
+    touch "$s/p.sleep/kib-$$-1/sid.$id" "$s/q.sleep/kib-$$-2/sid.not-an-id"
+    is "session id: the hook's marker names it" "$id" "$(kib_session_id "$s/p.sleep" "kib-$$-1")"
+    is "session id: a name that is not one is no id" "" "$(kib_session_id "$s/q.sleep" "kib-$$-2")"
     rm -rf "$d"
 }
 

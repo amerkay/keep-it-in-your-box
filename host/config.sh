@@ -38,11 +38,6 @@ kib_resolve_paths() {
     LOCK_DIR="$KIB_STATE_ROOT/.locks"
     LOCK_FILE="$LOCK_DIR/$SLUG.lock"
     BOOT_LOCK="$LOCK_DIR/$SLUG.boot.lock"
-
-    # Host-only state (the staged redaction patterns, the macOS clipboard spool, the witnesses).
-    # Out of the bind-mounted dirs for the same reason as the locks — none of it is the
-    # sandbox's to edit.
-    STATE_DIR="$KIB_STATE_ROOT/.state"
 }
 
 # Canonical ~/.claude must exist (or be freshly skeletoned). Runs before any assembly.

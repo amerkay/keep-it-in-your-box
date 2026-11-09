@@ -36,8 +36,16 @@ case "\$1" in
         ;;
 esac
 EOF
-printf '#!/usr/bin/env bash\ncase "$1" in info) cat "%s/runtimes" 2>/dev/null ;; esac\n' "$_vm_dir" \
-    >"$_vm_dir/bin/docker"
+# Fake docker: one running box, whose project is ~/other/app; stops are logged.
+cat >"$_vm_dir/bin/docker" <<EOF
+#!/usr/bin/env bash
+case "\$1" in
+    info) cat "$_vm_dir/runtimes" 2>/dev/null ;;
+    ps) echo box1 ;;
+    inspect) echo "$_vm_dir/home/other/app" ;;
+    stop) echo stop >>"$_vm_dir/dstops" ;;
+esac
+EOF
 chmod +x "$_vm_dir/bin/"*
 
 # Subshells inherit these; a `sh -c` would not see the sourced functions.
@@ -50,7 +58,16 @@ _vm_stops() { if [ -f "$_vm_dir/stops" ]; then wc -l <"$_vm_dir/stops" | tr -d '
 _vm_t_engine() { if engine_lima; then echo vm; else echo native; fi; }
 _vm_t_shared() { exec 207>"$VM_LOCK" && flock -s 207 && vm_up && vm_down; }
 _vm_t_resolv() { vm_resolv "$_vm_dir/resolv" && cat "$_vm_dir/resolv"; }
-_vm_t_outside() { cd /tmp && vm_project_ok && echo allowed; }
+_vm_t_root() { cd "$1" && vm_project_ok && echo "${VM_NEW_ROOT:-none}"; }
+_vm_t_evict() { VM_EVICT_WAIT=1 && _vm_t_shared; }
+# Another kib holds the VM for a second, then closes: the restart waits it out.
+_vm_t_released() {
+    (exec 207>"$VM_LOCK" && flock -s 207 && sleep 1) &
+    sleep 0.3
+    VM_EVICT_WAIT=5 && vm_project_ok && vm_up >/dev/null 2>&1 && cat "$VM_ROOTS"
+    [ ! -e "$VM_RESTART" ] || echo "marker left"
+    wait
+}
 
 _vm_run() { ( # <PATH> <cmd…> — a fresh subshell with the units loaded, HOME and state faked
     export HOME="$_vm_dir/home" KIB_STATE_ROOT="$_vm_dir/home/.local/state/kib"
@@ -59,18 +76,28 @@ _vm_run() { ( # <PATH> <cmd…> — a fresh subshell with the units loaded, HOME
     unset KIB_PORTABLE_SOURCED # a fresh load, as bin/kib does
     shift
     # shellcheck source=/dev/null
-    . "$KIB_ROOT/host/core.sh" && . "$KIB_ROOT/host/portable.sh" && . "$KIB_ROOT/host/vm.sh"
+    . "$KIB_ROOT/host/core.sh" && . "$KIB_ROOT/host/portable.sh" && . "$KIB_ROOT/host/gitguard.sh"
+    . "$KIB_ROOT/host/session-state.sh" && . "$KIB_ROOT/host/vm.sh"
     cd "$HOME/devel/proj" && "$@"
 ) 2>&1 </dev/null; }
 
 is "an inherited _KIB_ENGINE_VM=1 is ignored" "native" "$(_KIB_ENGINE_VM=1 _vm_run "$PATH" _vm_t_engine)"
-is "the VM mounts ~ rw; outside it, only kib's checkout (read-only) and its own dirs" \
-    "--mount-only $_vm_dir/home:w --mount-only $KIB_ROOT --mount-only $_vm_dir/node:w" \
+_vm_h="$_vm_dir/home"
+is "the VM never mounts ~: ~/.claude, kib's own dirs, its checkout read-only" \
+    "--mount-only $_vm_h/.claude:w --mount-only $_vm_h/.local/state/kib:w --mount-only $_vm_dir/node:w --mount-only $KIB_ROOT" \
     "$(_vm_run "$PATH" _vm_t_mounts | tr '\n' ' ' | sed 's/ $//')"
-case "$(_vm_run "$PATH" _vm_t_outside)" in
-    *"outside $_vm_dir/home"*) pass "a project outside ~ is refused: the VM cannot see it" ;;
-    *) fail "a project outside ~ was not refused" ;;
+is "a project shares itself, never its siblings" "$_vm_h/devel/proj" \
+    "$(_vm_run "$PATH" _vm_t_root "$_vm_h/devel/proj")"
+mkdir -p "$_vm_dir/srv/app"
+is "a project outside ~ works too" "$_vm_dir/srv/app" "$(_vm_run "$PATH" _vm_t_root "$_vm_dir/srv/app")"
+case "$(_vm_run "$PATH" _vm_t_root "$_vm_h")$(_vm_run "$PATH" _vm_t_root "$_vm_dir")" in
+    *"won't share $_vm_h"*"won't share $_vm_dir"*) pass "~, and a folder holding it, are never shared" ;;
+    *) fail "~ or a folder holding it was shared" ;;
 esac
+git init -q "$_vm_h"
+is "a home folder that is a git repo is never shared" "$_vm_h/devel/proj" \
+    "$(_vm_run "$PATH" _vm_t_root "$_vm_h/devel/proj")"
+rm -rf "$_vm_h/.git"
 is "the docker engine moves into the VM; kib stays here" \
     "unix://$_vm_dir/lima/sock/docker.sock vm 192.168.5.2" "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_up | tail -1)"
 is "gVisor is installed once per pin" "1" \
@@ -102,12 +129,64 @@ case "$(cat "$_vm_dir/edits")" in
     *) fail "the re-mount is not virtiofs" "$(cat "$_vm_dir/edits")" ;;
 esac
 _vm_spec="$_vm_dir/home/.local/state/kib/vm-spec"
+_vm_tag="$_vm_h/.local/state/kib/.state/-p.sleep/kib-$$-1"
+mkdir -p "$_vm_tag" && touch "$_vm_tag/live" "$_vm_tag/turn"
 mv "$_vm_spec" "$_vm_dir/spec" && echo stale >"$_vm_spec"
-case "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_shared)" in
-    *"other kib sessions use it"*) is "a stale mount set in use: refused, the VM untouched" "1" "$(_vm_edits)" ;;
-    *) fail "a stale mount set in use was not refused" ;;
+case "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_evict)" in
+    *"1 of its sessions are mid-work"*"left the VM as it is"*) is \
+        "a restart with a session mid-work and nobody to say y: refused, nothing stopped" \
+        "1 no" "$(_vm_edits) $([ -e "$_vm_dir/dstops" ] && echo yes || echo no)" ;;
+    *) fail "a restart under a session mid-work was not asked" ;;
 esac
-mv "$_vm_dir/spec" "$_vm_spec"
+rm "$_vm_tag/turn"
+case "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_evict)" in
+    *"1 idle session(s) resume after"*"still use the VM after 1 s"*) is \
+        "all idle: no question, the boxes stop, the VM waits for their kibs" "1" "$(_vm_edits)" ;;
+    *) fail "a restart under idle sessions did not go ahead" ;;
+esac
+is "the restart stops every box" "1" "$(wc -l <"$_vm_dir/dstops" | tr -d ' ')"
+is "a running box's project and the new one stay shared; the restart's marker is gone" \
+    "$_vm_h/devel/proj $_vm_h/other/app" "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_released | tr '\n' ' ' | sed 's/ $//')"
+is "then the VM is re-mounted with them" "2" "$(_vm_edits)"
+is "a project opened before needs no restart" "none" "$(_vm_run "$PATH" _vm_t_root "$_vm_h/devel/proj")"
+rm -rf "$_vm_tag" "$_vm_spec" && mv "$_vm_dir/spec" "$_vm_spec"
+_vm_run "$_vm_dir/bin:$PATH" _vm_t_up >/dev/null # back to the plain mount set
+
+# A session cut by another kib's restart: no stop timer, and it comes back as itself.
+_vm_t_cut() { # <sid marker name>
+    VERB=claude CMD=(claude --dangerously-skip-permissions --model opus "fix it")
+    SLEEP_STATE="$_vm_dir/sl" SESSION_TAG=t && mkdir -p "$SLEEP_STATE/t" && touch "$SLEEP_STATE/t/$1"
+    exec 207>"$VM_LOCK" && flock -s 207 && vm_up >/dev/null 2>&1 && echo "$$" >"$VM_RESTART"
+    vm_down && echo "resume=$_VM_RESUME"
+    KIB_ROOT="$_vm_dir/fake" && vm_resume
+}
+mkdir -p "$_vm_dir/fake/bin" && printf '#!/bin/sh\necho "relaunched: $*"\n' >"$_vm_dir/fake/bin/kib"
+chmod +x "$_vm_dir/fake/bin/kib"
+_vm_sid=0123abcd-0000-4000-8000-0123456789ab
+case "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_cut "sid.$_vm_sid")" in
+    *"resume=$_vm_sid"*"resumes after it"*"relaunched: claude --model opus --resume $_vm_sid") pass \
+        "a session cut by a restart relaunches itself with --resume, no stop timer" ;;
+    *) fail "a cut session did not resume itself" "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_cut "sid.$_vm_sid")" ;;
+esac
+case "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_cut none)" in
+    *"resume=-"*"ended this session"*relaunched*) fail "a session with no id relaunched blind" ;;
+    *"resume=-"*"ended this session"*) pass "a session with no id is told, not relaunched" ;;
+    *) fail "a cut session with no id was not told" ;;
+esac
+rm -f "$_vm_dir/home/.local/state/kib/vm-restart"
+
+_vm_t_args() { _vm_resume_args "$@" && local IFS='|' && echo "${RESUME_ARGS[*]+"${RESUME_ARGS[*]}"}"; }
+for _vm_case in \
+    "a prompt is never sent again|--model|opus|--model opus fix-it" \
+    "a session pick is dropped, many-valued flags kept whole|--add-dir|a|b|--verbose|-r abc --add-dir a b --verbose" \
+    "print and continue are dropped||-c -p hi" \
+    "an unknown flag before a word: both dropped||--frob val" \
+    "an unknown flag alone, and flag=value, are kept|--frob|--model=x|--frob --model=x fix-it" \
+    "everything after -- is a prompt|--effort|high|--effort high -- --model x"; do
+    _vm_want="${_vm_case#*|}" && _vm_want="${_vm_want%|*}"
+    # shellcheck disable=SC2086 # the case's words
+    is "relaunch flags: ${_vm_case%%|*}" "$_vm_want" "$(_vm_run "$PATH" _vm_t_args ${_vm_case##*|})"
+done
 
 rm -f "$_vm_dir/stops"
 _vm_run "$_vm_dir/bin:$PATH" _vm_t_shared >/dev/null
@@ -187,4 +266,4 @@ is "launch notices are kept for the replay after the session" "⚠️  kib: one
 three" "$(_vm_run "$PATH" _vm_t_notes 3>&1 >/dev/null)"
 
 rm -rf "$_vm_dir"
-unset _vm_dir _vm_spec _vm_grow
+unset _vm_dir _vm_spec _vm_grow _vm_h _vm_tag _vm_sid _vm_case _vm_want

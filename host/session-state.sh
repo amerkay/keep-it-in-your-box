@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# The sleep guard's activity verdict, read from the marker tree guest/policy/sleep-hook.py
-# writes. SOURCED by both host/sleep-guard.sh and the diagnostic host/sleep-monitor.sh — never
-# copied: a copy drifts, and then the diagnostic judges the guard against a different verdict
-# than the one it acts on. bash-3.2/BSD-clean.
+# Each session's activity verdict, read from the marker tree guest/policy/sleep-hook.py writes.
+# SOURCED by the sleep guard, its diagnostic host/sleep-monitor.sh and kib's VM restart
+# (host/vm.sh) — never copied: a copy drifts, and then one judges a session by a different
+# verdict than the others act on. bash-3.2/BSD-clean.
 #
 # Replaced the `wchar` TUI-byte sampler. That measured bytes written to the terminal, so a
 # background subagent — which writes almost nothing there — read as idle and let the machine
@@ -31,7 +31,7 @@ _kib_marker_stale() { # $1 = marker, $2 = minutes it may go untouched
     [ -n "$(find "$1" -mmin "+$2" 2>/dev/null)" ]
 }
 
-kib_sleep_state() { # $1 = state root, $2 = session tag
+kib_session_state() { # $1 = state root, $2 = session tag
     local d="$1/$2" f w
     { [ -n "$2" ] && [ ! -L "$d" ] && [ -d "$d" ]; } || {
         printf 'unknown'
@@ -72,7 +72,34 @@ kib_sleep_state() { # $1 = state root, $2 = session tag
     printf 'idle'
 }
 
-# NOTHING ELSE LIVES HERE. The markers are the only input: no byte sampling, no transcript
+# The verdict of every live session on this machine, one per line: each project's marker tree
+# (<state dir>/<project>.sleep/<tag>) whose kib, the pid in its tag (kib-<pid>-<epoch>), runs.
+kib_sessions() { # $1 = kib's state dir
+    local d p
+    for d in "$1"/*.sleep/kib-*; do
+        p="${d##*/kib-}"
+        kill -0 "${p%%-*}" 2>/dev/null || continue
+        printf '%s\n' "$(kib_session_state "${d%/*}" "${d##*/}")"
+    done
+}
+
+# The Claude session id the hook names in an empty `sid.<id>` marker, if it is one: a name, so
+# nothing the box wrote is ever read.
+kib_session_id() { # $1 = state root, $2 = session tag
+    local f
+    { [ -n "$2" ] && [ ! -L "$1/$2" ]; } || return 1
+    for f in "$1/$2"/sid.*; do
+        f="${f##*/sid.}"
+        case "$f" in *[!0-9a-f-]*) continue ;; esac
+        [ "${#f}" -ne 36 ] || {
+            echo "$f"
+            return 0
+        }
+    done
+    return 1
+}
+
+# NOTHING ELSE FEEDS THE VERDICT. The markers are the only input: no byte sampling, no transcript
 # mtime, no `claude agents --json`, no `docker exec` of any kind. Each of those was tried and
 # is a documented dead end (sleep-guard.md), and every one of them costs a subprocess per poll
 # in a daemon whose entire job is to save power. The one `find` above is the exception that

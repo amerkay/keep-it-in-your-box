@@ -11,10 +11,10 @@
 # Reads:  PWD
 # Writes: nothing global
 
-_git_toplevel() { git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true; }
+_git_toplevel() { git -C "$1" rev-parse --show-toplevel 2>/dev/null || true; }
 
 # Tracked paths .kibignore covers, NUL-separated, by the view's own matcher: git and the binary in
-# a throwaway container on a read-only bind (the VM mounts ~). Empty if the engine is not up.
+# a throwaway container on a read-only bind (the VM shares the repo's folder). Empty if the engine is not up.
 _tracked_matches() { # <top> <out>
     : >"$2"
     [ -f "$1/.kibignore" ] && [ -n "${IMAGE_NAME:-}" ] || return 0
@@ -38,7 +38,7 @@ _tracked_matches() { # <top> <out>
 kib_audit_gate() {
     local mode="$1" top rc=0 what="" stamp="${STATE_DIR:-}/${SLUG:-x}.hooks.seen" tracked
     have_python || return 0
-    top="$(_git_toplevel)"
+    top="$(_git_toplevel "$PWD")"
     [ -n "$top" ] || return 0 # not a git repo — nothing to audit
 
     # `.claude/hooks/` is a whole tree with no schema to parse, and git cannot bound it: the box

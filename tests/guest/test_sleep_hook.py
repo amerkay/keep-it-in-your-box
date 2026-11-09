@@ -1,6 +1,6 @@
 """The sleep hook's heartbeat — the half of the liveness rule that lives in the box.
 
-host/sleep-state.sh reads a marker nothing has touched within its window as work that is over,
+host/session-state.sh reads a marker nothing has touched within its window as work that is over,
 because an interrupted turn clears nothing. That is only safe if live work keeps its own marker
 warm, and if a silent tool call declares how long it may be silent — which is what these
 assert. Host half: tests/check/shims.sh.
@@ -38,6 +38,18 @@ def fire(hook: ModuleType, event: str, **extra: object) -> None:
         hook.main()
     finally:
         sys.stdin = sys.__stdin__
+
+
+def test_session_start_names_the_session_for_resume(hook: ModuleType, tmp_path: Path) -> None:
+    """A VM restart resumes each session by this name. /clear's new id replaces it, and an id that
+    is not a UUID names nothing: the host passes it on as an argument."""
+    session = tmp_path / "tag"
+    first, cleared = "0123abcd-0000-4000-8000-0123456789ab", "fedcba98-0000-4000-8000-0123456789ab"
+    fire(hook, "SessionStart", session_id=first)
+    fire(hook, "SessionStart", session_id=cleared)
+    assert [p.name for p in session.glob("sid.*")] == [f"sid.{cleared}"]
+    fire(hook, "SessionStart", session_id="../../etc/passwd")
+    assert list(session.glob("sid.*")) == []
 
 
 def test_events_keep_their_own_marker_warm(hook: ModuleType, tmp_path: Path) -> None:

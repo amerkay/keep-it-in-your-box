@@ -5,7 +5,7 @@
 # re-trigger. (docs/design-notes/sleep-guard.md)
 #
 # Activity comes from CLAUDE'S OWN STATE MACHINE and from NOTHING ELSE: the hooks in
-# guest/policy/managed-settings.json → guest/policy/sleep-hook.py, read by host/sleep-state.sh.
+# guest/policy/managed-settings.json → guest/policy/sleep-hook.py, read by host/session-state.sh.
 # It replaced a sampler that measured `wchar` (bytes written to the terminal) and inferred
 # "working" from the volume. That inference had two holes no threshold could close: a
 # BACKGROUND SUBAGENT writes almost nothing to the terminal, so N agents grinding read as idle
@@ -54,8 +54,8 @@ HOST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # `|| exit 1`: this script has no `set -e`, so an unguarded source of a missing portable.sh
 # would carry on with is_macos undefined and die mid-poll instead of at startup.
 . "$HOST_DIR/portable.sh" || exit 1
-# shellcheck source=SCRIPTDIR/sleep-state.sh
-. "$HOST_DIR/sleep-state.sh" || exit 1
+# shellcheck source=SCRIPTDIR/session-state.sh
+. "$HOST_DIR/session-state.sh" || exit 1
 
 INHIBIT_PID=""
 LAST_ACTIVE=0
@@ -156,7 +156,7 @@ while docker inspect "$CONTAINER" &>/dev/null; do
     fi
     LAST_LOOP=$NOW
 
-    STATE="$(kib_sleep_state "$STATE_ROOT" "$TAG")"
+    STATE="$(kib_session_state "$STATE_ROOT" "$TAG")"
 
     # `unknown` reads as idle. There is no fallback and nothing to cross-check by design: a
     # guard that cannot see state must let the machine sleep, never pin it awake on a tree it

@@ -30,6 +30,22 @@ gone. Measured on Linux and macOS (`sn-frontend`):
 - **No native gVisor:** it does not support rootless Docker (google/gvisor#12575), so one route:
   the VM, rootful inside, on both OSes.
 
+**Changed 2026-11-09: the VM no longer mounts `~`** (`_vm_mounts`): `~/.ssh`, `~/.aws` and
+the rest stay out of it. It shares `~/.claude`, kib's own dirs and each project opened: its git
+top (`vm-roots`), never `~` or a folder holding it. Not the project's parent: that shared every
+sibling to save a restart, and restarts now resume. Lima can't add a mount to a running VM, so a
+new project restarts it (`_vm_evict`):
+- asks `[y/N]` only if a session is mid-work, by the sleep guard's own verdict (`kib_sessions`);
+- keeps every running box's project (its FUSE sidecar's `/src`), or each resumed session would
+  restart the VM again for its own;
+- stops every box, waits for their kibs on fd 205 (boot, fd 206, is taken first, so a waiting
+  kib holds no share of it), then re-mounts;
+- each cut `kib claude` reads `$VM_RESTART` before it lets go of 205, and relaunches as
+  `--resume <id>`, the id named by the hook's `sid.<id>` marker (`vm_down`, `vm_resume`), with
+  its own flags minus any prompt or session pick (`_vm_resume_args`).
+Rejected: a QEMU hot-plugged virtiofs device (Linux only, untested, against Lima's internals), a
+host-side filtered FUSE view (two FUSE hops, no stock FUSE on macOS), one VM per project (RAM).
+
 A shared lock on fd 205 counts sessions. The last one out starts a 10-minute timer; it stops the
 VM only if no session holds fd 205 by then and no later close has replaced it. The FUSE root is
 `/mnt/kib` (Ubuntu's `fusermount3` AppArmor profile denies `/run`).
