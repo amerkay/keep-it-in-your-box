@@ -27,8 +27,9 @@ gone. Measured on Linux and macOS (`sn-frontend`):
 - **Build folders on VM volumes:** `pnpm install` through FUSE over virtiofs took 130 s plain and
   280 s on gVisor; with `node_modules` on a volume, 6 s and 13 s. FUSE was the cost.
 - **gVisor's cost:** `git status` ×0.8, `find` ×1.2–1.5, small-file writes ×1.6–2.0.
-- **No native gVisor:** it does not support rootless Docker (google/gvisor#12575), so one route:
-  the VM, rootful inside, on both OSes.
+- **No native gVisor yet:** rootless Docker runs it only with `--ignore-cgroups`, so boxes lose
+  memory and CPU limits (measured 2026-11-09, `PLAN_NFS_VIEW.md` Test 11), and rootful Docker's
+  socket is root-equivalent. So one route: the VM, rootful inside, on both OSes.
 
 **Changed 2026-11-09: the VM no longer mounts `~`** (`_vm_mounts`): `~/.ssh`, `~/.aws` and
 the rest stay out of it. It shares `~/.claude`, kib's own dirs and each project opened: its git
@@ -137,7 +138,7 @@ runc. The seams the 2026-10-04 review listed, and their answers:
   as the user (multithreaded: 240 files in 0.1 s). Its open-file limit is raised to 1048576: it holds an fd
   per open directory, gVisor keeps one open per cached directory, and the default 1024 ran out on
   the plugin tree (`EMFILE` naming `~/.claude/plugins/…` in the box).
-- **Rootless Docker:** unsupported → the VM's rootful Docker only.
+- **Rootless Docker:** gVisor runs only with `--ignore-cgroups` (no limits) → the VM's rootful Docker.
 
 ## If this is ever revisited
 

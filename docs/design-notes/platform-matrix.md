@@ -80,8 +80,9 @@ creation. What differs is only *where the propagation root lives*, and how it is
 
 ## Rootless Docker (Linux)
 
-**Removed 2026-11-07:** gVisor needs rootful Docker, so kib always uses its VM's (`microvm.md`).
-Kept for the record.
+**Removed 2026-11-07:** kib always uses its VM's rootful Docker (`microvm.md`). Rootless Docker does
+run gVisor, but only with `--ignore-cgroups` (measured 2026-11-09, `PLAN_NFS_VIEW.md` Test 11).
+Kept for the record: a no-VM mode would start from these findings.
 
 Supported, and it is an **engine** difference rather than an OS one — `is_rootless` sits beside
 `is_macos` in `host/portable.sh`, memoised off one `docker info` per launch. Measured by a

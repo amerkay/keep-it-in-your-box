@@ -110,8 +110,9 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
 - **The box runs on gVisor, so it has no Docker DNS, no NIC hot-plug, no host inotify and no
   `docker top`** — the broker is an `--add-host`, the box is created → connected → started,
   watchers poll, readiness is the entrypoint's `/run/kib-ready`. On macOS, Apple's virtiofs
-  reports the asker as owner, so kib's bind sources get bindfs in the VM — never the project. gVisor needs rootful Docker,
-  which is why there is no native path. (`microvm.md`)
+  reports the asker as owner, so kib's bind sources get bindfs in the VM — never the project. No native
+  path yet: rootless Docker runs gVisor only with `--ignore-cgroups` (no box memory/CPU limits), and
+  rootful Docker's socket is root-equivalent. (`microvm.md`, `PLAN_NFS_VIEW.md`)
 - **VM memory stays Lima's 4 GiB until an out-of-memory kill; Docker updates only at the idle
   stop** — the VM never hands memory back while running, and a Docker restart kills every
   session's `docker exec`, `live-restore` or not. (`microvm.md`)
