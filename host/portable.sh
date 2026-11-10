@@ -282,6 +282,7 @@ preflight_platform() {
 KIB_CONFIG="${KIB_CONFIG:-$HOME/.keep-it-in-your-box/config}"
 KIB_CFG_BROKER=on
 KIB_CFG_ENGINE=vm
+KIB_CFG_CLEANUP_DAYS=14 # a project's volumes go once it has been closed this long; 0 = never
 
 read_kib_config() {
     [ -f "$KIB_CONFIG" ] || return 0
@@ -300,6 +301,7 @@ read_kib_config() {
         case "$key" in
             broker) KIB_CFG_BROKER="$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" ;;
             engine) KIB_CFG_ENGINE="$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" ;;
+            cleanup_days) KIB_CFG_CLEANUP_DAYS="$val" ;;
         esac
     done <"$KIB_CONFIG"
 }

@@ -47,6 +47,8 @@ boot** (`_vm_zram`, half the VM's RAM): gVisor holds a box's memory as shmem, wh
 nothing could move, and the OOM killer's pick is a whole box (`gvisor_sentry`), every session in
 it. Measured: 4 projects, about 2 GiB of boxes, a 500 MB sentry killed.
 
+**Disk: cleaned once a day at a project's last exit** (`disk_cleanup`), in the foreground so the user sees what it freed. The disk image only grows: BuildKit's cache had reached 20 GB of a 38 GB disk, old images stayed pinned because the post-build prune runs while boxes still use them, and volumes outlived their projects. A project's volumes go once its stamp (`$KIB_STATE_ROOT/.used/<project>`, touched at its last exit) is `cleanup_days` old; Docker refuses a volume in use. Containers prune with `until=1h`: a box between create and start reads as stopped. `fstrim` returns the freed blocks to the host's sparse file. Under rootless only images and volumes: the other steps would hit the user's own Docker.
+
 **Docker updates only at the idle stop** (`_vm_linger_end`). Its apt repo is outside
 unattended-upgrades' origins, and its restart cuts every `docker exec`, so every session, even
 with `live-restore` (measured: the box stayed up, its terminal died).

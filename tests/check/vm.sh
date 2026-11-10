@@ -209,5 +209,33 @@ is "launch notices are kept for the replay after the session" "⚠️  kib: one
    two
 three" "$(_vm_run "$PATH" _vm_t_notes 3>&1 >/dev/null)"
 
+# Disk cleanup with a fake docker (no VM): "old" was closed long ago, "new" was never stamped.
+mkdir -p "$_vm_dir/dc"
+cat >"$_vm_dir/dc/docker" <<EOF
+#!/bin/sh
+case "\$1 \$2" in
+    "volume ls") printf '%s\n' kib-old-aaaaaaaa-cache kib-old-aaaaaaaa-local-dba27c31 \
+        kib-new-bbbbbbbb-cache kib-fresh-cccccccc-cache other ;;
+    "volume rm") shift 2 && echo "\$*" >>"$_vm_dir/dc/rm" ;;
+    *) echo "Total reclaimed space: 1.5GB" ;;
+esac
+EOF
+chmod +x "$_vm_dir/dc/docker"
+_vm_t_clean() {
+    CNAME=kib-proj-12345678 && mkdir -p "$KIB_USED"
+    touch -t 202001010000 "$KIB_USED/kib-old-aaaaaaaa" && touch "$KIB_USED/kib-fresh-cccccccc"
+    disk_cleanup && disk_cleanup && ls "$KIB_USED"
+}
+_vm_case="$(_vm_run "$_vm_dir/dc:$PATH" _vm_t_clean)"
+is "a project closed over cleanup_days loses every volume; none other does" \
+    "kib-old-aaaaaaaa-cache kib-old-aaaaaaaa-local-dba27c31" "$(cat "$_vm_dir/dc/rm")"
+case "$_vm_case" in
+    *"daily disk cleanup"*"daily disk cleanup"*) fail "the disk cleanup ran twice in a day" ;;
+    *"1.5GB freed"*"unused projects     old (closed over 14 days)"*kib-fresh-cccccccc*kib-new-bbbbbbbb*kib-proj-12345678)
+        pass "disk cleanup: once a day, says what it freed; a first-seen project starts its clock"
+        ;;
+    *) fail "disk cleanup output or stamps are wrong" "$_vm_case" ;;
+esac
+
 rm -rf "$_vm_dir"
 unset _vm_dir _vm_spec _vm_grow _vm_h _vm_tag _vm_sid _vm_case _vm_want

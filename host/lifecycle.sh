@@ -484,7 +484,7 @@ kib_cleanup() {
     # SIG_IGN survives fork+exec, so every `docker` child below is covered too, and a handler that
     # `exit`s would abort this trap exactly like the default did. (container-lifecycle.md)
     trap '' INT HUP TERM
-    local notes="${_KIB_NOTES:-}" # the launch's, not teardown's own
+    local notes="${_KIB_NOTES:-}" last="" # the launch's notes, not teardown's own
     # A killed TUI leaves mouse reporting on and the cursor hidden; every mouse move types codes.
     [ ! -t 1 ] || printf '\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?25h'
 
@@ -511,8 +511,11 @@ kib_cleanup() {
             # the next kib launch. Scoped to what changed since this launch's stamp.
             validate_shared_assets
             lock_fd -u 202
+            last=1
         fi
         exec 202>&-
+        # Unlocked, so a relaunch never waits on it; before vm_down, so the VM stays up.
+        [ -z "$last" ] || disk_cleanup
     fi
     vm_down # after the containers are gone: the last kib out stops the VM
 

@@ -396,6 +396,59 @@ _vm_oom() {
     fi
 }
 
+# ── Disk cleanup ────────────────────────────────────────────────
+# Once a day, at a project's last exit: what only grows otherwise. A project's volumes go once it
+# has been closed for `cleanup_days`; Docker refuses one in use, so an open project keeps its own.
+KIB_USED="$KIB_STATE_ROOT/.used" # one stamp per project, touched at each last exit
+DISK_CLEANED="$KIB_STATE_ROOT/disk-cleanup"
+
+disk_cleanup() {
+    local before
+    mkdir -p "$KIB_USED" && touch "$KIB_USED/$CNAME"
+    [ -z "$(find "$DISK_CLEANED" -mmin -1440 2>/dev/null)" ] || return 0
+    touch "$DISK_CLEANED"
+    echo "🧹 kib: daily disk cleanup" >&2
+    if engine_lima; then
+        before="$(_vm_disk_size)"
+        # until=: a box between create and start reads as stopped.
+        _disk_step "stopped containers" container prune -f --filter until=1h
+    fi
+    _disk_step "old kib images" image prune -f --filter label=keep-it-in-your-box
+    ! engine_lima || _disk_step "build cache" builder prune -af --keep-storage 5GB
+    _disk_projects
+    engine_lima || return 0
+    printf '   %-20s' "VM disk" >&2
+    vm_root fstrim -a >/dev/null 2>&1 || true
+    printf '%s → %s\n' "$before" "$(_vm_disk_size)" >&2
+}
+_disk_step() { # <label> <docker args…>: runs it, says what it freed
+    local out
+    printf '   %-20s' "$1" >&2
+    shift
+    out="$(docker "$@" 2>&1 | sed -n 's/^Total[^:]*:[[:space:]]*//p' | tail -n 1)"
+    echo "${out:-0B} freed" >&2
+}
+_disk_projects() { # every project closed longer than cleanup_days loses its volumes
+    local vols projects p gone=""
+    [ "$KIB_CFG_CLEANUP_DAYS" -gt 0 ] 2>/dev/null || return 0
+    vols="$(docker volume ls -q 2>/dev/null)"
+    projects="$(printf '%s\n' "$vols" | sed -nE 's/^(kib-.*)-(cache|src|local-[0-9a-f]{8})$/\1/p')"
+    for p in $(printf '%s\n' "$projects" | sort -u); do
+        [ -e "$KIB_USED/$p" ] || touch "$KIB_USED/$p" # first seen: its clock starts now
+        [ -n "$(find "$KIB_USED/$p" -mtime +"$KIB_CFG_CLEANUP_DAYS")" ] || continue
+        # shellcheck disable=SC2046 # one volume name per word
+        docker volume rm $(printf '%s\n' "$vols" | grep "^$p-") >/dev/null 2>&1 \
+            && gone="${gone:+$gone, }$(printf '%s' "$p" | sed 's/^kib-//; s/-[0-9a-f]\{8\}$//')"
+        rm -f "$KIB_USED/$p" # an open one is stamped again at its own exit
+    done
+    printf '   %-20s%s (closed over %s days)\n' "unused projects" "${gone:-none}" \
+        "$KIB_CFG_CLEANUP_DAYS" >&2
+}
+_vm_disk_size() {
+    du -k "$(limactl list --format '{{.Dir}}' "$KIB_VM_NAME" 2>/dev/null)/disk" 2>/dev/null \
+        | awk '{ printf "%.1f GB", $1 / 1048576 }'
+}
+
 vm_use() { # <verb>
     if [ "$KIB_CFG_ENGINE" = rootless ]; then
         rootless_use

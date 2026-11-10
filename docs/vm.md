@@ -40,6 +40,7 @@ If `/dev/kvm` is missing, turn on virtualization (VT-x / AMD-V) in your BIOS. If
   `venv`, `target`, `.next`, `.nuxt`, `.turbo`, `.terraform`. Package downloads stay in the
   project's cache volume (`kib-<project>-<hash>-cache`), so a reinstall copies instead of
   downloading.
+- **It cleans up after itself**, once a day at a project's last exit, and shows what it freed: stopped containers, old kib images, build cache over 5 GB, and the volumes of any project closed for 14 days. A `fstrim` then hands the space back to your disk. Set the days with `cleanup_days = 30` in `~/.keep-it-in-your-box/config`, or `0` to keep every project's volumes.
 
 ## Limits
 
