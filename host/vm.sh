@@ -367,6 +367,7 @@ _vm_linger_end() {
         export DEBIAN_FRONTEND=noninteractive
         timeout 45 apt-get update -qq && timeout 45 apt-get install $a --download-only $p \
             && apt-get install $a --no-download $p' >/dev/null 2>&1 || true
+    vm_root fstrim -a >/dev/null 2>&1 || true # what the last cleanup's lazy frees left
     limactl stop "$KIB_VM_NAME" >/dev/null 2>&1 || true
 }
 
@@ -403,29 +404,28 @@ KIB_USED="$KIB_STATE_ROOT/.used" # one stamp per project, touched at each last e
 DISK_CLEANED="$KIB_STATE_ROOT/disk-cleanup"
 
 disk_cleanup() {
-    local before
+    local age
     mkdir -p "$KIB_USED" && touch "$KIB_USED/$CNAME"
     [ -z "$(find "$DISK_CLEANED" -mmin -1440 2>/dev/null)" ] || return 0
     touch "$DISK_CLEANED"
     echo "🧹 kib: daily disk cleanup" >&2
-    if engine_lima; then
-        before="$(_vm_disk_size)"
-        # until=: a box between create and start reads as stopped.
-        _disk_step "stopped containers" container prune -f --filter until=1h
-    fi
+    # until=: a box between create and start reads as stopped.
+    ! engine_lima || _disk_step "stopped containers" container prune -f --filter until=1h
     _disk_step "old kib images" image prune -f --filter label=keep-it-in-your-box
-    ! engine_lima || _disk_step "build cache" builder prune -af --keep-storage 5GB
+    if engine_lima && age="$(_vm_build_age)"; then
+        _disk_step "build cache" builder prune -af --filter "until=$age" # keep the last build's
+    fi
     _disk_projects
     engine_lima || return 0
-    printf '   %-20s' "VM disk" >&2
+    # Docker frees pruned layers lazily, so this trim misses some; the idle stop trims again.
     vm_root fstrim -a >/dev/null 2>&1 || true
-    printf '%s → %s\n' "$before" "$(_vm_disk_size)" >&2
+    printf '   %-20s%s (drops a bit more when the VM stops)\n' "VM disk" "$(_vm_disk_size)" >&2
 }
 _disk_step() { # <label> <docker args…>: runs it, says what it freed
     local out
     printf '   %-20s' "$1" >&2
     shift
-    out="$(docker "$@" 2>&1 | sed -n 's/^Total[^:]*:[[:space:]]*//p' | tail -n 1)"
+    out="$(docker "$@" 2>&1 | grep '^Total' | grep -oE '[0-9.]+[kMGT]?B' | tail -n 1)"
     echo "${out:-0B} freed" >&2
 }
 _disk_projects() { # every project closed longer than cleanup_days loses its volumes
@@ -443,6 +443,11 @@ _disk_projects() { # every project closed longer than cleanup_days loses its vol
     done
     printf '   %-20s%s (closed over %s days)\n' "unused projects" "${gone:-none}" \
         "$KIB_CFG_CLEANUP_DAYS" >&2
+}
+_vm_build_age() { # since the current image's build began: its creation, plus an hour of build
+    # shellcheck disable=SC2016 # the VM's shell expands them
+    vm_root sh -c 'c="$(docker image inspect -f "{{.Created}}" keep-it-in-your-box:latest)" \
+        && echo "$(($(date +%s) - $(date -d "$c" +%s) + 3600))s"' 2>/dev/null
 }
 _vm_disk_size() {
     du -k "$(limactl list --format '{{.Dir}}' "$KIB_VM_NAME" 2>/dev/null)/disk" 2>/dev/null \

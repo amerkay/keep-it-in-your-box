@@ -217,7 +217,7 @@ case "\$1 \$2" in
     "volume ls") printf '%s\n' kib-old-aaaaaaaa-cache kib-old-aaaaaaaa-local-dba27c31 \
         kib-new-bbbbbbbb-cache kib-fresh-cccccccc-cache other ;;
     "volume rm") shift 2 && echo "\$*" >>"$_vm_dir/dc/rm" ;;
-    *) echo "Total reclaimed space: 1.5GB" ;;
+    *) printf 'Total reclaimed space: \033[0Kc1.5GB\n' ;; # a stray byte before the size, as seen
 esac
 EOF
 chmod +x "$_vm_dir/dc/docker"
