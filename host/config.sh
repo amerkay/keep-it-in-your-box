@@ -107,25 +107,28 @@ place_user_claude_md() {
     local md="$SESSION_BASE/CLAUDE.md"
     if [ -f "$CLAUDE_HOME/CLAUDE.md" ]; then
         cp "$CLAUDE_HOME/CLAUDE.md" "$md.kib.tmp" && mv "$md.kib.tmp" "$md"
+        cp "$md" "$(_claude_md_base)" # what each side changed is judged against this
     else
-        rm -f "$md" # absent on a fresh install, or deleted since the last launch
+        rm -f "$md" "$(_claude_md_base)" # absent on a fresh install, or deleted since the last launch
     fi
 }
+_claude_md_base() { echo "${SESSION_BASE%/*}/CLAUDE.md.base"; } # beside the session, not in it
 
 # The way back out, and the reason `#` memory written in a box is not lost: without it the session
-# copy is silently clobbered by the next cold start's re-copy. Folded back only when the session
-# copy is genuinely NEWER — otherwise a host-side edit made *during* the session would be reverted
-# by a staged copy the box never touched (the entrypoint guards settings.json the same way).
+# copy is silently clobbered by the next cold start's re-copy. A three-way check against the copy
+# staged in: an untouched session copy is dropped, a host edit is never reverted, and only an
+# edit on both sides is a conflict. (mtimes cried conflict on every host edit.)
 # Prose, so there is nothing to vet; but it loads in every project and in a host `claude`, so say
 # so. Write-if-present, like merge-out-json: an in-box delete never deletes canonical.
 merge_out_user_claude_md() {
     local src="$SESSION_BASE/CLAUDE.md" dst="$CLAUDE_HOME/CLAUDE.md"
     [ -f "$src" ] || return 0
     cmp -s "$src" "$dst" 2>/dev/null && return 0
-    if [ -f "$dst" ] && [ -z "$(find "$src" -newer "$dst" 2>/dev/null)" ]; then
+    cmp -s "$src" "$(_claude_md_base)" 2>/dev/null && return 0 # the session never edited it
+    if [ -f "$dst" ] && ! cmp -s "$dst" "$(_claude_md_base)" 2>/dev/null; then
         # shellcheck disable=SC2088  # the tilde is prose for the user, not a path we open
-        warn "~/.claude/CLAUDE.md changed on the host while this session ran, so this session's" \
-            "own edit to it was NOT folded back. The session copy is kept at $src."
+        warn "~/.claude/CLAUDE.md was edited both on the host and in this session, so this" \
+            "session's edit was NOT folded back. The session copy is kept at $src."
         return 0
     fi
     if (

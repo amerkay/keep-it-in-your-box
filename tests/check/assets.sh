@@ -89,13 +89,18 @@ t_user_memory_roundtrip() {
         *) fail "in-box CLAUDE.md edit was lost" "$(cat "$CLAUDE_HOME/CLAUDE.md")" ;;
     esac
 
-    # Host edit mid-session: canonical is newer, so it stands.
-    printf 'edited on the host\n' >"$SESSION_BASE/CLAUDE.md"
-    sleep 1 # 1s filesystem timestamp granularity — `find -newer` is not sub-second everywhere
+    # Host edit mid-session, the session copy untouched: canonical stands, and nothing is said.
+    place_user_claude_md
     printf 'host wins\n' >"$CLAUDE_HOME/CLAUDE.md"
-    merge_out_user_claude_md >/dev/null 2>&1
-    is "user memory: a host edit during the session is not reverted" \
-        "host wins" "$(cat "$CLAUDE_HOME/CLAUDE.md")"
+    is "user memory: a host-only edit is kept, with no conflict warning" "host wins" \
+        "$(merge_out_user_claude_md 2>&1)$(cat "$CLAUDE_HOME/CLAUDE.md")"
+    # Both sides edited: canonical still stands, and the session copy is named.
+    printf 'edited in the box\n' >"$SESSION_BASE/CLAUDE.md"
+    case "$(merge_out_user_claude_md 2>&1)$(cat "$CLAUDE_HOME/CLAUDE.md")" in
+        *"edited both on the host and in this session"*"host wins") pass \
+            "user memory: an edit on both sides keeps the host's and names the session copy" ;;
+        *) fail "a two-sided CLAUDE.md edit was mishandled" "$(cat "$CLAUDE_HOME/CLAUDE.md")" ;;
+    esac
 
     # Write-if-present: an in-box delete must never delete the user's memory.
     rm -f "$SESSION_BASE/CLAUDE.md"
