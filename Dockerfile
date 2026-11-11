@@ -1,7 +1,7 @@
 # The redacting view (host/view) runs on the HOST: built and unit-tested here for its OS and
 # CPU, so a failing guard test fails `kib build` and nobody installs Go. tools/build-image.sh
 # exports it (--target view); the image never holds it. The FUSE mount tests run in CI.
-FROM golang:1.27-trixie AS view-build
+FROM golang:1.27-alpine AS view-build
 ARG VIEW_OS=linux VIEW_ARCH=amd64
 WORKDIR /k/host/view
 COPY host/view/go.mod host/view/go.sum ./
@@ -19,18 +19,20 @@ FROM debian:trixie
 
 # Install Node.js via NodeSource repository and all system dependencies in one layer
 ARG NODE_MAJOR=26
-RUN apt-get update && apt-get install -y curl \
+# --no-install-recommends: recommends were ~a third of this layer. What a tool needs from them is
+# listed by name (ca-certificates, openssh-client, python3-dev).
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
     && curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     # Node.js from NodeSource
     nodejs \
     # Core development tools
-    build-essential git wget vim nano \
+    build-essential git openssh-client wget vim nano \
     # Modern shell tools
     # (shellcheck is NOT here: it is pinned to a release binary further down, with shfmt)
     jq ripgrep fzf fd-find bat tmux \
     # Languages and runtimes
-    python3 python3-pip python3-venv \
+    python3 python3-pip python3-venv python3-dev \
     # RS256 for the broker's OAuth service-account grant (kib/broker/oauth.py, lazily
     # imported — kib/broker must still import on a host that has never seen this).
     python3-cryptography \
@@ -95,7 +97,8 @@ RUN npm install -g \
     ts-node \
     tsx \
     yarn \
-    pnpm
+    pnpm \
+    && npm cache clean --force
 
 
 # Mountpoint for the user-level Node cache (host/node.sh) — nothing is baked. Created empty so
@@ -175,7 +178,8 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
 RUN npx playwright install --with-deps chromium && \
     chmod -R o+rx /opt/playwright-browsers && \
     ln -s "$(find /opt/playwright-browsers -name chrome -type f | head -1)" /usr/local/bin/google-chrome-stable && \
-    ln -s /usr/local/bin/google-chrome-stable /usr/local/bin/google-chrome
+    ln -s /usr/local/bin/google-chrome-stable /usr/local/bin/google-chrome && \
+    rm -rf /var/lib/apt/lists/* /root/.npm
 
 # Map the monospace names CSS font stacks lead with onto a font that exists here, so a
 # cairosvg render that does pick a single family off the stack still lands on a mono face.

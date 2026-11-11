@@ -32,6 +32,8 @@ case "\$1" in
             *only-upgrade*) echo docker >>"$_vm_dir/upgrades" ;;
             *vmstat*) [ -e "$_vm_dir/oom" ] ;;
             *zram*) echo zram >>"$_vm_dir/zram" ;;
+            *"system prune"*) echo moved >>"$_vm_dir/classic" ;;
+            *containerd-snapshotter*) [ ! -e "$_vm_dir/classic" ] ;;
             *"mount -t nfs"*) echo "\$*" >>"$_vm_dir/nfs" ;;
         esac
         ;;
@@ -187,6 +189,8 @@ case "$(cat "$_vm_dir/edits" 2>/dev/null)" in
 esac
 is "then the plan is spent" "no" "$([ -e "$_vm_grow" ] && echo yes || echo no)"
 is "a boot turns on compressed swap, a running VM is left alone" "zram" "$(cat "$_vm_dir/zram")"
+is "a VM on containerd storage moves to classic once, however often it boots" "moved" \
+    "$(cat "$_vm_dir/classic" 2>/dev/null)"
 rm -f "$_vm_dir/status"
 _vm_run "$_vm_dir/bin:$PATH" _vm_t_oom 4 >/dev/null
 is "never past half the host's RAM, and never below a size set by hand" "4" "$(cat "$_vm_grow")"

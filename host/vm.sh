@@ -76,7 +76,7 @@ vm_up() {
             --vm-type="$LIMA_VM_TYPE" --mount-type="$LIMA_MOUNT_TYPE" \
             "${VM_MOUNTS[@]}" template:docker-rootful
         _vm_save
-        _vm_zram
+        _vm_booted
         status=Running
     elif [ "$VM_WANT" != "$(cat "$VM_SPEC" 2>/dev/null)" ]; then
         # A kib upgrade changed the mount set. Never cut a session, never bind what isn't mounted.
@@ -95,7 +95,7 @@ vm_up() {
             --memory "$(cat "$VM_GROW")" "$KIB_VM_NAME"
         rm -f "$VM_GROW"
     fi
-    [ "$status" = Running ] || { _limactl "starting its VM" start "$KIB_VM_NAME" && _vm_zram; }
+    [ "$status" = Running ] || { _limactl "starting its VM" start "$KIB_VM_NAME" && _vm_booted; }
     _vm_docker
     _KIB_ENGINE_VM=1
     KIB_HOST_GATEWAY="$LIMA_HOST_IP"
@@ -143,6 +143,8 @@ _vm_owners() {
     }
 }
 
+_vm_booted() { _vm_zram && _vm_classic_store; } # nothing runs in it yet
+
 # Compressed swap in the VM's own RAM, each boot: a spike slows a box instead of the kernel
 # killing it. gVisor holds box memory as shmem, which nothing else can move out. Best effort.
 _vm_zram() {
@@ -150,6 +152,24 @@ _vm_zram() {
     vm_root sh -c 'grep -q zram /proc/swaps && exit; m=$(grep MemTotal /proc/meminfo | tr -dc 0-9)
         modprobe zram && d=$(zramctl -f -a zstd -s $((m / 2))K) && mkswap "$d" && swapon "$d"' \
         >>"$KIB_STATE_ROOT/vm.log" 2>&1 || true
+}
+
+# Docker's classic storage, set once: containerd's keeps a compressed copy of every image (+3 GB)
+# and cannot read an image's inline build cache, which fast rebuilds rely on (microvm.md).
+_vm_classic_store() {
+    local log="$KIB_STATE_ROOT/vm.log" py='import json, os, sys
+p = "/etc/docker/daemon.json"
+d = json.load(open(p)) if os.path.exists(p) else {}
+if d.get("features", {}).get("containerd-snapshotter") is False: sys.exit(1)
+if sys.argv[1] == "set":
+    d.setdefault("features", {})["containerd-snapshotter"] = False
+    json.dump(d, open(p, "w"), indent=2)'
+    vm_root python3 -c "$py" check >>"$log" 2>&1 || return 0
+    echo "🛡️  kib: moving the VM's Docker to its classic storage (one time); the image rebuilds once." >&2
+    # Pruned first: the switch hides containerd's images, which would then hold their disk forever.
+    # shellcheck disable=SC2016 # the VM's shell expands them
+    vm_root sh -c 'docker system prune -af && python3 -c "$1" set && systemctl restart docker' \
+        _ "$py" >>"$log" 2>&1 || die "could not move the VM's Docker to classic storage (log: $log)."
 }
 
 # gVisor into the VM once per pin: the release tarball (runsc needs its gvisor-bin/ beside it),
@@ -367,7 +387,9 @@ _vm_linger_end() {
         export DEBIAN_FRONTEND=noninteractive
         timeout 45 apt-get update -qq && timeout 45 apt-get install $a --download-only $p \
             && apt-get install $a --no-download $p' >/dev/null 2>&1 || true
-    vm_root fstrim -a >/dev/null 2>&1 || true # what the last cleanup's lazy frees left
+    # The trim catches what the last cleanup's lazy frees left.
+    vm_root sh -c 'apt-get clean; journalctl -q --vacuum-size=100M; fstrim -a' \
+        >/dev/null 2>&1 || true
     limactl stop "$KIB_VM_NAME" >/dev/null 2>&1 || true
 }
 
@@ -404,7 +426,6 @@ KIB_USED="$KIB_STATE_ROOT/.used" # one stamp per project, touched at each last e
 DISK_CLEANED="$KIB_STATE_ROOT/disk-cleanup"
 
 disk_cleanup() {
-    local age
     mkdir -p "$KIB_USED" && touch "$KIB_USED/$CNAME"
     [ -z "$(find "$DISK_CLEANED" -mmin -1440 2>/dev/null)" ] || return 0
     touch "$DISK_CLEANED"
@@ -412,9 +433,10 @@ disk_cleanup() {
     # until=: a box between create and start reads as stopped.
     ! engine_lima || _disk_step "stopped containers" container prune -f --filter until=1h
     _disk_step "old kib images" image prune -f --filter label=keep-it-in-your-box
-    if engine_lima && age="$(_vm_build_age)"; then
-        _disk_step "build cache" builder prune -af --filter "until=$age" # keep the last build's
-    fi
+    # The VM's Docker is kib's alone: an unused base image (golang) just re-pulls when needed.
+    ! engine_lima || _disk_step "other images" image prune -af --filter label!=keep-it-in-your-box
+    # The image carries its own cache (tools/build-image.sh), so this one may go whole.
+    ! engine_lima || _disk_step "build cache" builder prune -af
     _disk_projects
     engine_lima || return 0
     # Docker frees pruned layers lazily, so this trim misses some; the idle stop trims again.
@@ -443,11 +465,6 @@ _disk_projects() { # every project closed longer than cleanup_days loses its vol
     done
     printf '   %-20s%s (closed over %s days)\n' "unused projects" "${gone:-none}" \
         "$KIB_CFG_CLEANUP_DAYS" >&2
-}
-_vm_build_age() { # since the current image's build began: its creation, plus an hour of build
-    # shellcheck disable=SC2016 # the VM's shell expands them
-    vm_root sh -c 'c="$(docker image inspect -f "{{.Created}}" keep-it-in-your-box:latest)" \
-        && echo "$(($(date +%s) - $(date -d "$c" +%s) + 3600))s"' 2>/dev/null
 }
 _vm_disk_size() {
     du -k "$(limactl list --format '{{.Dir}}' "$KIB_VM_NAME" 2>/dev/null)/disk" 2>/dev/null \

@@ -70,20 +70,27 @@ build_image() {
     : >"$BUILD_LOG"
     [ "$INTERACTIVE" = 0 ] \
         || echo "🔨 Building $IMAGE_NAME with Claude Code ${LATEST_VERSION:-latest}..." >&2
+    # The cache rides in the image, so the VM's daily cleanup may drop the build cache whole.
     _docker_build --build-arg CLAUDE_VERSION="${LATEST_VERSION:-latest}" \
+        --build-arg BUILDKIT_INLINE_CACHE=1 --cache-from "${IMAGE_NAME}:latest" \
         -t "${IMAGE_NAME}:building" "$@" "$KIB_ROOT"
 }
 
 # The redaction view runs on THIS host, so it is built for it and taken out of the build, never
 # into the image. Renamed into place: a running view keeps its own inode.
 build_view() {
-    local arch tmp
+    local arch tmp src="host/view guest/policy/global.kibignore tests/fixtures/redaction Dockerfile"
+    # Built only when its sources changed: it has no build cache to make a rebuild cheap.
+    # shellcheck disable=SC2086 # one path per word
+    [ -x "$KIB_VIEW" ] && [ -z "$(cd "$KIB_ROOT" && find $src -newer "$KIB_VIEW" | head -n 1)" ] \
+        && return 0
     arch="$(uname -m)"
     case "$arch" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; esac
     mkdir -p "$KIB_HOST_ONLY" && chmod 700 "$KIB_HOST_ONLY"
     tmp="$(mktemp -d "$KIB_HOST_ONLY/.build.XXXXXX")" || return 1
     _docker_build --target view --build-arg VIEW_OS="$KIB_OS" --build-arg VIEW_ARCH="$arch" \
-        --output "type=local,dest=$tmp" "$KIB_ROOT" && mv -f "$tmp/kib-view" "$KIB_VIEW"
+        --output "type=local,dest=$tmp" "$KIB_ROOT" && mv -f "$tmp/kib-view" "$KIB_VIEW" \
+        && touch "$KIB_VIEW" # a cached build exports its old mtime
     local rc=$?
     rm -rf "$tmp"
     return "$rc"

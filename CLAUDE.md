@@ -187,6 +187,7 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   re-reads on `Seekdir(0)` and carries `.`/`..` (gVisor rewinds one open dir fd; a replayed
   snapshot froze every listing in the box).
   Regression-guarded. (`redaction-config-guard.md`)
+- **The VM's Docker stays on classic storage; the build cache is pruned whole.** On containerd storage `--cache-from` a local image silently rebuilds everything, and every image is stored twice. Keeping the last build's cache cost ~7 GB; `--keep-storage` reserves, never caps. (`microvm.md`)
 - **No FUSE passthrough, no writeback cache — both measured.** Passthrough needs a root daemon and
   speeds reads only; writeback never showed the box a host edit that changed a file's size.
 - **Never `kill -TERM "-$pid"` from a pidfile — call `kill_pgrp`**, and never require `KIB_ROOT`
