@@ -178,9 +178,9 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   checked once its writes stop (never its size: holes are NULs, which sh skips), before any move
   of it; go-nfs can't serve LINK, so it is refused. Rules match `fold`ed (APFS opens `.vſcode`
   as `.vscode`); the VM drops box traffic to the view's port. gVisor holds files
-  open, so the VM's client moves a replaced or deleted file aside (`.nfs…`): a git config is
-  hard-linked there instead and stays, so git's `config.lock` rename is still checked; any other
-  guarded file refuses (`silly`). FUSE (no-VM mode):
+  open, so the VM's client moves a replaced or deleted file aside (`.nfs…`): a git config or
+  HEAD is hard-linked there instead and stays, so git's `.lock` rename is still checked; any
+  other guarded file refuses (`silly`). FUSE (no-VM mode):
   I/O is `pread`/`pwrite` (a shared fd offset truncates reads), the page
   cache is kept only while mtime+size hold (never `kernel_cache`: the host edits this tree), only
   the RULE verdict is memoised (existence stays live), `Flush` never fsyncs, and a listing

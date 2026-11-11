@@ -167,6 +167,22 @@ func TestGitConfigWriteAfterSillyRename(t *testing.T) {
 	}
 }
 
+// git switch over NFS: the open HEAD is moved aside, then HEAD.lock renamed over it. HEAD must
+// never leave the view, or the rename reads as planting a git dir over the stock sample hooks.
+func TestGitHeadWriteAfterSillyRename(t *testing.T) {
+	v := scratchView(t, "", ".git/HEAD", ".git/objects/", ".git/refs/", ".git/hooks/x.sample",
+		".git/HEAD.lock")
+	if e := v.rename(".git/HEAD", ".git/.nfs0123456789abcdef01234567", 0); e != 0 {
+		t.Fatalf("silly rename of HEAD: %v", e)
+	}
+	if !lexists(filepath.Join(v.src, ".git/HEAD")) {
+		t.Error("HEAD left the view while open")
+	}
+	if e := v.rename(".git/HEAD.lock", ".git/HEAD", 0); e != 0 {
+		t.Errorf("git's HEAD.lock rename was refused: %v", e)
+	}
+}
+
 // APFS opens a look-alike as the real file, so git's own paths are matched folded too.
 func TestGitPathsFolded(t *testing.T) {
 	v := scratchView(t, "")

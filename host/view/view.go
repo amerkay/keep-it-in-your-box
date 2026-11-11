@@ -271,10 +271,10 @@ func silly(rel string) bool {
 }
 
 // sillyRename moves an open file aside for the NFS client. A file that may be deleted is
-// moved. A git config, which git replaces by renaming config.lock over it, stays put with the
-// silly name a read-only alias, so that rename is still checked against it; the box's own
-// delete of one then reports success and changes nothing. Any other guarded file is refused.
-// Never a redacted file.
+// moved. A git config or HEAD, which git replaces by renaming a .lock over it, stays put with the
+// silly name a read-only alias: the config rename is still checked against it, and HEAD never
+// leaves, so its rename never reads as planting a git dir. The box's own delete of one then
+// reports success and changes nothing. Any other guarded file is refused. Never a redacted file.
 func (v *view) sillyRename(old, dst string) syscall.Errno {
 	if k, _ := v.classify(old); k != pass {
 		return refused
@@ -285,8 +285,10 @@ func (v *view) sillyRename(old, dst string) syscall.Errno {
 	if st, err := v.lstatAt(old); err != nil || st.Mode&unix.S_IFMT == unix.S_IFDIR {
 		return refused
 	}
-	move := v.deny(old, true) == 0 || silly(old) // an alias moves on: still read-only
-	if !move && !v.isGitConfig(old) {
+	keep := v.isGitConfig(old) || fold(filepath.Base(old)) == fold("HEAD") &&
+		v.isGitdir(filepath.Dir(old))
+	move := !keep && (v.deny(old, true) == 0 || silly(old)) // an alias moves on: still read-only
+	if !move && !keep {
 		return refused
 	}
 	v.mirrorMu.Lock()
