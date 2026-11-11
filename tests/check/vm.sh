@@ -33,7 +33,7 @@ case "\$1" in
             *vmstat*) [ -e "$_vm_dir/oom" ] ;;
             *zram*) echo zram >>"$_vm_dir/zram" ;;
             *"system prune"*) echo moved >>"$_vm_dir/classic" ;;
-            *containerd-snapshotter*) [ ! -e "$_vm_dir/classic" ] ;;
+            *"docker info"*) if [ -e "$_vm_dir/classic" ]; then echo overlay2; else echo overlayfs; fi ;;
             *"mount -t nfs"*) echo "\$*" >>"$_vm_dir/nfs" ;;
         esac
         ;;

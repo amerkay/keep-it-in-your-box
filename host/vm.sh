@@ -44,10 +44,11 @@ _vm_under() { # <path> <dir[:w]…>: the path is one of the dirs, or inside one
 
 # One line and a dot a second, the log only if it fails. Its host agent outlives kib, so it must
 # not inherit a lock fd.
-_limactl() { # <message> <limactl verb> <args…>
+_dots() { # <message> <cmd…>: one line and a dot a second, the log's tail if it fails
     local pid log="$KIB_STATE_ROOT/vm.log"
     printf '🛡️  kib: %s' "$1" >&2
-    limactl "$2" --tty=false "${@:3}" >"$log" 2>&1 200>&- 201>&- 205>&- 206>&- &
+    shift
+    "$@" >"$log" 2>&1 200>&- 201>&- 205>&- 206>&- &
     pid=$!
     while kill -0 "$pid" 2>/dev/null; do
         printf '.' >&2
@@ -56,7 +57,11 @@ _limactl() { # <message> <limactl verb> <args…>
     echo >&2
     wait "$pid" && return 0
     tail -n 20 "$log" >&2
-    die "Lima could not $2 the VM '$KIB_VM_NAME' (full log: $log)."
+    return 1
+}
+_limactl() { # <message> <limactl verb> <args…>
+    _dots "$1" limactl "$2" --tty=false "${@:3}" \
+        || die "Lima could not $2 the VM '$KIB_VM_NAME' (full log: $KIB_STATE_ROOT/vm.log)."
 }
 
 # Bring the VM up and hold its session count (fd 205, shared) until exit — the same reference
@@ -157,19 +162,20 @@ _vm_zram() {
 # Docker's classic storage, set once: containerd's keeps a compressed copy of every image (+3 GB)
 # and cannot read an image's inline build cache, which fast rebuilds rely on (microvm.md).
 _vm_classic_store() {
-    local log="$KIB_STATE_ROOT/vm.log" py='import json, os, sys
+    local drv py='import json, os
 p = "/etc/docker/daemon.json"
 d = json.load(open(p)) if os.path.exists(p) else {}
-if d.get("features", {}).get("containerd-snapshotter") is False: sys.exit(1)
-if sys.argv[1] == "set":
-    d.setdefault("features", {})["containerd-snapshotter"] = False
-    json.dump(d, open(p, "w"), indent=2)'
-    vm_root python3 -c "$py" check >>"$log" 2>&1 || return 0
-    echo "🛡️  kib: moving the VM's Docker to its classic storage (one time); the image rebuilds once." >&2
+d.setdefault("features", {})["containerd-snapshotter"] = False
+open(p + ".kib", "w").write(json.dumps(d, indent=2))
+os.replace(p + ".kib", p)' # renamed in: a cut-off write would leave Docker unable to start
+    # The driver in use, not the config: a VM that was always classic has no key to read.
+    drv="$(vm_root docker info --format '{{.Driver}}' 2>/dev/null)"
+    [ -n "$drv" ] && [ "$drv" != overlay2 ] || return 0
     # Pruned first: the switch hides containerd's images, which would then hold their disk forever.
     # shellcheck disable=SC2016 # the VM's shell expands them
-    vm_root sh -c 'docker system prune -af && python3 -c "$1" set && systemctl restart docker' \
-        _ "$py" >>"$log" 2>&1 || die "could not move the VM's Docker to classic storage (log: $log)."
+    _dots "moving the VM's Docker to classic storage (one time; the image then rebuilds)" \
+        vm_root sh -c 'docker system prune -af && python3 -c "$1" && systemctl restart docker' _ "$py" \
+        || die "could not move the VM's Docker to classic storage (log: $KIB_STATE_ROOT/vm.log)."
 }
 
 # gVisor into the VM once per pin: the release tarball (runsc needs its gvisor-bin/ beside it),

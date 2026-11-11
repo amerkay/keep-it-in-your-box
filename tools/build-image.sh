@@ -78,19 +78,26 @@ build_image() {
 
 # The redaction view runs on THIS host, so it is built for it and taken out of the build, never
 # into the image. Renamed into place: a running view keeps its own inode.
+# The guard's sources by content: a timestamp misses an `rsync -a`, a tarball, an edit mid-build.
+_view_sum() {
+    local f
+    cd "$KIB_ROOT" || return 1
+    find host/view guest/policy/global.kibignore tests/fixtures/redaction Dockerfile -type f \
+        | LC_ALL=C sort | while IFS= read -r f; do echo "$(sha256_file "$f") $f"; done
+}
+
 build_view() {
-    local arch tmp src="host/view guest/policy/global.kibignore tests/fixtures/redaction Dockerfile"
+    local arch tmp sum
+    sum="$(hash8 "$(_view_sum)")"
     # Built only when its sources changed: it has no build cache to make a rebuild cheap.
-    # shellcheck disable=SC2086 # one path per word
-    [ -x "$KIB_VIEW" ] && [ -z "$(cd "$KIB_ROOT" && find $src -newer "$KIB_VIEW" | head -n 1)" ] \
-        && return 0
+    [ -x "$KIB_VIEW" ] && [ "$(cat "$KIB_VIEW.src" 2>/dev/null)" = "$sum" ] && return 0
     arch="$(uname -m)"
     case "$arch" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; esac
     mkdir -p "$KIB_HOST_ONLY" && chmod 700 "$KIB_HOST_ONLY"
     tmp="$(mktemp -d "$KIB_HOST_ONLY/.build.XXXXXX")" || return 1
     _docker_build --target view --build-arg VIEW_OS="$KIB_OS" --build-arg VIEW_ARCH="$arch" \
         --output "type=local,dest=$tmp" "$KIB_ROOT" && mv -f "$tmp/kib-view" "$KIB_VIEW" \
-        && touch "$KIB_VIEW" # a cached build exports its old mtime
+        && echo "$sum" >"$KIB_VIEW.src"
     local rc=$?
     rm -rf "$tmp"
     return "$rc"
