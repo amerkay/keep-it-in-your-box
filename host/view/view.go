@@ -746,13 +746,34 @@ func (v *view) unlink(rel string) syscall.Errno {
 	}))
 }
 
+// rmdir takes silly names along: gVisor holds deleted files open, so they outlive rm -rf and
+// the directory stays non-empty until the host clears it.
 func (v *view) rmdir(rel string) syscall.Errno {
 	if errno := v.deny(rel, true); errno != 0 {
 		return errno
 	}
-	return toErrno(v.inParent(rel, func(dfd int, name string) error {
-		return unix.Unlinkat(dfd, name, unix.AT_REMOVEDIR)
-	}))
+	rm := func() syscall.Errno {
+		return toErrno(v.inParent(rel, func(dfd int, name string) error {
+			return unix.Unlinkat(dfd, name, unix.AT_REMOVEDIR)
+		}))
+	}
+	errno := rm()
+	if errno != syscall.ENOTEMPTY {
+		return errno
+	}
+	ents, e := v.list(rel)
+	if e != 0 {
+		return errno
+	}
+	for _, d := range ents {
+		if !silly(d.name) {
+			return errno
+		}
+	}
+	for _, d := range ents {
+		v.unlink(filepath.Join(rel, d.name))
+	}
+	return rm()
 }
 
 func (v *view) mkdir(rel string, mode uint32) syscall.Errno {

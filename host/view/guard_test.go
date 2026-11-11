@@ -201,6 +201,21 @@ func TestRefusedRenameRestoresTarget(t *testing.T) {
 	}
 }
 
+// gVisor holds deleted files open, so their silly names outlive rm -rf: rmdir takes them along,
+// never a real file.
+func TestRmdirTakesSillies(t *testing.T) {
+	const s = ".nfs0123456789abcdef01234567"
+	v := scratchView(t, "", "o/public/"+s, "o/"+s, "k/"+s, "k/real")
+	for _, d := range []string{"o/public", "o"} {
+		if e := v.rmdir(d); e != 0 {
+			t.Errorf("rmdir %s left with only silly names: %v", d, e)
+		}
+	}
+	if e := v.rmdir("k"); e == 0 || !lexists(filepath.Join(v.src, "k/real")) {
+		t.Error("rmdir took a real file along")
+	}
+}
+
 // APFS opens a look-alike as the real file, so git's own paths are matched folded too.
 func TestGitPathsFolded(t *testing.T) {
 	v := scratchView(t, "")
