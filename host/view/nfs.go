@@ -47,7 +47,12 @@ func serveNFS(v *view, build func() []Rule) {
 		v.dropSillies()
 		os.Exit(0)
 	})
-	die(1, "kib-view: %v", nfs.Serve(l, h))
+	die(1, "kib-view: %v", nfsServer(h).Serve(l))
+}
+
+// nfsServer serves v3 only: the VM mounts vers=3, and v4 has no MOUNT for the secret to guard.
+func nfsServer(h *handler) *nfs.Server {
+	return &nfs.Server{Handler: h, EnabledNFSVersions: []uint32{3}}
 }
 
 type handler struct {
@@ -78,8 +83,8 @@ func (h *handler) Mount(ctx context.Context, c net.Conn, req nfs.MountRequest) (
 	return nfs.MountStatusOk, h.fs, []nfs.AuthFlavor{nfs.AuthFlavorNull}
 }
 
-// Change: no nfs.UnixChange, so no LINK. go-nfs v0.0.4 parses LINK's arguments as SYMLINK's;
-// git falls back to a rename.
+// Change: no nfs.UnixChange, so no LINK. go-nfs (still at 3946bf8) parses LINK's arguments as
+// SYMLINK's; git falls back to a rename.
 func (h *handler) Change(billy.Filesystem) billy.Change { return h.fs }
 
 func (h *handler) FSStat(context.Context, billy.Filesystem, *nfs.FSStat) error { return nil }
@@ -219,6 +224,9 @@ func (f *nfsFS) ReadDir(name string) ([]os.FileInfo, error) {
 	}
 	out := make([]os.FileInfo, 0, len(ents))
 	for _, d := range ents {
+		if silly(d.name) { // the client's own; else go-nfs's empty check refuses their rmdir
+			continue
+		}
 		if st, e := f.v.stat(path.Join(rel, d.name)); e == 0 { // gone since the listing: skip
 			out = append(out, fileInfo{name: d.name, st: st})
 		}

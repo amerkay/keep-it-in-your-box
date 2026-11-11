@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	nfs "github.com/willscott/go-nfs"
 	nfsc "github.com/willscott/go-nfs-client/nfs"
 	"github.com/willscott/go-nfs-client/nfs/rpc"
 )
@@ -165,27 +164,68 @@ func TestNFSOwnerWritesReadOnly(t *testing.T) {
 	}
 }
 
-// Over the wire: only the secret path mounts, and only once; the mount serves the view.
-func TestNFSMount(t *testing.T) {
-	src := t.TempDir()
-	os.WriteFile(filepath.Join(src, ".env"), []byte("K=s3cr3t\n"), 0o644)
-	v, _ := newView(src, guardRules(t))
+// loopbackNFS serves v over loopback; dial connects to it, mount dials and mounts path.
+func loopbackNFS(t *testing.T, v *view) (*handler, func() *rpc.Client,
+	func(string) (*nfsc.Target, error)) {
 	h := newHandler(v)
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer l.Close()
-	go nfs.Serve(l, h)
-	mount := func(path string) (*nfsc.Target, error) {
+	t.Cleanup(func() { l.Close() })
+	go nfsServer(h).Serve(l)
+	dial := func() *rpc.Client {
 		c, err := rpc.DialTCP("tcp", l.Addr().String(), false)
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { c.Close() })
-		m := nfsc.Mount{Client: c}
+		return c
+	}
+	return h, dial, func(path string) (*nfsc.Target, error) {
+		m := nfsc.Mount{Client: dial()}
 		return m.Mount(path, rpc.AuthNull)
 	}
+}
+
+// NFSv4 has no MOUNT, so it would bypass the secret path's one-mount check: v3 only.
+func TestNFSv3Only(t *testing.T) {
+	_, dial, _ := loopbackNFS(t, scratchView(t, ""))
+	c := dial()
+	null := func(vers uint32) error {
+		_, err := c.Call(&rpc.Header{Rpcvers: 2, Prog: nfsc.Nfs3Prog, Vers: vers})
+		return err
+	}
+	if err := null(3); err != nil {
+		t.Fatalf("NFSv3 NULL: %v", err)
+	}
+	if null(4) == nil {
+		t.Error("NFSv4 is served")
+	}
+}
+
+// Node's fs.rm only empties a directory after rmdir says NOTEMPTY: any other error ends it.
+func TestNFSRmdirNotEmpty(t *testing.T) {
+	v := scratchView(t, "", "d/x", "s/.nfs0123456789abcdef01234567")
+	h, _, mount := loopbackNFS(t, v)
+	target, err := mount("/" + h.secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := target.RmDir("/d"); !nfsc.IsNotEmptyError(err) {
+		t.Errorf("rmdir of a non-empty dir: %v, want NOTEMPTY", err)
+	}
+	if err := target.RmDir("/s"); err != nil {
+		t.Errorf("rmdir of a dir holding only silly names: %v", err)
+	}
+}
+
+// Over the wire: only the secret path mounts, and only once; the mount serves the view.
+func TestNFSMount(t *testing.T) {
+	src := t.TempDir()
+	os.WriteFile(filepath.Join(src, ".env"), []byte("K=s3cr3t\n"), 0o644)
+	v, _ := newView(src, guardRules(t))
+	h, _, mount := loopbackNFS(t, v)
 	for _, p := range []string{"/", "", "/" + strings.ToUpper(h.secret)} {
 		if _, err := mount(p); err == nil {
 			t.Fatalf("mounted %q without the secret", p)

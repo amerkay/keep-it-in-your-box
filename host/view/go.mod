@@ -5,7 +5,7 @@ go 1.27
 require (
 	github.com/go-git/go-billy/v5 v5.6.0
 	github.com/hanwen/go-fuse/v2 v2.12.1
-	github.com/willscott/go-nfs v0.0.4
+	github.com/willscott/go-nfs v0.0.5-0.20261105183439-3946bf8d58c3 // TODO: back to a tagged release once one includes rmdir NOTEMPTY
 	github.com/willscott/go-nfs-client v0.0.0-20240104095149-b44639837b00
 	go.yaml.in/yaml/v3 v3.0.6
 	golang.org/x/sys v0.28.0

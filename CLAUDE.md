@@ -181,7 +181,8 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   open, so the VM's client moves a replaced or deleted file aside (`.nfs…`): a git config is
   hard-linked there instead and stays, so git's `config.lock` rename is still checked; a moved
   file still marks a git dir while its alias lives, a failed rename links its target back, and
-  rmdir takes silly names along; any other guarded file refuses (`silly`). FUSE (no-VM mode):
+  rmdir takes silly names along (listings hide them); any other guarded file refuses (`silly`).
+  FUSE (no-VM mode):
   I/O is `pread`/`pwrite` (a shared fd offset truncates reads), the page
   cache is kept only while mtime+size hold (never `kernel_cache`: the host edits this tree), only
   the RULE verdict is memoised (existence stays live), `Flush` never fsyncs, and a listing
