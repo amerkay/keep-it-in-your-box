@@ -167,19 +167,37 @@ func TestGitConfigWriteAfterSillyRename(t *testing.T) {
 	}
 }
 
-// git switch over NFS: the open HEAD is moved aside, then HEAD.lock renamed over it. HEAD must
-// never leave the view, or the rename reads as planting a git dir over the stock sample hooks.
-func TestGitHeadWriteAfterSillyRename(t *testing.T) {
-	v := scratchView(t, "", ".git/HEAD", ".git/objects/", ".git/refs/", ".git/hooks/x.sample",
-		".git/HEAD.lock")
-	if e := v.rename(".git/HEAD", ".git/.nfs0123456789abcdef01234567", 0); e != 0 {
+// git switch over NFS: the open HEAD is moved aside, then HEAD.lock renamed over it. Moved aside,
+// HEAD still marks a git dir, so the rename plants nothing and hooks stay guarded; deleted, it goes.
+func TestGitHeadAfterSillyRename(t *testing.T) {
+	v := scratchView(t, "", "d/HEAD", "d/objects/", "d/refs/", "d/hooks/x.sample", "d/HEAD.lock")
+	const s = "d/.nfs0123456789abcdef01234567"
+	if e := v.rename("d/HEAD", s, 0); e != 0 {
 		t.Fatalf("silly rename of HEAD: %v", e)
 	}
-	if !lexists(filepath.Join(v.src, ".git/HEAD")) {
-		t.Error("HEAD left the view while open")
+	if _, e := v.create("d/hooks/pre-commit", os.O_WRONLY, 0o755); e == 0 {
+		t.Error("a hook was written while HEAD was moved aside")
 	}
-	if e := v.rename(".git/HEAD.lock", ".git/HEAD", 0); e != 0 {
+	if e := v.rename("d/HEAD.lock", "d/HEAD", 0); e != 0 {
 		t.Errorf("git's HEAD.lock rename was refused: %v", e)
+	}
+	if e := v.rename("d/HEAD", "d/.nfs0123456789abcdef0123456f", 0); e != 0 ||
+		lexists(filepath.Join(v.src, "d/HEAD")) {
+		t.Errorf("an open HEAD could not be deleted: %v", e)
+	}
+}
+
+// A rename refused after the client moved its target aside links the target back.
+func TestRefusedRenameRestoresTarget(t *testing.T) {
+	v := scratchView(t, "", "a", ".env")
+	if e := v.rename("a", ".nfs0123456789abcdef01234567", 0); e != 0 {
+		t.Fatal(e)
+	}
+	if e := v.rename(".env", "a", 0); e == 0 {
+		t.Fatal("a redacted file was renamed")
+	}
+	if !lexists(filepath.Join(v.src, "a")) {
+		t.Error("a refused rename lost its target")
 	}
 }
 

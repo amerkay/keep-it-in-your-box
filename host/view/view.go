@@ -84,8 +84,11 @@ type view struct {
 	renders    map[renderKey][]byte
 	mirrorMu   sync.Mutex
 	mirrors    map[string]*pending
-	sillies    []string // every silly name made, removed at exit
+	sillies    []moved // every silly name made, oldest first, removed at exit
 }
+
+// moved: a silly name and the path its file was moved aside from.
+type moved struct{ alias, orig string }
 
 // dropSillies unlinks every silly name this view made. The client deletes one when its file's
 // last fd closes, but at teardown that races the view's exit, and lost: `.nfs` debris in the
@@ -93,8 +96,8 @@ type view struct {
 func (v *view) dropSillies() {
 	v.mirrorMu.Lock()
 	defer v.mirrorMu.Unlock()
-	for _, a := range v.sillies {
-		_ = v.inParent(a, func(dfd int, name string) error { return unix.Unlinkat(dfd, name, 0) })
+	for _, m := range v.sillies {
+		_ = v.inParent(m.alias, func(dfd int, name string) error { return unix.Unlinkat(dfd, name, 0) })
 	}
 	v.sillies = nil
 }
@@ -219,7 +222,8 @@ func lowerParts(rel string) []string { return strings.Split(fold(rel), "/") }
 
 func (v *view) isGitdir(rel string) bool {
 	for _, m := range gitdirMarkers {
-		if _, err := os.Stat(filepath.Join(v.real(rel), m)); err != nil {
+		_, err := os.Stat(filepath.Join(v.real(rel), m))
+		if err != nil && v.aliasOf(filepath.Join(rel, m)) == "" {
 			return false
 		}
 	}
@@ -270,11 +274,39 @@ func silly(rel string) bool {
 	return true
 }
 
+// aliasOf: the newest live silly name rel was moved aside to, or "". While one lives, rel still
+// counts as a git dir marker: else git's HEAD.lock rename reads as planting a git dir.
+func (v *view) aliasOf(rel string) string {
+	v.mirrorMu.Lock()
+	defer v.mirrorMu.Unlock()
+	for i := len(v.sillies) - 1; i >= 0; i-- {
+		if m := v.sillies[i]; fold(m.orig) == fold(rel) {
+			if _, err := v.lstatAt(m.alias); err == nil {
+				return m.alias
+			}
+		}
+	}
+	return ""
+}
+
+// unsilly links rel back from its silly name after a rename onto it failed: else it is lost.
+func (v *view) unsilly(rel string) {
+	a := v.aliasOf(rel)
+	if _, err := v.lstatAt(rel); a == "" || err == nil || v.denyNew(rel, false) != 0 {
+		return
+	}
+	_ = v.inParent(a, func(adfd int, aname string) error {
+		return v.inParent(rel, func(dfd int, name string) error {
+			return unix.Linkat(adfd, aname, dfd, name, 0)
+		})
+	})
+}
+
 // sillyRename moves an open file aside for the NFS client. A file that may be deleted is
-// moved. A git config or HEAD, which git replaces by renaming a .lock over it, stays put with the
-// silly name a read-only alias: the config rename is still checked against it, and HEAD never
-// leaves, so its rename never reads as planting a git dir. The box's own delete of one then
-// reports success and changes nothing. Any other guarded file is refused. Never a redacted file.
+// moved. A git config, which git replaces by renaming config.lock over it, stays put with the
+// silly name a read-only alias, so that rename is still checked against it; the box's own
+// delete of one then reports success and changes nothing. Any other guarded file is refused.
+// Never a redacted file.
 func (v *view) sillyRename(old, dst string) syscall.Errno {
 	if k, _ := v.classify(old); k != pass {
 		return refused
@@ -285,14 +317,18 @@ func (v *view) sillyRename(old, dst string) syscall.Errno {
 	if st, err := v.lstatAt(old); err != nil || st.Mode&unix.S_IFMT == unix.S_IFDIR {
 		return refused
 	}
-	keep := v.isGitConfig(old) || fold(filepath.Base(old)) == fold("HEAD") &&
-		v.isGitdir(filepath.Dir(old))
-	move := !keep && (v.deny(old, true) == 0 || silly(old)) // an alias moves on: still read-only
-	if !move && !keep {
+	move := v.deny(old, true) == 0 || silly(old) // an alias moves on: still read-only
+	if !move && !v.isGitConfig(old) {
 		return refused
 	}
+	orig := old
 	v.mirrorMu.Lock()
-	v.sillies = append(v.sillies, dst)
+	for _, m := range v.sillies {
+		if m.alias == old {
+			orig = m.orig
+		}
+	}
+	v.sillies = append(v.sillies, moved{dst, orig})
 	v.mirrorMu.Unlock()
 	return toErrno(v.inParent(old, func(odfd int, oname string) error {
 		return v.inParent(dst, func(ddfd int, dname string) error {
@@ -380,7 +416,7 @@ func (v *view) plantsGitdir(rel string) bool {
 		return false
 	}
 	// Replacing a marker (git's HEAD.lock rename) completes nothing: d already was a git dir.
-	if _, err := v.lstatAt(rel); err == nil {
+	if _, err := v.lstatAt(rel); err == nil || v.aliasOf(rel) != "" {
 		return false
 	}
 	if fd, err := v.at(filepath.Join(d, "hooks"), unix.O_RDONLY|unix.O_DIRECTORY, 0); err == nil {
@@ -732,6 +768,14 @@ func (v *view) mkdir(rel string, mode uint32) syscall.Errno {
 // may not carry files across a rule (denyDirMove). The one validated write: git's config.lock
 // renamed over a config, checked for new command keys.
 func (v *view) rename(old, dst string, flags uint32) syscall.Errno {
+	errno := v.renameChecked(old, dst, flags)
+	if errno != 0 {
+		v.unsilly(dst)
+	}
+	return errno
+}
+
+func (v *view) renameChecked(old, dst string, flags uint32) syscall.Errno {
 	if flags&^renameNoReplace != 0 {
 		return syscall.EINVAL // an exchange would move the target too, unchecked
 	}
