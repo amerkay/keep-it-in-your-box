@@ -40,14 +40,16 @@ def test_part_rootless_counts_gvisor_and_the_engine() -> None:
     assert part("gvisor_sentry", ["runsc-sandbox"], "rootless") == "gvisor"
     assert part("containerd-shim", ["containerd-shim-runc-v2"], "rootless") == "engine"
     assert part("slirp4netns", ["slirp4netns"], "rootless") == "engine"
+    assert part("dockerd", ["dockerd"], "rootless", mine=False) is None  # root's own Docker
     assert part("kib-view", ["/h/kib-view"], "rootless") == "view"
     assert part("firefox", ["firefox"], "rootless") is None
 
 
 def test_parse_top_reads_only_the_last_sample() -> None:
-    machine, parts = parse_top(TOP, ncpu=8)
+    machine, parts, procs = parse_top(TOP, ncpu=8)
     assert machine == 1.0  # 12.5% of 8 cores
     assert parts == {"vz": 0.85, "lima": 0.02, "view": 0.005}
+    assert procs["firefox"] == 0.3
 
 
 def test_parse_ioreg_on_battery_and_ac() -> None:
@@ -62,6 +64,8 @@ def test_summary_averages_boxes_over_every_sample() -> None:
         s.add("machine", machine)
         s.add("kib", vm)
     s.add("box:kib-a", 0.5)  # lived for one of two samples
+    s.add("proc:firefox", 1.0)
     out = s.summary(("qemu",))
     assert "67% of this machine's CPU (2.00 of 3.00)" in out
     assert "kib-a" in out and "avg  0.25" in out and "on AC throughout" in out
+    assert "  firefox" in out and "avg  0.50" in out

@@ -32,34 +32,34 @@ ENGINE = ("dockerd", "containerd", "rootlesskit", "slirp4netns")
 LINUX_PARTS = {"vm": ("qemu", "virtiofsd", "view"), "rootless": ("gvisor", "engine", "view")}
 
 
-def part(comm: str, argv: list[str], engine: str) -> str | None:
-    """Which piece of kib one of the user's Linux processes is."""
+def part(comm: str, argv: list[str], engine: str, mine: bool = True) -> str | None:
+    """Which piece of kib a Linux process is. `mine`: it runs as this user."""
     exe = os.path.basename(argv[0]) if argv else ""
     if exe == "kib-view":
         return "view"
     if engine == "rootless":
         if comm.startswith("gvisor_"):
             return "gvisor"
-        return "engine" if comm.startswith(ENGINE) else None
+        return "engine" if mine and comm.startswith(ENGINE) else None  # never root's Docker
     if not any(VM_ARG.search(a) for a in argv):
         return None
     return "qemu" if exe.startswith("qemu-system") else "virtiofsd" if "virtiofsd" in exe else None
 
 
-def _procs(engine: str) -> dict[int, tuple[str, int]]:
-    out: dict[int, tuple[str, int]] = {}
+def _procs(engine: str) -> dict[int, tuple[str | None, str, int]]:
+    """Every process, any user: pid -> (kib part or None, comm, CPU ticks)."""
+    out: dict[int, tuple[str | None, str, int]] = {}
     uid = os.getuid()
     for p in Path("/proc").iterdir():
+        if not p.name.isdigit():
+            continue
         try:
-            if not p.name.isdigit() or p.stat().st_uid != uid:  # every piece runs as the user
-                continue
             stat = (p / "stat").read_text()
             comm, rest = stat[stat.index("(") + 1 :].rsplit(")", 1)
             argv = (p / "cmdline").read_bytes().decode(errors="replace").split("\0")[:-1]
-            name = part(comm, argv, engine)
-            if name:
-                f = rest.split()
-                out[int(p.name)] = (name, int(f[11]) + int(f[12]))  # utime + stime
+            f = rest.split()
+            name = part(comm, argv, engine, p.stat().st_uid == uid)
+            out[int(p.name)] = (name, comm, int(f[11]) + int(f[12]))  # utime + stime
         except (OSError, IndexError, ValueError):
             continue  # exited mid-scan
     return out
@@ -70,15 +70,22 @@ def _busy() -> int:
     return sum(f) - f[3] - f[4]  # minus idle, iowait
 
 
-def _sample_linux(interval: float, engine: str) -> tuple[float, float, Parts]:
+Sample = tuple[float, float, Parts, Parts]  # seconds, machine cores, kib parts, cores per comm
+
+
+def _sample_linux(interval: float, engine: str) -> Sample:
     t0, busy0, procs0 = time.monotonic(), _busy(), _procs(engine)
     time.sleep(interval)
     dt, busy1, procs1 = time.monotonic() - t0, _busy(), _procs(engine)
     parts = dict.fromkeys(LINUX_PARTS[engine], 0.0)
-    for pid, (name, ticks) in procs1.items():
+    procs: Parts = {}
+    for pid, (name, comm, ticks) in procs1.items():
         if pid in procs0:  # a new pid has no baseline: its lifetime total is not this window
-            parts[name] += (ticks - procs0[pid][1]) / HZ / dt
-    return dt, (busy1 - busy0) / HZ / dt, parts
+            cores = (ticks - procs0[pid][2]) / HZ / dt
+            procs[comm] = procs.get(comm, 0.0) + cores
+            if name:
+                parts[name] += cores
+    return dt, (busy1 - busy0) / HZ / dt, parts, procs
 
 
 def _watts_linux() -> float | None:
@@ -107,20 +114,22 @@ def mac_part(command: str) -> str | None:
     return {"limactl": "lima", "kib-view": "view"}.get(command)
 
 
-def parse_top(text: str, ncpu: int) -> tuple[float, Parts]:
-    """Machine cores and kib's parts from the LAST sample of `top -l N -stats pid,cpu,command`."""
+def parse_top(text: str, ncpu: int) -> tuple[float, Parts, Parts]:
+    """Machine cores, kib's parts and cores per command, from the LAST sample of `top -l N`."""
     last = text.rsplit("Processes:", 1)[-1]
     m = re.search(r"CPU usage: ([\d.]+)% user, ([\d.]+)% sys", last)
     machine = (float(m[1]) + float(m[2])) * ncpu / 100 if m else 0.0
     parts = dict.fromkeys(("vz", "lima", "view"), 0.0)
+    procs: Parts = {}
     for row in re.finditer(r"^\s*\d+\s+([\d.]+)\S*\s+(.+?)\s*$", last, re.M):
-        name = mac_part(row[2])
+        cores, name = float(row[1]) / 100, mac_part(row[2])
+        procs[row[2]] = procs.get(row[2], 0.0) + cores
         if name:
-            parts[name] += float(row[1]) / 100
-    return machine, parts
+            parts[name] += cores
+    return machine, parts, procs
 
 
-def _sample_mac(interval: float, _engine: str) -> tuple[float, float, Parts]:
+def _sample_mac(interval: float, _engine: str) -> Sample:
     s = max(1, round(interval))  # top's -s is whole seconds
     cmd = ["top", "-l", "2", "-s", str(s), "-n", "64", "-o", "cpu", "-stats", "pid,cpu,command"]
     out = subprocess.run(cmd, capture_output=True, text=True, check=False).stdout
@@ -152,11 +161,12 @@ def _boxes(docker: str | None, engine: str) -> tuple[Parts, str]:
     """CPU per kib container, or ({}, why not)."""
     if not docker:
         return {}, "no docker CLI found"
+    if engine == "rootless":  # every box reads the same shared total there
+        return {}, "rootless gVisor runs with --ignore-cgroups, so docker stats has none"
+    if not SOCK.exists():
+        return {}, f"no {VM} engine socket (VM stopped?)"
     env = {k: v for k, v in os.environ.items() if k != "DOCKER_CONTEXT"}
-    if engine != "rootless":  # rootless: the user's own Docker, as kib runs it
-        if not SOCK.exists():
-            return {}, f"no {VM} engine socket (VM stopped?)"
-        env["DOCKER_HOST"] = f"unix://{SOCK}"
+    env["DOCKER_HOST"] = f"unix://{SOCK}"
     cmd = [docker, "stats", "--no-stream", "--format", "{{.Name}}\t{{.CPUPerc}}"]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env, check=False)
@@ -202,6 +212,12 @@ class Stats:
         if boxes:
             rows.append(("  per box (docker stats):", ""))
             rows += [(f"    {k[4:]}", k) for k in boxes]
+        procs = sorted(
+            (k for k in self.series if k.startswith("proc:")), key=self.avg, reverse=True
+        )
+        rows.append(("busiest processes, whole machine (any user):", ""))
+        rows += [(f"  {k[5:]}", k) for k in procs[:8]]
+        rows.append(("  in no process (kernel, short-lived ones)", "unattributed"))
         width = max(len(label) for label, _ in rows)
         lines = [f"\n── kib stats · {self.title} · {m}m {s}s, {self.n} samples ──"]
         lines.append("   cores: 1.00 = one core busy the whole time")
@@ -238,7 +254,7 @@ def main(argv: list[str]) -> int:
     print(f"kib stats ({stats.title}): every {interval:g}s — Ctrl-C for the summary.", flush=True)
     try:
         while True:
-            dt, machine, cur = sample(interval, engine)
+            dt, machine, cur, procs = sample(interval, engine)
             boxes, why = _boxes(docker, engine)  # outside the window: its own cost is not counted
             if why:
                 stats.notes.add(f"no per-box split: {why}")
@@ -249,15 +265,20 @@ def main(argv: list[str]) -> int:
                 stats.add(k, v)
             for k, v in boxes.items():
                 stats.add(f"box:{k}", v)
+            for k, v in procs.items():
+                stats.add(f"proc:{k}", v)
+            stats.add("unattributed", max(0.0, machine - sum(procs.values())))
             if boxes:
                 stats.add("overhead", max(0.0, kib - cur["view"] - sum(boxes.values())))
             w = watts()
             if w is not None:
                 stats.watts.append(w)
             top = max(boxes.items(), key=lambda kv: kv[1], default=None)
+            hog = max(procs.items(), key=lambda kv: kv[1], default=("-", 0.0))
             print(
                 f"{time.strftime('%H:%M:%S')}  kib {kib:4.2f}  machine {machine:4.2f} cores"
                 f"  battery {f'{w:.1f} W' if w is not None else 'AC'}"
+                f"  busiest process {hog[0]} {hog[1]:.2f}"
                 + (f"  busiest box {top[0]} {top[1]:.2f}" if top else ""),
                 flush=True,
             )
