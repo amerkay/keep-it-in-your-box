@@ -67,12 +67,16 @@ _docker_build() { # <args…>
 }
 
 build_image() {
+    local cache=()
     : >"$BUILD_LOG"
     [ "$INTERACTIVE" = 0 ] \
         || echo "🔨 Building $IMAGE_NAME with Claude Code ${LATEST_VERSION:-latest}..." >&2
     # The cache rides in the image, so the VM's daily cleanup may drop the build cache whole.
-    _docker_build --build-arg CLAUDE_VERSION="${LATEST_VERSION:-latest}" \
-        --build-arg BUILDKIT_INLINE_CACHE=1 --cache-from "${IMAGE_NAME}:latest" \
+    # Classic storage only: containerd's (rootless Docker's default) reads it as a registry ref
+    # and errors; that engine keeps its build cache, so nothing is lost.
+    docker info --format '{{.DriverStatus}}' 2>/dev/null | grep -q containerd.snapshotter \
+        || cache=(--build-arg BUILDKIT_INLINE_CACHE=1 --cache-from "${IMAGE_NAME}:latest")
+    _docker_build --build-arg CLAUDE_VERSION="${LATEST_VERSION:-latest}" ${cache[@]+"${cache[@]}"} \
         -t "${IMAGE_NAME}:building" "$@" "$KIB_ROOT"
 }
 
