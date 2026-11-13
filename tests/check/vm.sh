@@ -196,6 +196,18 @@ case "$_vm_rf_out" in
     *) fail "rootful: no note pointing at rootless Docker" ;;
 esac
 
+# docker = rootful reaches the system socket even when the shell's docker is rootless.
+python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$_vm_dir/sys.sock"
+mkdir -p "$_vm_dir/both"
+printf '#!/bin/sh
+case "$DOCKER_HOST" in *sys.sock) echo "name=seccomp" ;; *) echo "name=rootless" ;; esac
+' \
+    >"$_vm_dir/both/docker" && chmod +x "$_vm_dir/both/docker"
+_vm_t_pinned() { KIB_OS=linux && KIB_CFG_DOCKER=rootful && ROOTFUL_SOCK="$_vm_dir/sys.sock" \
+    && engine_choice && echo "$ENGINE $(_docker_kind)"; }
+is "docker = rootful aims at the system socket past a rootless default" "rootful rootful" \
+    "$(_vm_run "$_vm_dir/both:$PATH" _vm_t_pinned | tail -1)"
+
 _vm_t_menu() { _menu_rows && _menu_pick 2>/dev/null < <(printf '%b' "$1") && echo "$MENU_PICK"; }
 is "menu: ↓ ↓ Enter picks the VM" "2" "$(_vm_run /usr/bin:/bin _vm_t_menu '\033[B\033[B\n' | tail -1)"
 is "menu: ↑ at the top stays on rootless" "0" "$(_vm_run /usr/bin:/bin _vm_t_menu '\033[A\n' | tail -1)"

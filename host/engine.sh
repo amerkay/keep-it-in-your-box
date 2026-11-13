@@ -8,7 +8,15 @@
 #         _KIB_ROOTFUL _KIB_CONSENTED KIB_CFG_VM KIB_CFG_DOCKER MENU_*
 # shellcheck disable=SC2034
 
+# Colours on a terminal only, never under NO_COLOR (no-color.org); a copy drops them anyway.
+if [ -t 2 ] && [ -z "${NO_COLOR:-}" ]; then
+    C_B=$'\033[1m' C_D=$'\033[2m' C_G=$'\033[32m' C_Y=$'\033[33m' C_C=$'\033[36m' C_0=$'\033[0m'
+else
+    C_B='' C_D='' C_G='' C_Y='' C_C='' C_0=''
+fi
+
 FUSE_CONF=/etc/fuse.conf
+ROOTFUL_SOCK=/var/run/docker.sock
 ROOTLESS_DOCS=https://docs.docker.com/engine/security/rootless/
 
 _docker_kind() { # rootless | rootful | nothing when no Docker answers
@@ -17,11 +25,14 @@ _docker_kind() { # rootless | rootful | nothing when no Docker answers
     case "$o" in *rootless*) echo rootless ;; *) echo rootful ;; esac
 }
 
-# Rootless Docker's own socket wins over a rootful default context: it is the safer engine.
+# Aim docker at the engine asked for, whatever context the shell's docker uses. Unasked, rootless
+# Docker's own socket wins over a rootful default: it is the safer engine.
+_use_socket() { # <socket> <rootless|rootful>
+    [ -S "$1" ] && [ "$(DOCKER_HOST="unix://$1" _docker_kind)" = "$2" ] || return 0
+    export DOCKER_HOST="unix://$1"
+}
 _prefer_rootless_socket() {
-    local s="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"
-    [ -S "$s" ] && [ "$(DOCKER_HOST="unix://$s" _docker_kind)" = rootless ] || return 0
-    export DOCKER_HOST="unix://$s"
+    _use_socket "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock" rootless
 }
 
 # `vm = on` forces the VM; `vm = off` forbids it; `docker = rootless|rootful` names the engine.
@@ -33,7 +44,11 @@ engine_choice() {
         return 0
     fi
     [ "$KIB_CFG_VM" != on ] || { ENGINE=vm && return 0; }
-    [ "$KIB_CFG_DOCKER" = rootful ] || _prefer_rootless_socket
+    if [ "$KIB_CFG_DOCKER" = rootful ]; then
+        _use_socket "$ROOTFUL_SOCK" rootful
+    else
+        _prefer_rootless_socket
+    fi
     kind="$(_docker_kind)"
     case "$KIB_CFG_DOCKER:$kind:$KIB_CFG_VM" in
         rootless:* | rootful:*) ENGINE=$KIB_CFG_DOCKER ;; # its _use says how to fix a missing one
@@ -45,47 +60,93 @@ engine_choice() {
 }
 
 _rootful_ready() {
-    [ "$(_docker_kind)" = rootful ] && _vm_has_gvisor && grep -qx user_allow_other "$FUSE_CONF" 2>/dev/null
+    [ "$(_docker_kind)" = rootful ] && _vm_has_gvisor \
+        && grep -qx user_allow_other "$FUSE_CONF" 2>/dev/null
 }
 
 # gVisor under the user's own rootful Docker: one barrier, and an escape lands as root.
 rootful_use() {
     _rootful_ready || { _rootful_steps && exit 1; }
     _KIB_ROOTFUL=1
+    # Docker 29 writes `invalid IP` for host-gateway here too, so name the bridge's gateway.
+    KIB_HOST_GATEWAY="$(docker network inspect bridge \
+        --format '{{range .IPAM.Config}}{{.Gateway}} {{end}}' 2>/dev/null \
+        | grep -oE '([0-9]+\.){3}[0-9]+' | head -1)"
     printf '%s\n' "ℹ️  kib: boxes run on gVisor under your Docker, which runs as root." \
         "   Rootless Docker is safer and just as fast: $ROOTLESS_DOCS (then: kib engine)" >&2
 }
 
-_steps() { # <what it sets up> <command lines…>: a pasteable block, since kib never runs sudo
-    printf '%s\n' "🛠  kib: $1 needs a one-time setup with sudo, which kib never runs itself." \
-        "   Paste this, then run kib again:" "" >&2
+# A pasteable block, since kib never runs sudo. Notes are `#` comments, so pasting it whole works
+# too, and a step whose predecessor failed fails harmlessly (nothing installs unverified).
+_steps() { # <what it sets up> <line…>
+    local l
+    printf '\n%s\n\n%s\n%s\n\n' "🛠  ${C_B}kib · one-time setup: $1$C_0" \
+        "  ${C_D}kib never runs sudo, so these steps are yours. Read each one, then paste it." \
+        "  Lines starting with # are notes, so pasting the whole block works too.$C_0" >&2
     shift
-    printf '%s\n' "$@" "" >&2
+    for l; do # notes cyan, what success looks like green, commands plain
+        case "$l" in
+            '') echo ;;
+            *Expect:*) printf '  %s%s%s\n' "$C_G" "$l" "$C_0" ;;
+            '#'*) printf '  %s%s%s\n' "$C_C" "$l" "$C_0" ;;
+            *) printf '  %s\n' "$l" ;;
+        esac
+    done >&2
+    printf '\n  %s\n\n' "${C_B}Then run kib again.$C_0" >&2
 }
 
 _rootful_steps() {
-    local d="/opt/kib-gvisor/$GVISOR_VERSION" t=/tmp/kib-gvisor.tar.bz2
+    local v="$GVISOR_VERSION" d="/opt/kib-gvisor/$GVISOR_VERSION" t=/tmp/kib-gvisor.tar.bz2
+    [ "$(_docker_kind)" = rootful ] || printf '%s\n' "" \
+        "⚠️  ${C_Y}${C_B}kib: your Docker is not answering at $ROOTFUL_SOCK.$C_0" \
+        "   Start it first (sudo systemctl start docker) and be in group docker," \
+        "   or install it: https://docs.docker.com/engine/install/" >&2
     _steps "gVisor for your Docker" \
-        "curl -fL --progress-bar -o $t https://storage.googleapis.com/gvisor/releases/release/$GVISOR_VERSION/$(uname -m)/gvisor.tar.bz2 && \\" \
-        "echo '$(_gvisor_sha)  $t' | sha512sum -c && \\" \
-        "sudo mkdir -p $d && sudo tar -xjf $t -C $d && \\" \
-        "sudo $d/runsc install --runtime=$GVISOR_RUNTIME -- --oci-seccomp && \\" \
-        "{ grep -qx user_allow_other $FUSE_CONF || echo user_allow_other | sudo tee -a $FUSE_CONF; } && \\" \
+        "# 1. Download gVisor $v, Google's release build." \
+        "curl -fL --progress-bar -o $t \\" \
+        "    https://storage.googleapis.com/gvisor/releases/release/$v/$(uname -m)/gvisor.tar.bz2" \
+        "" \
+        "# 2. Check its sha512, then unpack it into $d." \
+        "#    Root-owned, so nothing you run without sudo can swap the binary." \
+        "#    Expect: $t: OK" \
+        "sha=$(_gvisor_sha)" \
+        "echo \"\$sha  $t\" | sha512sum -c \\" \
+        "    && sudo mkdir -p $d \\" \
+        "    && sudo tar -xjf $t -C $d \\" \
+        "    && rm $t" \
+        "" \
+        "# 3. Register it with Docker as runtime $GVISOR_RUNTIME (/etc/docker/daemon.json)." \
+        "sudo $d/runsc install --runtime=$GVISOR_RUNTIME \\" \
+        "    -- --oci-seccomp" \
+        "" \
+        "# 4. Let your Docker (root) read kib's redaction view: FUSE user_allow_other." \
+        "grep -qx user_allow_other $FUSE_CONF \\" \
+        "    || echo user_allow_other | sudo tee -a $FUSE_CONF" \
+        "" \
+        "# 5. Reload Docker. Running containers keep running." \
         "sudo systemctl reload docker"
-    echo "   It also lets your Docker (root) read kib's redaction view: FUSE user_allow_other." >&2
-    [ -n "$(_docker_kind)" ] || echo "   No Docker answered. Install it first: https://docs.docker.com/engine/install/" >&2
 }
 
 _rootless_steps() {
-    _steps "Rootless Docker" \
-        "sudo apt-get install -y uidmap docker-ce-rootless-extras && \\" \
+    _steps "rootless Docker" \
+        "# 1. Install its packages. This is Debian/Ubuntu with Docker's apt repo;" \
+        "#    other systems: $ROOTLESS_DOCS" \
+        "sudo apt-get install -y uidmap docker-ce-rootless-extras" \
+        "" \
+        "# 2. Set it up as you, without sudo: a Docker of your own, run by your user session." \
+        "#    --force lets it run beside a rootful Docker." \
         "dockerd-rootless-setuptool.sh install --force"
-    echo "   That is Debian/Ubuntu with Docker's apt repo. Other systems: $ROOTLESS_DOCS" >&2
 }
 
 _vm_steps() {
-    _steps "kib's VM" "sudo apt-get install -y qemu-system-x86 qemu-utils virtiofsd"
-    echo "   Also needs /dev/kvm (virtualization on in the BIOS, you in group kvm): docs/vm.md" >&2
+    _steps "kib's VM" \
+        "# 1. Install QEMU and virtiofsd. kib installs Lima itself, into ~/.local, without sudo." \
+        "sudo apt-get install -y qemu-system-x86 qemu-utils virtiofsd" \
+        "" \
+        "# 2. Check KVM. No /dev/kvm: turn on virtualization (VT-x / AMD-V) in the BIOS." \
+        "#    Owned by root:kvm and you are not in group kvm: add yourself, then log in again." \
+        "ls -l /dev/kvm" \
+        "groups | grep -qw kvm || sudo usermod -aG kvm \"\$USER\""
 }
 
 _rootless_installable() {
@@ -126,14 +187,16 @@ _menu_rows() {
 }
 
 _menu_draw() { # <row>: 9 lines, so a redraw moves up exactly that many
-    local i m
-    printf '\n %s\n %s\n\n' "kib · how should boxes run on this machine?" \
-        "↑/↓ move · Enter choose · saved; change later: kib engine"
-    for i in 0 1 2; do
-        m=' ' && [ "$i" != "$1" ] || m='▸'
-        printf ' %s %-26s %-18s [%s]\n' "$m" "${MENU_L[$i]}" "${MENU_N[$i]}" "${MENU_T[$i]}"
+    local i m c t
+    printf '\n %s\n %s\n\n' "${C_B}kib · how should boxes run on this machine?$C_0" \
+        "${C_D}↑/↓ move · Enter choose · saved; change later: kib engine$C_0"
+    for i in 0 1 2; do # colours sit outside the padded fields, so the columns stay aligned
+        m=' ' c='' && [ "$i" != "$1" ] || m='▸' c="$C_B$C_C"
+        case "${MENU_T[$i]}" in steps*) t=$C_Y ;; *) t=$C_G ;; esac
+        printf ' %s%s %-26s %-18s%s %s[%s]%s\n' "$c" "$m" "${MENU_L[$i]}" "${MENU_N[$i]}" "$C_0" \
+            "$t" "${MENU_T[$i]}" "$C_0"
     done
-    printf '\n Enter will: %s\n' "${MENU_X[$1]}"
+    printf '\n %sEnter will:%s %s\n' "$C_D" "$C_0" "${MENU_X[$1]}"
 }
 
 _menu_key() { # up | down | enter | 1-3 | quit | other, from stdin
@@ -180,15 +243,15 @@ _save_engine() { # <vm: on|off> [<docker: rootless|rootful>]
         [ -z "${2:-}" ] || echo "docker = $2"
     } >"$tmp" && mv "$tmp" "$KIB_CONFIG"
     KIB_CFG_VM=$1 KIB_CFG_DOCKER=${2:-}
-    echo "💾 kib: saved in $KIB_CONFIG. Change it any time: kib engine" >&2
+    printf '\n%s\n' "💾 kib: saved in $KIB_CONFIG. Change it any time: kib engine" >&2
 }
 
 # Picks, saves, and sets ENGINE, or prints the steps and quits. No terminal: the config lines.
 engine_menu() {
     _menu_rows
     if [ ! -t 0 ] || [ ! -t 2 ]; then
-        printf '%s\n' "kib: how should boxes run here? Run kib in a terminal for a menu, or add to" \
-            "$KIB_CONFIG one of:" \
+        printf '%s\n' "kib: how should boxes run here? Run kib in a terminal for a menu," \
+            "or add one of these lines to $KIB_CONFIG:" \
             "  vm = off   gVisor on your Docker, no VM (fastest; rootless Docker is safest)" \
             "  vm = on    kib's VM (slowest on Linux)" >&2
         exit 2
@@ -197,7 +260,10 @@ engine_menu() {
     case "$MENU_PICK" in
         0)
             _save_engine off rootless
-            case "${MENU_T[0]}" in steps*) _rootless_steps && exit 1 ;; sets*) _rootless_setup ;; esac
+            case "${MENU_T[0]}" in
+                steps*) _rootless_steps && exit 1 ;;
+                sets*) _rootless_setup ;;
+            esac
             ENGINE=rootless
             ;;
         1) _save_engine off rootful && ENGINE=rootful ;; # rootful_use prints the steps if needed
@@ -207,7 +273,10 @@ engine_menu() {
 
 # `kib engine`: the menu again, set up what the pick needs, then stop.
 engine_verb() {
-    is_macos && { echo "ℹ️  kib: on macOS boxes always run in kib's VM; there is nothing to pick." >&2 && return 0; }
+    if is_macos; then
+        echo "ℹ️  kib: on macOS boxes always run in kib's VM; there is nothing to pick." >&2
+        return 0
+    fi
     engine_menu
     case "$ENGINE" in
         rootless) rootless_use ;;

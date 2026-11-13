@@ -139,6 +139,7 @@ prepare_redaction() {
     fi
 
     REDACTION_ARGS=(-v "$VIEW_MNT:$PWD")
+    ! engine_native || REDACTION_ARGS+=(-e KIB_VIEW=fuse) # security-test.sh skips the NFS checks
     echo "🛡️  $KIB_RULE_FILE: redacting view active ($(engine_native && echo FUSE || echo NFS))" >&2
 
     # Carries a later $KIB_RULE_FILE edit into this view without waiting for a launch. The

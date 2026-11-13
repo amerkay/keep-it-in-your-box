@@ -173,7 +173,7 @@ is "the view's NFS source and its secret are not visible here" "" \
 
 # A box reaches the host's loopback, so the VM drops box traffic to each view's port
 # (vm_view_mount): go-xdr allocates whatever length a request declares. Scans the ephemeral range.
-if [ "${KIB_ROOTLESS:-0}" = 1 ]; then
+if [ "${KIB_VIEW:-nfs}" = fuse ]; then
     skip "no NFS view answers from the box" "no-VM mode: the view is a FUSE mount, not a port"
 else
     is "no NFS view answers from the box" "" "$(
@@ -337,7 +337,7 @@ allow "regression: git status" git -C "$REPO" status --short
 allow "regression: git remote add" bash -c "git -C '$REPO' remote remove o 2>/dev/null; git -C '$REPO' remote add o https://example.invalid/r.git"
 # Over NFS every hard link is refused: go-nfs cannot serve LINK (host/view/nfs.go), and git falls
 # back to a rename. Under the no-VM mode's FUSE view an ordinary one still works.
-if [ "${KIB_ROOTLESS:-0}" = 1 ]; then
+if [ "${KIB_VIEW:-nfs}" = fuse ]; then
     allow "regression: ordinary hardlink" bash -c "echo x > '$ARTIFACTS/hl-src'; ln -f '$ARTIFACTS/hl-src' '$ARTIFACTS/hl-dst'"
 else
     skip "regression: ordinary hardlink" "refused over NFS; git renames instead"
