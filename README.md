@@ -101,7 +101,7 @@ Now `cd` into any project and run `cc`. The image builds itself on first run, an
 
 Nothing to set up and nothing to migrate: your `~/.claude` stays exactly as it is, and each project's session is assembled from it per launch and merged back on exit — so a host `claude` and a boxed `cc` share one login, one `--resume` list and one history, while no project's box can see another's.
 
-**Requirements:** `git`, `bash`, `python3` and `perl` (stock macOS has them all, no Homebrew). The first launch offers to install [Lima](https://lima-vm.io) and the `docker` command into `~/.local`, no sudo and no Docker Desktop, and every box runs on gVisor in a VM. Linux also needs QEMU, KVM and virtiofsd, once ([`docs/vm.md`](docs/vm.md)). `wl-clipboard` on Linux is optional; without it you just lose clipboard paste.
+**Requirements:** `git`, `bash`, `python3` and `perl` (stock macOS has them all, no Homebrew). The first launch offers to install [Lima](https://lima-vm.io) and the `docker` command into `~/.local`, no sudo and no Docker Desktop, and every box runs on gVisor in a VM. On Linux with [rootless Docker](https://docs.docker.com/engine/security/rootless/), boxes run on gVisor there instead, with no VM; without it, Linux also needs QEMU, KVM and virtiofsd, once ([`docs/vm.md`](docs/vm.md)). `wl-clipboard` on Linux is optional; without it you just lose clipboard paste.
 
 <h2 id="use"><img src="docs/assets/readme/section-use.svg" width="100%" alt="Everyday use"></h2>
 
@@ -157,7 +157,7 @@ This is a real boundary, but not a perfect one. What kib does **not** close:
 - **Decline the broker login and the real credential is copied in**, with a warning — rotate it if an untrusted session has run that way.
 - **`host.docker.internal` is routable** to your host network stack.
 - **Your project directory is writable**, by design: editing your code is the agent's job.
-- **gVisor, then a VM, then your kernel.** The box (`--cap-drop=ALL`, `no-new-privileges`, seccomp, empty `CapEff`, no Docker socket) runs on gVisor inside kib's Lima VM, so a kernel exploit needs a gVisor bug and then a VM kernel bug. The VM mounts your home folder; the box sees the project only through the redaction view ([`docs/vm.md`](docs/vm.md)).
+- **gVisor, then a VM, then your kernel.** The box (`--cap-drop=ALL`, `no-new-privileges`, seccomp, empty `CapEff`, no Docker socket) runs on gVisor inside kib's Lima VM, so a kernel exploit needs a gVisor bug and then a VM kernel bug. On Linux with rootless Docker there is no VM by default: one barrier, as your user. The VM mounts your home folder; the box sees the project only through the redaction view ([`docs/vm.md`](docs/vm.md)).
 - **Dev servers watch by polling.** gVisor sees no file-watch event for a host edit, so kib sets `CHOKIDAR_USEPOLLING` and `WATCHPACK_POLLING`.
 
 The full audit, including the controls that **are** closed, is in [`docs/security/audit.md`](docs/security/audit.md).

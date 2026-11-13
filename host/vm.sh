@@ -330,10 +330,21 @@ _in_engine() { if engine_lima; then vm_root "$@"; else "$@"; fi; }
 # CPU limits. The view is a host FUSE mount, since rootless Docker cannot mount NFS.
 # (PLAN_NFS_VIEW.md Tests 11–12)
 GVISOR_HOST_DIR="$KIB_HOST_ONLY/gvisor/$GVISOR_VERSION"
+_rootless_docker() { docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless; }
+
+# The config's engine, else Linux's default: rootless gVisor wherever rootless Docker runs.
+# The VM costs ~0.15 cores per idle box and 1-2 under load (measured 2026-11-13, `kib stats`).
+engine_choice() {
+    case "$KIB_CFG_ENGINE" in
+        rootless) echo rootless ;;
+        '') if ! is_macos && _rootless_docker; then echo rootless; else echo vm; fi ;;
+        *) echo vm ;;
+    esac
+}
+
 rootless_use() {
     is_macos && die "engine = rootless is Linux only: a Mac needs kib's VM."
-    docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless \
-        || die "engine = rootless needs rootless Docker running (docs/vm.md, \"No-VM mode\")."
+    _rootless_docker || die "engine = rootless needs rootless Docker running (docs/vm.md, \"No-VM mode\")."
     _KIB_ROOTLESS=1
     KIB_HOST_GATEWAY=10.0.2.2 # RootlessKit's host loopback; Docker 29 writes `invalid IP` for host-gateway
     _vm_has_gvisor || _rootless_gvisor
@@ -346,7 +357,8 @@ _rootless_gvisor() {
     printf '🛡️  kib: no-VM mode adds gVisor (%s) to %s and reloads Docker. Go ahead? [y/N] ' \
         "$GVISOR_RUNTIME" "$cfg" >&2
     { [ -t 0 ] && read -r a; } || true
-    case "$a" in [yY]*) ;; *) die "gVisor is not set up for rootless Docker." ;; esac
+    case "$a" in [yY]*) ;; *) die "gVisor is not set up for rootless Docker." \
+        "To use kib's VM instead, add  engine = vm  to $KIB_CONFIG" ;; esac
     mkdir -p "$GVISOR_HOST_DIR" "${cfg%/*}"
     if ! curl -fsSL -o "$tgz" "https://storage.googleapis.com/gvisor/releases/release/$GVISOR_VERSION/$(uname -m)/gvisor.tar.bz2" \
         || [ "$(sha512_file "$tgz")" != "$(_gvisor_sha)" ] || ! tar -xjf "$tgz" -C "$GVISOR_HOST_DIR" \
@@ -478,10 +490,14 @@ _vm_disk_size() {
 }
 
 vm_use() { # <verb>
-    if [ "$KIB_CFG_ENGINE" = rootless ]; then
+    if [ "$(engine_choice)" = rootless ]; then
         rootless_use
         return 0
     fi
+    is_macos || [ -n "$KIB_CFG_ENGINE" ] \
+        || printf '%s\n' "ℹ️  kib: no rootless Docker running, so boxes run in kib's heavier VM." \
+            "   Set up rootless Docker for the lighter default (docs/vm.md, \"No-VM mode\")," \
+            "   or add  engine = vm  to $KIB_CONFIG to keep the VM quietly." >&2
     PATH="$PATH:$HOME/.local/bin:$HOME/.local/docker" # where _vm_tools installs
     # kib's docker config, plugins beside it. Not ~/.docker: Docker Desktop's `credsStore: desktop`
     # there fails every pull once it is gone.

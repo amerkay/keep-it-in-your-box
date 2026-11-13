@@ -67,7 +67,7 @@ everything else calls its shims or tests `is_macos`.
 | Behaviour | Ubuntu / Linux | macOS | Owner | Proven |
 |---|---|---|---|---|
 | `preflight_platform` | No-op | Fails fast on missing `perl`. The engine is `vm_use`'s: one prompt installs Lima, the `docker` CLI and buildx | `vm.md` | 🧪 |
-| Docker engine | Any; or kib's Lima VM with `vm = on` | kib's Lima VM only. Verified 2026-11-06 with Docker Desktop quit and its CLI off `PATH` | `microvm.md` | ✅ |
+| Docker engine | Rootless Docker + gVisor when it runs (default); else kib's Lima VM, or `engine = vm` | kib's Lima VM only. Verified 2026-11-06 with Docker Desktop quit and its CLI off `PATH` | `microvm.md` | ✅ |
 | Host shell | bash 5, GNU userland used directly (`flock`, `setsid`, `sha256sum`) | bash 3.2 + BSD userland; `perl` shims for `lock_fd` / `detach_pgrp`, `shasum` for `hash8` | `macos.md` | 🧪 |
 | Empty-array expansion | Tolerant | Every array ever assigned `()` must expand as `${arr[@]+"${arr[@]}"}` or the launch aborts under `set -u` | `macos.md` | ✅ |
 | Host python | Modern `python3` | Stock 3.9 — `kib/host`, `kib/shared`, `kib/broker` stay 3.9-clean (enforced on **both**) | `macos.md` | ✅ |

@@ -33,6 +33,8 @@ gone. Measured on Linux and macOS (`sn-frontend`):
 
 **Changed 2026-11-09: the VM no longer mounts `~`, nor any raw project** (`_vm_mounts`). It shares `~/.claude` and kib's own dirs, a fixed set, so it never restarts. Each project reaches it only as its redacted view: the view runs on the host as an NFS server, VM root mounts it, the box binds that mount (`PLAN_NFS_VIEW.md`). A first try shared each opened project and restarted the VM for a new one, resuming the sessions it cut; the user lost unsent input, so it was removed. The FUSE sidecar went with it.
 
+**Changed 2026-11-13: on Linux, rootless gVisor is the default wherever rootless Docker runs** (`engine_choice`; `engine = vm` keeps the VM, and Linux without rootless Docker falls back to it with a hint). Measured with `kib stats` on a Framework 13, two idle boxes: the qemu VM cost ~0.30 cores (its own overhead 0.2–0.45, 1–2 cores under load), rootless ~0.13; the laptop idled at 6.6–7 W. KVM halt-polling off changed nothing, and qemu's I/O thread (network, NFS) was ~0.05: the cost is gVisor running inside the guest. macOS's vz VM measured ~0.1 cores of overhead, so the Mac keeps the VM. The trade: one barrier, no box limits.
+
 A shared lock on fd 205 counts sessions. The last one out starts a 10-minute timer; it stops the
 VM only if no session holds fd 205 by then and no later close has replaced it. Views mount at
 `/mnt/kib/<hash>` in the VM.
@@ -122,7 +124,7 @@ Adopted 2026-11-07, probed first. The broker stays on runc. The seams the 2026-1
   as the user (multithreaded: 240 files in 0.1 s). Its open-file limit is raised to 1048576: it holds an fd
   per open directory, gVisor keeps one open per cached directory, and the default 1024 ran out on
   the plugin tree (`EMFILE` naming `~/.claude/plugins/…` in the box).
-- **Rootless Docker:** gVisor runs only with `--ignore-cgroups` (no limits) → the VM's rootful Docker.
+- **Rootless Docker:** gVisor runs only with `--ignore-cgroups` (no limits); on Linux that is still the default (above).
 
 ## If this is ever revisited
 

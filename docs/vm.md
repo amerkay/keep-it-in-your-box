@@ -1,8 +1,6 @@
 # The VM and gVisor
 
-kib runs every box on [gVisor](https://gvisor.dev) inside its own [Lima](https://lima-vm.io) VM,
-on Linux and macOS alike. A kernel exploit in the box meets gVisor's kernel first, then the VM's,
-never yours. Docker Desktop is not needed and not used.
+kib runs every box on [gVisor](https://gvisor.dev). On macOS, and on Linux without rootless Docker, it runs inside kib's own [Lima](https://lima-vm.io) VM: a kernel exploit in the box meets gVisor's kernel first, then the VM's, never yours. On Linux with rootless Docker, the box runs there directly, which costs about half as much CPU ([No-VM mode](#no-vm-mode-linux-default)). Docker Desktop is not needed and not used.
 
 ## Set up
 
@@ -11,7 +9,7 @@ command and `docker buildx`. Each download is checked against a checksum pinned 
 creates the VM, installs gVisor into it (also pinned) and, on macOS, bindfs, and builds the image there. That takes a
 few minutes.
 
-Linux also needs QEMU, KVM and virtiofsd, once, with sudo:
+For the VM, Linux also needs QEMU, KVM and virtiofsd, once, with sudo:
 
 ```
 ls -l /dev/kvm
@@ -67,15 +65,9 @@ Lima: Apache-2.0. gVisor: Apache-2.0. The `docker` command: Apache-2.0.
 On Linux keep memory under half your RAM: QEMU holds the VM's memory in `/dev/shm`, which is
 that size.
 
-## No-VM mode (Linux only)
+## No-VM mode (Linux default)
 
-If you already run [rootless Docker](https://docs.docker.com/engine/security/rootless/), kib can use it instead of the VM. Add this line to `~/.keep-it-in-your-box/config`:
-
-```
-engine = rootless
-```
-
-The first `kib` then asks once to add gVisor to `~/.config/docker/daemon.json` and reloads Docker. What changes:
+If [rootless Docker](https://docs.docker.com/engine/security/rootless/) is running, kib uses it instead of the VM, with no setting needed. The first `kib` asks once to add gVisor to `~/.config/docker/daemon.json` and reloads Docker. What changes:
 
 - **One barrier instead of two.** A gVisor bug alone reaches your machine, as your user (rootless Docker never had root).
 - **No memory or CPU limits for boxes.** Rootless Docker runs gVisor only with `--ignore-cgroups`, so one box can use all your memory.
@@ -83,4 +75,4 @@ The first `kib` then asks once to add gVisor to `~/.config/docker/daemon.json` a
 - **Host dev servers** are at `host.docker.internal` (RootlessKit's `10.0.2.2`), and only if rootless Docker allows host loopback: `DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false` in its user unit.
 - **Needs** `fusermount3` (package `fuse3`) and systemd-resolved (kib reads `/run/systemd/resolve/resolv.conf` for the box's DNS).
 
-Remove the line to go back to the VM.
+To use the VM anyway, add `engine = vm` to `~/.keep-it-in-your-box/config`. `engine = rootless` makes a missing rootless Docker an error instead of a fallback to the VM.

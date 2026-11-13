@@ -156,6 +156,17 @@ case "$(_vm_run "$_vm_dir/rl:$PATH" _vm_t_rootless darwin)" in
     *"Linux only"*) pass "engine = rootless is refused on macOS" ;;
     *) fail "engine = rootless ran on macOS" ;;
 esac
+_vm_t_default() { KIB_OS=$1 && KIB_CFG_ENGINE=$2 && engine_choice; }
+is "no engine set, Linux with rootless Docker: rootless gVisor" "rootless" \
+    "$(_vm_run "$_vm_dir/rl:$PATH" _vm_t_default linux '' | tail -1)"
+is "no engine set, macOS: the VM, rootless Docker or not" "vm" \
+    "$(_vm_run "$_vm_dir/rl:$PATH" _vm_t_default darwin '' | tail -1)"
+is "engine = vm keeps the VM on Linux with rootless Docker" "vm" \
+    "$(_vm_run "$_vm_dir/rl:$PATH" _vm_t_default linux vm | tail -1)"
+case "$(_vm_run /usr/bin:/bin _vm_t_linux)" in
+    *"no rootless Docker running"*) pass "the VM fallback on Linux says how to get the default" ;;
+    *) fail "Linux fell back to the VM without saying why" ;;
+esac
 
 _vm_t_build() { KIB_OS=darwin && VM_LINGER=1 && vm_use build >/dev/null 2>&1 && echo built; }
 case "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_build)" in

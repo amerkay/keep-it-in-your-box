@@ -183,7 +183,7 @@ esac
 case "$VERB" in
     build) "$KIB_ROOT/tools/build-image.sh" "$@" && exit 0 || exit $? ;; # no exec: vm_use's trap
     sleep-monitor) exec "$KIB_ROOT/host/sleep-monitor.sh" "$@" ;;
-    stats) need_python && kib_py host.stats "$KIB_CFG_ENGINE" "$@" && exit 0 || exit $? ;;
+    stats) need_python && kib_py host.stats "$(engine_choice)" "$@" && exit 0 || exit $? ;;
     broker) broker_cli "$@" && exit 0 || exit $? ;;
 esac
 

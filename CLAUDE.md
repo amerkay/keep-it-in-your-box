@@ -110,8 +110,9 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
 - **The box runs on gVisor, so it has no Docker DNS, no NIC hot-plug, no host inotify and no
   `docker top`** — the broker is an `--add-host`, the box is created → connected → started,
   watchers poll, readiness is the entrypoint's `/run/kib-ready`. On macOS, Apple's virtiofs
-  reports the asker as owner, so kib's bind sources get bindfs in the VM — never the project. The
-  no-VM mode (`engine = rootless`, Linux) is opt-in only: rootless Docker runs gVisor only with
+  reports the asker as owner, so kib's bind sources get bindfs in the VM — never the project. On
+  Linux, no-VM mode is the default wherever rootless Docker runs (`engine_choice`; the qemu VM
+  measured ~2× the idle cost, `engine = vm` keeps it): rootless Docker runs gVisor only with
   `--ignore-cgroups` (no box memory/CPU limits), its box is root (= the user), and its view is a
   host FUSE mount; rootful Docker's socket is root-equivalent. (`microvm.md`, `docs/vm.md`)
 - **VM memory stays Lima's 4 GiB until an out-of-memory kill; Docker updates only at the idle
