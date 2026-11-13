@@ -199,14 +199,16 @@ esac
 # docker = rootful reaches the system socket even when the shell's docker is rootless.
 python3 -c 'import socket,sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$_vm_dir/sys.sock"
 mkdir -p "$_vm_dir/both"
-printf '#!/bin/sh
-case "$DOCKER_HOST" in *sys.sock) echo "name=seccomp" ;; *) echo "name=rootless" ;; esac
-' \
-    >"$_vm_dir/both/docker" && chmod +x "$_vm_dir/both/docker"
+printf '#!/bin/sh\ncase "$DOCKER_HOST" in *sys.sock) echo "name=seccomp %s" ;; *) echo name=rootless ;; esac\n' \
+    "$_vm_rt" >"$_vm_dir/both/docker" && chmod +x "$_vm_dir/both/docker"
 _vm_t_pinned() { KIB_OS=linux && KIB_CFG_DOCKER=rootful && ROOTFUL_SOCK="$_vm_dir/sys.sock" \
     && engine_choice && echo "$ENGINE $(_docker_kind)"; }
 is "docker = rootful aims at the system socket past a rootless default" "rootful rootful" \
     "$(_vm_run "$_vm_dir/both:$PATH" _vm_t_pinned | tail -1)"
+_vm_t_both_menu() { KIB_OS=linux && ROOTFUL_SOCK="$_vm_dir/sys.sock" FUSE_CONF="$_vm_dir/fuse.conf" \
+    && _prefer_rootless_socket && _menu_rows && echo "${MENU_T[1]}"; }
+is "menu: a set-up rootful Docker starts now while the shell points at rootless" "starts now" \
+    "$(_vm_run "$_vm_dir/both:$PATH" _vm_t_both_menu | tail -1)"
 
 _vm_t_menu() { _menu_rows && _menu_pick 2>/dev/null < <(printf '%b' "$1") && echo "$MENU_PICK"; }
 is "menu: ↓ ↓ Enter picks the VM" "2" "$(_vm_run /usr/bin:/bin _vm_t_menu '\033[B\033[B\n' | tail -1)"

@@ -59,14 +59,17 @@ engine_choice() {
     esac
 }
 
+# Asks the system Docker, never whatever the shell's docker points at (often rootless).
+_rootful() { DOCKER_HOST="unix://$ROOTFUL_SOCK" "$@"; }
 _rootful_ready() {
-    [ "$(_docker_kind)" = rootful ] && _vm_has_gvisor \
+    [ "$(_rootful _docker_kind)" = rootful ] && _rootful _vm_has_gvisor \
         && grep -qx user_allow_other "$FUSE_CONF" 2>/dev/null
 }
 
 # gVisor under the user's own rootful Docker: one barrier, and an escape lands as root.
 rootful_use() {
     _rootful_ready || { _rootful_steps && exit 1; }
+    export DOCKER_HOST="unix://$ROOTFUL_SOCK" # the menu may have aimed it at rootless first
     _KIB_ROOTFUL=1
     # Docker 29 writes `invalid IP` for host-gateway here too, so name the bridge's gateway.
     KIB_HOST_GATEWAY="$(docker network inspect bridge \
@@ -97,7 +100,7 @@ _steps() { # <what it sets up> <line…>
 
 _rootful_steps() {
     local v="$GVISOR_VERSION" d="/opt/kib-gvisor/$GVISOR_VERSION" t=/tmp/kib-gvisor.tar.bz2
-    [ "$(_docker_kind)" = rootful ] || printf '%s\n' "" \
+    [ "$(_rootful _docker_kind)" = rootful ] || printf '%s\n' "" \
         "⚠️  ${C_Y}${C_B}kib: your Docker is not answering at $ROOTFUL_SOCK.$C_0" \
         "   Start it first (sudo systemctl start docker) and be in group docker," \
         "   or install it: https://docs.docker.com/engine/install/" >&2
