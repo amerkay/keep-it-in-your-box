@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from kib.host.stats import Stats, parse_ioreg, parse_top, part
+from kib.host.stats import Proc, Stats, parse_ioreg, parse_top, part, window
 
 TOP = """Processes: 600 total
 CPU usage: 50.00% user, 50.00% sys, 0.00% idle
@@ -71,3 +71,20 @@ def test_summary_averages_boxes_over_every_sample() -> None:
     assert "67% of this machine's CPU (2.00 of 3.00)" in out
     assert "kib-a" in out and "avg  0.25" in out and "on AC throughout" in out
     assert "  firefox" in out and "avg  0.50" in out
+
+
+def test_window_credits_reaped_children_once() -> None:
+    before = {
+        (1, 10): Proc("gvisor", "gvisor_sentry", 0, own=500, kids=0),
+        (2, 20): Proc(None, "make", 1, own=100, kids=0),  # alive at the first scan, then reaped
+        (3, 30): Proc(None, "old", 0, own=50, kids=0),
+    }
+    after = {
+        # sentry: +40 own; kids +180 = make's 150 lifetime + 30 from helpers that came and went
+        (1, 10): Proc("gvisor", "gvisor_sentry", 0, own=540, kids=180),
+        (3, 31): Proc(None, "new", 0, own=20, kids=0),  # pid 3 reused: born in the window
+    }
+    assert window(before, after) == {
+        (1, 10): 40 + 30 + 50,  # own, the helpers, make's time since the first scan; not its 100
+        (3, 31): 20,
+    }

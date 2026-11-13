@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 from kib.shared import cli
 
@@ -52,9 +53,20 @@ def part(comm: str, argv: list[str], engine: str, mine: bool = True) -> str | No
     return "qemu" if exe.startswith("qemu-system") else "virtiofsd" if "virtiofsd" in exe else None
 
 
-def _procs(engine: str) -> dict[int, tuple[str | None, str, int]]:
-    """Every process, any user: pid -> (kib part or None, comm, CPU ticks)."""
-    out: dict[int, tuple[str | None, str, int]] = {}
+class Proc(NamedTuple):
+    part: str | None  # which piece of kib, or None
+    comm: str
+    ppid: int
+    own: int  # utime + stime, in ticks
+    kids: int  # cutime + cstime: children it has reaped
+
+
+Key = tuple[int, int]  # (pid, start time): a reused pid is a new process
+
+
+def _procs(engine: str) -> dict[Key, Proc]:
+    """Every process, any user."""
+    out: dict[Key, Proc] = {}
     uid = os.getuid()
     for p in Path("/proc").iterdir():
         if not p.name.isdigit():
@@ -65,9 +77,29 @@ def _procs(engine: str) -> dict[int, tuple[str | None, str, int]]:
             argv = (p / "cmdline").read_bytes().decode(errors="replace").split("\0")[:-1]
             f = rest.split()
             name = part(comm, argv, engine, p.stat().st_uid == uid)
-            out[int(p.name)] = (name, comm, int(f[11]) + int(f[12]))  # utime + stime
+            own, kids = int(f[11]) + int(f[12]), int(f[13]) + int(f[14])
+            out[(int(p.name), int(f[19]))] = Proc(name, comm, int(f[1]), own, kids)
         except (OSError, IndexError, ValueError):
             continue  # exited mid-scan
+    return out
+
+
+def window(before: dict[Key, Proc], after: dict[Key, Proc]) -> dict[Key, int]:
+    """Ticks each process spent between two scans, its reaped children included.
+
+    A child that came and went between scans is seen only in its parent's `kids`; one that was
+    alive at the first scan is subtracted as it stood then, so its earlier time is not counted
+    twice. A process born after the first scan has no baseline: all its time is this window's.
+    """
+    gone: dict[int, int] = {}  # ppid -> what its vanished children had at the first scan
+    for k, p in before.items():
+        if k not in after:
+            gone[p.ppid] = gone.get(p.ppid, 0) + p.own + p.kids
+    zero = Proc(None, "", 0, 0, 0)
+    out = {}
+    for k, p in after.items():
+        b = before.get(k, zero)
+        out[k] = p.own - b.own + max(0, p.kids - b.kids - gone.get(k[0], 0))
     return out
 
 
@@ -85,12 +117,11 @@ def _sample_linux(interval: float, engine: str) -> Sample:
     dt, busy1, procs1 = time.monotonic() - t0, _busy(), _procs(engine)
     parts = dict.fromkeys(LINUX_PARTS[engine], 0.0)
     procs: Parts = {}
-    for pid, (name, comm, ticks) in procs1.items():
-        if pid in procs0:  # a new pid has no baseline: its lifetime total is not this window
-            cores = (ticks - procs0[pid][2]) / HZ / dt
-            procs[comm] = procs.get(comm, 0.0) + cores
-            if name:
-                parts[name] += cores
+    for k, ticks in window(procs0, procs1).items():
+        p, cores = procs1[k], ticks / HZ / dt
+        procs[p.comm] = procs.get(p.comm, 0.0) + cores
+        if p.part:
+            parts[p.part] += cores
     return dt, (busy1 - busy0) / HZ / dt, parts, procs
 
 
@@ -241,6 +272,16 @@ class Stats:
         return "\n".join(lines)
 
 
+class _CtrlCError(Exception):
+    pass
+
+
+def _on_ctrl_c(*_: object) -> None:
+    # Ignore any later Ctrl-C before anything else runs: a second press must not eat the summary.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    raise _CtrlCError
+
+
 def main(argv: list[str]) -> int:
     """argv: <engine: vm|rootless> [interval_s] — the engine comes from kib's config."""
     engine, args = (argv[0], argv[1:]) if argv else ("", [])
@@ -260,6 +301,7 @@ def main(argv: list[str]) -> int:
     docker = shutil.which("docker", path=path)
     stats = Stats(f"{sys.platform}, {TITLES[engine]}")
     print(f"kib stats ({stats.title}): every {interval:g}s — Ctrl-C for the summary.", flush=True)
+    signal.signal(signal.SIGINT, _on_ctrl_c)
     try:
         while True:
             dt, machine, cur, procs = sample(interval, engine)
@@ -290,8 +332,7 @@ def main(argv: list[str]) -> int:
                 + (f"  busiest box {top[0]} {top[1]:.2f}" if top else ""),
                 flush=True,
             )
-    except KeyboardInterrupt:
-        signal.signal(signal.SIGINT, signal.SIG_IGN)  # a second, mashed Ctrl-C must not eat it
+    except _CtrlCError:
         print(stats.summary(parts), flush=True)
     return cli.OK
 
