@@ -28,6 +28,7 @@ kib — run Claude Code in a Docker sandbox, one container per project.
   kib build [--background]    rebuild the image
   kib sleep-monitor [iv] [id] diagnose "why won't it idle-suspend?"
   kib stats [interval]        live CPU/battery cost of kib; Ctrl-C for a summary
+  kib engine                  pick how boxes run on Linux: rootless/rootful Docker, or the VM
   kib help                    this table
 
 Flags (before the verb):
@@ -111,7 +112,7 @@ case "$VERB" in
         usage
         exit 0
         ;;
-    claude | exec | broker | mcp | audit | build | sleep-monitor | stats) ;;
+    claude | exec | broker | mcp | audit | build | sleep-monitor | stats | engine) ;;
     *)
         printf '❌ kib: unknown verb %s\n\n' "$VERB" >&2
         usage >&2
@@ -127,7 +128,7 @@ esac
 # intercepted before any container exists. `mcp adopt` and `audit` DO read the project.
 _dir_guard_exempt() {
     case "$VERB" in
-        broker | build | sleep-monitor | stats) return 0 ;;
+        broker | build | sleep-monitor | stats | engine) return 0 ;;
         claude)
             local -a a=("$@")
             while [ "${a[0]:-}" = claude ]; do a=("${a[@]:1}"); done
@@ -183,7 +184,8 @@ esac
 case "$VERB" in
     build) "$KIB_ROOT/tools/build-image.sh" "$@" && exit 0 || exit $? ;; # no exec: vm_use's trap
     sleep-monitor) exec "$KIB_ROOT/host/sleep-monitor.sh" "$@" ;;
-    stats) need_python && kib_py host.stats "$(engine_choice)" "$@" && exit 0 || exit $? ;;
+    stats) engine_choice && need_python && kib_py host.stats "${ENGINE/ask/vm}" "$@" && exit 0 || exit $? ;;
+    engine) engine_verb && exit 0 || exit $? ;;
     broker) broker_cli "$@" && exit 0 || exit $? ;;
 esac
 

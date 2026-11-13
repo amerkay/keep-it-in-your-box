@@ -93,6 +93,7 @@ func serve(mode string, args []string) {
 	fl := flag.NewFlagSet(mode, flag.ExitOnError)
 	src := fl.String("src", "", "the project")
 	mnt := fl.String("mnt", "", "where the FUSE view mounts")
+	allowOther := fl.Bool("allow-other", false, "FUSE: let other users (rootful Docker) in")
 	// Both required: an optional guard file fails OPEN (a view with no rules reported as up).
 	// "No rules" is an EMPTY file, never a missing flag.
 	patterns := fl.String("patterns-file", "", "the project's staged rules")
@@ -109,7 +110,7 @@ func serve(mode string, args []string) {
 	}
 	logf("kib-view: %s src=%s rules=%v", mode, v.src, rules)
 	if mode == "fuse" {
-		serveFUSE(v, *mnt, build)
+		serveFUSE(v, *mnt, *allowOther, build)
 		return
 	}
 	serveNFS(v, build)

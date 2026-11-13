@@ -42,6 +42,8 @@ def test_part_rootless_counts_gvisor_and_the_engine() -> None:
     assert part("slirp4netns", ["slirp4netns"], "rootless") == "engine"
     assert part("dockerd", ["dockerd"], "rootless", mine=False) is None  # root's own Docker
     assert part("kib-view", ["/h/kib-view"], "rootless") == "view"
+    assert part("gvisor_sentry", ["runsc"], "rootful") == "gvisor"
+    assert part("dockerd", ["dockerd"], "rootful") is None  # the machine's Docker, not kib's
     assert part("firefox", ["firefox"], "rootless") is None
 
 

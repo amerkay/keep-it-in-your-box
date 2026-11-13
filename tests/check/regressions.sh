@@ -343,7 +343,7 @@ else
     pass "Flush does not fsync (the kernel calls it on every close)"
 fi
 # A view in FUSE mode must exit when its mount goes, never fall through to serving NFS.
-if awk '/serveFUSE\(v, \*mnt, build\)/ {getline; print; exit}' <<<"$_gf" | grep -q 'return'; then
+if awk '/serveFUSE\(v, \*mnt, \*allowOther, build\)/ {getline; print; exit}' <<<"$_gf" | grep -q 'return'; then
     pass "the FUSE view exits with its mount (no NFS server after it)"
 else
     fail "serve() falls through from FUSE to NFS" "an unmounted no-VM view would keep serving the project"

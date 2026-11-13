@@ -17,9 +17,11 @@ import (
 )
 
 // serveFUSE mounts v at mnt until SIGTERM/SIGINT; SIGHUP reloads the rules.
-func serveFUSE(v *view, mnt string, build func() []Rule) {
+func serveFUSE(v *view, mnt string, allowOther bool, build func() []Rule) {
 	root := &node{v: v}
-	server, err := fs.Mount(mnt, root, mountOptions())
+	opts := mountOptions()
+	opts.MountOptions.AllowOther = allowOther // rootful Docker reads it as root
+	server, err := fs.Mount(mnt, root, opts)
 	if err != nil {
 		die(1, "kib-view: mount: %v", err)
 	}
@@ -27,8 +29,8 @@ func serveFUSE(v *view, mnt string, build func() []Rule) {
 	server.Wait()
 }
 
-// mountOptions: libfuse's 1 s entry and attr timeouts. No allow_other: the rootless box's root
-// is this user, and Ubuntu refuses allow_other to users.
+// mountOptions: libfuse's 1 s entry and attr timeouts. allow_other only for rootful Docker: the
+// rootless box's root is this user, and it needs user_allow_other in /etc/fuse.conf.
 func mountOptions() *fs.Options {
 	sec := time.Second
 	return &fs.Options{

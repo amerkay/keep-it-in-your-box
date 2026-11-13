@@ -6,7 +6,7 @@
 # shellcheck source=SCRIPTDIR/_guard.sh
 . "${BASH_SOURCE%/*}/_guard.sh" # sourced by tests/check.sh, never run directly
 
-section "Lima VM engine (host/vm.sh)"
+section "Engines: Lima VM, rootless and rootful Docker (host/vm.sh, host/engine.sh)"
 
 _vm_dir="$(mktemp -d)"
 mkdir -p "$_vm_dir/bin" "$_vm_dir/home/devel/proj" "$_vm_dir/lima"
@@ -66,7 +66,8 @@ _vm_run() { ( # <PATH> <cmd…> — a fresh subshell with the units loaded, HOME
     unset KIB_PORTABLE_SOURCED # a fresh load, as bin/kib does
     shift
     # shellcheck source=/dev/null
-    . "$KIB_ROOT/host/core.sh" && . "$KIB_ROOT/host/portable.sh" && . "$KIB_ROOT/host/vm.sh"
+    . "$KIB_ROOT/host/core.sh" && . "$KIB_ROOT/host/portable.sh" && . "$KIB_ROOT/host/vm.sh" \
+        && . "$KIB_ROOT/host/engine.sh"
     cd "$HOME/devel/proj" && "$@"
 ) 2>&1 </dev/null; }
 
@@ -139,34 +140,72 @@ case "$(_vm_run /usr/bin:/bin _vm_t_mac)" in
 esac
 _vm_t_linux() { KIB_OS=linux && vm_use claude && echo returned; }
 case "$(_vm_run /usr/bin:/bin _vm_t_linux)" in
-    *docs/vm.md*returned) fail "Linux without the VM's prerequisites ran natively" ;;
-    *docs/vm.md*) pass "Linux without QEMU/KVM/virtiofsd: refused, naming docs/vm.md" ;;
-    *) fail "Linux without the VM's prerequisites is not refused" ;;
+    *returned) fail "Linux with nothing picked and no terminal ran anyway" ;;
+    *"in a terminal for a menu"*"vm = off"*"vm = on"*) pass "nothing picked, no terminal: the config lines, then stop" ;;
+    *) fail "nothing picked, no terminal: no way forward printed" ;;
 esac
 
 # No-VM mode: rootless Docker that already lists kib's gVisor runtime. The box is root inside.
-mkdir -p "$_vm_dir/rl"
-printf '#!/bin/sh\necho "name=rootless kib-gvisor-%s"\n' "$(sed -n 's/^GVISOR_VERSION=//p' "$KIB_ROOT/host/vm.sh")" \
-    >"$_vm_dir/rl/docker"
-chmod +x "$_vm_dir/rl/docker"
-_vm_t_rootless() { KIB_OS=$1 && KIB_CFG_ENGINE=rootless && vm_use claude && echo "$(box_uid):$(box_gid) $(_vm_t_engine)"; }
-is "engine = rootless: no VM, the box runs as root (this user outside)" "0:0 native" \
+_vm_rt="kib-gvisor-$(sed -n 's/^GVISOR_VERSION=//p' "$KIB_ROOT/host/vm.sh")"
+mkdir -p "$_vm_dir/rl" "$_vm_dir/rf"
+printf '#!/bin/sh\necho "name=rootless %s"\n' "$_vm_rt" >"$_vm_dir/rl/docker"
+# Rootful: what it lists is in $_vm_dir/rf-runtimes. A fake sudo records any call: kib never may.
+printf '#!/bin/sh\necho "name=seccomp $(cat %s/rf-runtimes 2>/dev/null)"\n' "$_vm_dir" >"$_vm_dir/rf/docker"
+printf '#!/bin/sh\necho "$*" >>%s/sudo-calls\n' "$_vm_dir" >"$_vm_dir/rf/sudo"
+chmod +x "$_vm_dir/rl/docker" "$_vm_dir/rf/docker" "$_vm_dir/rf/sudo"
+_vm_t_rootless() { KIB_OS=$1 && KIB_CFG_VM=off && vm_use claude && echo "$(box_uid):$(box_gid) $(_vm_t_engine)"; }
+is "vm = off: no VM, the box runs as root (this user outside)" "0:0 native" \
     "$(_vm_run "$_vm_dir/rl:$PATH" _vm_t_rootless linux | tail -1)"
 case "$(_vm_run "$_vm_dir/rl:$PATH" _vm_t_rootless darwin)" in
-    *"Linux only"*) pass "engine = rootless is refused on macOS" ;;
-    *) fail "engine = rootless ran on macOS" ;;
+    *"Linux only"*"Remove the  vm = off"*) pass "vm = off is refused on macOS, saying how to fix it" ;;
+    *) fail "vm = off ran on macOS, or refused without the fix" ;;
 esac
-_vm_t_default() { KIB_OS=$1 && KIB_CFG_ENGINE=$2 && engine_choice; }
-is "no engine set, Linux with rootless Docker: rootless gVisor" "rootless" \
+_vm_t_default() { KIB_OS=$1 && KIB_CFG_VM=$2 && engine_choice && echo "$ENGINE"; }
+is "nothing set, Linux with rootless Docker: rootless gVisor, no menu" "rootless" \
     "$(_vm_run "$_vm_dir/rl:$PATH" _vm_t_default linux '' | tail -1)"
-is "no engine set, macOS: the VM, rootless Docker or not" "vm" \
+is "nothing set, Linux with only rootful Docker: the menu" "ask" \
+    "$(_vm_run "$_vm_dir/rf:$PATH" _vm_t_default linux '' | tail -1)"
+is "nothing set, macOS: the VM, rootless Docker or not" "vm" \
     "$(_vm_run "$_vm_dir/rl:$PATH" _vm_t_default darwin '' | tail -1)"
-is "engine = vm keeps the VM on Linux with rootless Docker" "vm" \
-    "$(_vm_run "$_vm_dir/rl:$PATH" _vm_t_default linux vm | tail -1)"
-case "$(_vm_run /usr/bin:/bin _vm_t_linux)" in
-    *"no rootless Docker running"*) pass "the VM fallback on Linux says how to get the default" ;;
-    *) fail "Linux fell back to the VM without saying why" ;;
+is "vm = on keeps the VM on Linux with rootless Docker" "vm" \
+    "$(_vm_run "$_vm_dir/rl:$PATH" _vm_t_default linux on | tail -1)"
+_vm_t_norootless() { KIB_OS=linux && KIB_CFG_VM=off && vm_use claude && echo returned; }
+case "$(_vm_run /usr/bin:/bin _vm_t_norootless)" in
+    *returned) fail "vm = off without rootless Docker fell back to something" ;;
+    *"kib never runs"*"dockerd-rootless-setuptool.sh install"*) pass "vm = off, no Docker: the rootless steps, then stop" ;;
+    *) fail "vm = off, no Docker: stopped without the steps" ;;
 esac
+
+# Rootful Docker: steps until gVisor and user_allow_other are in, then gVisor as this user.
+_vm_t_rootful() { KIB_OS=linux && KIB_CFG_VM=off && FUSE_CONF="$_vm_dir/fuse.conf" && vm_use claude \
+    && echo "returned $(engine_rootful && echo rootful) $(box_uid)"; }
+case "$(_vm_run "$_vm_dir/rf:$PATH" _vm_t_rootful)" in
+    *returned*) fail "rootful Docker without gVisor ran a box" ;;
+    *"kib never runs"*"sudo /opt/kib-gvisor/"*"runsc install --runtime=$_vm_rt"*"sudo systemctl reload docker"*)
+        pass "rootful Docker without gVisor: the sudo steps, then stop"
+        ;;
+    *) fail "rootful Docker without gVisor: no usable steps" ;;
+esac
+is "kib ran no sudo of its own" "absent" "$([ -e "$_vm_dir/sudo-calls" ] && echo ran || echo absent)"
+echo "$_vm_rt" >"$_vm_dir/rf-runtimes" && echo user_allow_other >"$_vm_dir/fuse.conf"
+_vm_rf_out="$(_vm_run "$_vm_dir/rf:$PATH" _vm_t_rootful)"
+is "rootful Docker with gVisor: no VM, the box runs as this user" "returned rootful $(id -u)" \
+    "$(printf '%s\n' "$_vm_rf_out" | tail -1)"
+case "$_vm_rf_out" in
+    *"Rootless Docker is safer"*docs.docker.com/engine/security/rootless*) pass "rootful: a short note that rootless is safer, with its docs" ;;
+    *) fail "rootful: no note pointing at rootless Docker" ;;
+esac
+
+_vm_t_menu() { _menu_rows && _menu_pick 2>/dev/null < <(printf '%b' "$1") && echo "$MENU_PICK"; }
+is "menu: ↓ ↓ Enter picks the VM" "2" "$(_vm_run /usr/bin:/bin _vm_t_menu '\033[B\033[B\n' | tail -1)"
+is "menu: ↑ at the top stays on rootless" "0" "$(_vm_run /usr/bin:/bin _vm_t_menu '\033[A\n' | tail -1)"
+is "menu: a row's number, then Enter" "1" "$(_vm_run /usr/bin:/bin _vm_t_menu '2\n' | tail -1)"
+_vm_t_save() {
+    mkdir -p "${KIB_CONFIG%/*}" && printf 'engine = rootless\nbroker = off\n' >"$KIB_CONFIG"
+    _save_engine on 2>/dev/null && tr '\n' ' ' <"$KIB_CONFIG"
+}
+is "the pick replaces old engine lines and keeps the rest" "broker = off vm = on " \
+    "$(_vm_run /usr/bin:/bin _vm_t_save | tail -1)"
 
 _vm_t_build() { KIB_OS=darwin && VM_LINGER=1 && vm_use build >/dev/null 2>&1 && echo built; }
 case "$(_vm_run "$_vm_dir/bin:$PATH" _vm_t_build)" in

@@ -29,7 +29,12 @@ Parts = dict[str, float]  # piece of kib -> cores
 # ── Linux: /proc deltas over the window ──────────────────────────
 # No-VM mode's own engine: the user's rootless Docker.
 ENGINE = ("dockerd", "containerd", "rootlesskit", "slirp4netns")
-LINUX_PARTS = {"vm": ("qemu", "virtiofsd", "view"), "rootless": ("gvisor", "engine", "view")}
+LINUX_PARTS = {
+    "vm": ("qemu", "virtiofsd", "view"),
+    "rootless": ("gvisor", "engine", "view"),
+    "rootful": ("gvisor", "view"),  # root's Docker is the machine's, not kib's
+}
+TITLES = {"vm": "VM", "rootless": "no VM (rootless gVisor)", "rootful": "no VM (gVisor, rootful)"}
 
 
 def part(comm: str, argv: list[str], engine: str, mine: bool = True) -> str | None:
@@ -37,10 +42,11 @@ def part(comm: str, argv: list[str], engine: str, mine: bool = True) -> str | No
     exe = os.path.basename(argv[0]) if argv else ""
     if exe == "kib-view":
         return "view"
-    if engine == "rootless":
+    if engine != "vm":
         if comm.startswith("gvisor_"):
             return "gvisor"
-        return "engine" if mine and comm.startswith(ENGINE) else None  # never root's Docker
+        rootless = engine == "rootless" and mine
+        return "engine" if rootless and comm.startswith(ENGINE) else None  # never root's Docker
     if not any(VM_ARG.search(a) for a in argv):
         return None
     return "qemu" if exe.startswith("qemu-system") else "virtiofsd" if "virtiofsd" in exe else None
@@ -163,10 +169,12 @@ def _boxes(docker: str | None, engine: str) -> tuple[Parts, str]:
         return {}, "no docker CLI found"
     if engine == "rootless":  # every box reads the same shared total there
         return {}, "rootless gVisor runs with --ignore-cgroups, so docker stats has none"
-    if not SOCK.exists():
-        return {}, f"no {VM} engine socket (VM stopped?)"
-    env = {k: v for k, v in os.environ.items() if k != "DOCKER_CONTEXT"}
-    env["DOCKER_HOST"] = f"unix://{SOCK}"
+    env = dict(os.environ)  # rootful: the user's own Docker, as kib reaches it
+    if engine == "vm":
+        if not SOCK.exists():
+            return {}, f"no {VM} engine socket (VM stopped?)"
+        env.pop("DOCKER_CONTEXT", None)
+        env["DOCKER_HOST"] = f"unix://{SOCK}"
     cmd = [docker, "stats", "--no-stream", "--format", "{{.Name}}\t{{.CPUPerc}}"]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, env=env, check=False)
@@ -250,7 +258,7 @@ def main(argv: list[str]) -> int:
         raise cli.AbortError("kib stats runs on Linux and macOS only.", cli.USAGE)
     path = f"{os.environ.get('PATH', '')}:{HOME}/.local/bin:{HOME}/.local/docker"
     docker = shutil.which("docker", path=path)
-    stats = Stats(f"{sys.platform}, engine = {engine}")
+    stats = Stats(f"{sys.platform}, {TITLES[engine]}")
     print(f"kib stats ({stats.title}): every {interval:g}s — Ctrl-C for the summary.", flush=True)
     try:
         while True:

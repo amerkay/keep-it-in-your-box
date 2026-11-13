@@ -29,10 +29,15 @@ is_macos() { [ "$KIB_OS" = darwin ]; }
 # environment — an inherited 1 would aim vm_root's commands at the wrong engine.
 _KIB_ENGINE_VM=0
 engine_lima() { [ "$_KIB_ENGINE_VM" = 1 ]; }
-# Or, opted into on Linux (`engine = rootless`), rootless Docker here, the box as root inside it,
+# Or, Linux's default (`vm = off` forces it), rootless Docker here, the box as root inside it,
 # which is this user outside (host/vm.sh rootless_use). Never from the environment either.
 _KIB_ROOTLESS=0
 engine_rootless() { [ "$_KIB_ROOTLESS" = 1 ]; }
+# Or the user's rootful Docker (host/engine.sh rootful_use): the box runs as this user, as in the VM.
+_KIB_ROOTFUL=0
+engine_rootful() { [ "$_KIB_ROOTFUL" = 1 ]; }
+# Either way no VM: the view is a FUSE mount on this host, not the VM's NFS one.
+engine_native() { engine_rootless || engine_rootful; }
 
 # virtiofs on both: 9p writes ~6x slower. Never reverse-sshfs: it can reach host paths no mount
 # names.
@@ -267,8 +272,10 @@ preflight_platform() {
 # Keys (all optional; the assignments below are the defaults):
 #   broker              = on | off    — start the credential broker. ON by default; disable
 #                                       here or with KIB_BROKER=0. See broker_wanted().
-#   engine              = vm | rootless — Linux only: rootless runs boxes under the user's
-#                                       rootless Docker, no VM (docs/vm.md, "No-VM mode").
+#   vm                  = on | off    — on forces kib's VM, off forbids it. Unset on Linux: the
+#                                       user's rootless Docker when it runs, else the menu
+#                                       (host/engine.sh); macOS always runs the VM.
+#   docker              = rootless | rootful — with no VM, which Docker (the menu writes it).
 #
 # No other key. This parser also used to accept egress/allow_host_services/
 # allow_lan/lan_cidrs for a filtering proxy that was never built (README: "deliberately
@@ -281,7 +288,8 @@ preflight_platform() {
 # shellcheck disable=SC2034
 KIB_CONFIG="${KIB_CONFIG:-$HOME/.keep-it-in-your-box/config}"
 KIB_CFG_BROKER=on
-KIB_CFG_ENGINE=""       # vm | rootless; empty = engine_choice's default (host/vm.sh)
+KIB_CFG_VM="" # on | off; empty = engine_choice's default (host/engine.sh)
+KIB_CFG_DOCKER=""
 KIB_CFG_CLEANUP_DAYS=14 # a project's volumes go once it has been closed this long; 0 = never
 
 read_kib_config() {
@@ -300,7 +308,9 @@ read_kib_config() {
         val="${val%"${val##*[![:space:]]}"}" # rtrim val
         case "$key" in
             broker) KIB_CFG_BROKER="$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" ;;
-            engine) KIB_CFG_ENGINE="$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" ;;
+            vm) KIB_CFG_VM="$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" ;;
+            docker) KIB_CFG_DOCKER="$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')" ;;
+            engine) case "$val" in rootless) KIB_CFG_VM=off KIB_CFG_DOCKER=rootless ;; vm) KIB_CFG_VM=on ;; esac ;; # pre-`vm`
             cleanup_days) KIB_CFG_CLEANUP_DAYS="$val" ;;
         esac
     done <"$KIB_CONFIG"

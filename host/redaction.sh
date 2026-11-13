@@ -118,11 +118,13 @@ prepare_redaction() {
     # enforces global.kibignore against writing files the HOST later executes.
     _stage_patterns "$PATTERNS_STATE"
     [ -x "$KIB_VIEW" ] || die "kib's redaction view is not built ($KIB_VIEW). Run: kib build"
-    # Rootless Docker cannot mount NFS, so there the view mounts itself with FUSE.
+    # With no VM there is nothing to mount NFS for us, so the view mounts itself with FUSE.
+    # allow_other: rootful Docker is root, and FUSE refuses every other user without it.
     view=("$KIB_VIEW" nfs --src "$PWD" --patterns-file "$PATTERNS_STATE"
         --guard-file "$KIB_GUARD_FILE_HOST")
-    if engine_rootless; then
+    if engine_native; then
         view[1]=fuse && view+=(--mnt "$VIEW_MNT") && mkdir -p "$VIEW_MNT"
+        ! engine_rootful || view+=(--allow-other)
     fi
     : >"$VIEW_STATE.addr"
     detach_pgrp "${view[@]}" >"$VIEW_STATE.addr" 2>"$VIEW_STATE.log" 200>&- 201>&- 205>&-
@@ -130,14 +132,14 @@ prepare_redaction() {
     disown 2>/dev/null || true
     wait_until 100 0.05 _view_up || true
     _view_ready || _view_failed "never started"
-    if ! engine_rootless; then
+    if ! engine_native; then
         # "<port> <secret>": the secret is the only path it mounts, and only once (nfs.go).
         read -r port secret <"$VIEW_STATE.addr"
         vm_view_mount "$VIEW_MNT" "$port" "$secret" || _view_failed "could not be mounted in the VM"
     fi
 
     REDACTION_ARGS=(-v "$VIEW_MNT:$PWD")
-    echo "🛡️  $KIB_RULE_FILE: redacting view active ($(engine_rootless && echo FUSE || echo NFS))" >&2
+    echo "🛡️  $KIB_RULE_FILE: redacting view active ($(engine_native && echo FUSE || echo NFS))" >&2
 
     # Carries a later $KIB_RULE_FILE edit into this view without waiting for a launch. The
     # pidfile is NOT bind-mounted into the box: teardown kills whatever group it names. The path
@@ -151,7 +153,7 @@ prepare_redaction() {
 _view_running() { kill -0 "$(cat "$VIEW_STATE.pid" 2>/dev/null)" 2>/dev/null; }
 _view_up() { _view_ready || ! _view_running; }
 _view_ready() { # NFS: it printed its address. FUSE: its mount is in this host's table.
-    if engine_rootless; then grep -q " $VIEW_MNT fuse" /proc/self/mounts; else [ -s "$VIEW_STATE.addr" ]; fi
+    if engine_native; then grep -q " $VIEW_MNT fuse" /proc/self/mounts; else [ -s "$VIEW_STATE.addr" ]; fi
 }
 
 # Never fall through to a raw bind: a launch-time mask cannot cover files created mid-session.

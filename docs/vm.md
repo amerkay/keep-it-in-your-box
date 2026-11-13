@@ -67,7 +67,19 @@ that size.
 
 ## No-VM mode (Linux default)
 
-If [rootless Docker](https://docs.docker.com/engine/security/rootless/) is running, kib uses it instead of the VM, with no setting needed. The first `kib` asks once to add gVisor to `~/.config/docker/daemon.json` and reloads Docker. What changes:
+If [rootless Docker](https://docs.docker.com/engine/security/rootless/) is running, kib uses it instead of the VM, with no setting needed. The first `kib` asks once to add gVisor to `~/.config/docker/daemon.json` and reloads Docker.
+
+Otherwise the first `kib` shows a menu (↑/↓, Enter), and `kib engine` shows it again later:
+
+| Pick | Speed | Enter does |
+|---|---|---|
+| Rootless Docker + gVisor | fastest, safest | sets it up as you if its packages are there, else prints the sudo steps and quits |
+| Your Docker + gVisor | fastest; an escape lands as root | starts if gVisor is registered, else prints the sudo steps and quits |
+| kib's VM | slowest on Linux | starts (Lima installs into `~/.local`), else prints the QEMU steps and quits |
+
+**kib never runs `sudo`.** Steps it prints are yours to paste; the pick is saved in `~/.keep-it-in-your-box/config`, so the next `kib` just starts. On your own rootful Docker the box runs as you, boxes keep their memory and CPU limits, and each launch says rootless is safer. Its one-time steps register a pinned, checksummed gVisor in `/opt/kib-gvisor` and set `user_allow_other` in `/etc/fuse.conf`, so root's Docker can read kib's redaction view.
+
+With rootless Docker, what changes:
 
 - **One barrier instead of two.** A gVisor bug alone reaches your machine, as your user (rootless Docker never had root).
 - **No memory or CPU limits for boxes.** Rootless Docker runs gVisor only with `--ignore-cgroups`, so one box can use all your memory.
@@ -75,4 +87,4 @@ If [rootless Docker](https://docs.docker.com/engine/security/rootless/) is runni
 - **Host dev servers** are at `host.docker.internal` (RootlessKit's `10.0.2.2`), and only if rootless Docker allows host loopback: `DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=false` in its user unit.
 - **Needs** `fusermount3` (package `fuse3`) and systemd-resolved (kib reads `/run/systemd/resolve/resolv.conf` for the box's DNS).
 
-To use the VM anyway, add `engine = vm` to `~/.keep-it-in-your-box/config`. `engine = rootless` makes a missing rootless Docker an error instead of a fallback to the VM.
+The config lines behind the menu: `vm = on` always uses the VM; `vm = off` never does; `docker = rootless` or `docker = rootful` picks which Docker. A pick that is not set up yet prints its steps and stops, never falls back. On macOS, `vm = off` is refused, saying how to fix it.

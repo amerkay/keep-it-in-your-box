@@ -60,14 +60,14 @@ everything else calls its shims or tests `is_macos`.
 | Activity metric | Claude's own hook state (`kib_session_state`), sourced by both the guard and the diagnostic — not a measurement of output | Identical; the hooks run in the box, so the metric is platform-independent | `sleep-guard.md` | ✅ |
 | Desktop notifications | `notify-send -u <urgency> -i <icon>` | `terminal-notifier` when present, else `osascript display notification` (urgency and icon dropped either way). The fallback order is load-bearing, not cosmetic: `display notification` from a *detached* process is attributed to Script Editor and dropped silently without that grant, and the loudest caller — `clipboard-bridge.sh` — runs under `detach_pgrp`. Same order as `notify_clip` | `clipboard-and-dns.md` | 🧪 |
 | `kib sleep-monitor` | Full diagnostic: KDE idle clock, systemd block locks, per-guard hook state, phantom-input detection | Refuses (exit 2) and points at `pmset -g assertions` — none of its data sources exist | `sleep-guard.md` | ✅ |
-| `kib stats` | `/proc` + `/sys` deltas; kib = qemu + virtiofsd, or under `engine = rootless` the `gvisor_*` processes + the user's rootless Docker | `top -l 2` + `ioreg`; VM = the `com.apple.Virtualization` process (any vz VM — quit Docker Desktop/UTM to compare) + `limactl`. Same units both sides: cores, watts, the busiest processes, and `docker stats` per box (VM only: rootless gVisor has no per-box cgroup) | `microvm.md` | 🧪 |
+| `kib stats` | `/proc` + `/sys` deltas; kib = qemu + virtiofsd, or with no VM the `gvisor_*` processes + the user's rootless Docker | `top -l 2` + `ioreg`; VM = the `com.apple.Virtualization` process (any vz VM — quit Docker Desktop/UTM to compare) + `limactl`. Same units both sides: cores, watts, the busiest processes, and `docker stats` per box (VM only: rootless gVisor has no per-box cgroup) | `microvm.md` | 🧪 |
 
 ## Launch, host toolchain and mounts
 
 | Behaviour | Ubuntu / Linux | macOS | Owner | Proven |
 |---|---|---|---|---|
 | `preflight_platform` | No-op | Fails fast on missing `perl`. The engine is `vm_use`'s: one prompt installs Lima, the `docker` CLI and buildx | `vm.md` | 🧪 |
-| Docker engine | Rootless Docker + gVisor when it runs (default); else kib's Lima VM, or `engine = vm` | kib's Lima VM only. Verified 2026-11-06 with Docker Desktop quit and its CLI off `PATH` | `microvm.md` | ✅ |
+| Docker engine | Rootless Docker + gVisor when it runs; else a menu: rootless, rootful Docker + gVisor, or kib's VM (`vm`, `docker` keys; kib prints sudo steps, never runs them) | kib's Lima VM only; `vm = off` is refused, saying how to fix it. Verified 2026-11-06 with Docker Desktop quit and its CLI off `PATH` | `microvm.md` | ✅ |
 | Host shell | bash 5, GNU userland used directly (`flock`, `setsid`, `sha256sum`) | bash 3.2 + BSD userland; `perl` shims for `lock_fd` / `detach_pgrp`, `shasum` for `hash8` | `macos.md` | 🧪 |
 | Empty-array expansion | Tolerant | Every array ever assigned `()` must expand as `${arr[@]+"${arr[@]}"}` or the launch aborts under `set -u` | `macos.md` | ✅ |
 | Host python | Modern `python3` | Stock 3.9 — `kib/host`, `kib/shared`, `kib/broker` stay 3.9-clean (enforced on **both**) | `macos.md` | ✅ |

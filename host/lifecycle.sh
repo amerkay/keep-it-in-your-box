@@ -43,7 +43,7 @@ kib_identity() {
     VIEW_STATE="$KIB_HOST_ONLY/views/${SLUG}${SCRATCH_SUFFIX}"
     PATTERNS_STATE="$VIEW_STATE.patterns"
     VIEW_MNT="/mnt/kib/${PROJ_HASH}${SCRATCH_SUFFIX}"
-    ! engine_rootless || VIEW_MNT="$VIEW_STATE.mnt" # mounted here, by the view itself
+    ! engine_native || VIEW_MNT="$VIEW_STATE.mnt" # mounted here, by the view itself
     # Per-container files.
     local st="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}"
     RESOLV_STATE="$st.resolv"

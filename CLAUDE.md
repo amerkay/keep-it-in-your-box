@@ -47,6 +47,10 @@ A file's directory says which side of the trust boundary it is on. `kib/shared/`
   on both sides still fails (`merge-out-json needs 3 argument(s), got 4`). Both are fail-closed
   and neither is a bug in the tree: **diagnose from a fresh launch, never from the session the
   edit landed under.** (`container-lifecycle.md`)
+- **kib never runs `sudo` on the host — not even after a prompt.** Security-aware users would drop
+  a sandbox that escalates. Anything needing root (packages, `/etc`, root's Docker) is a pasteable
+  block kib prints before it stops; it works from the next launch. `sudo` inside kib's own VM
+  (`vm_root`) is not the host's.
 - **`bash -n` every script you touch** before finishing — a syntax error leaves the user unable
   to start the sandbox at all.
 
@@ -111,10 +115,10 @@ One line each; the full story is in the `docs/design-notes/` file in parentheses
   `docker top`** — the broker is an `--add-host`, the box is created → connected → started,
   watchers poll, readiness is the entrypoint's `/run/kib-ready`. On macOS, Apple's virtiofs
   reports the asker as owner, so kib's bind sources get bindfs in the VM — never the project. On
-  Linux, no-VM mode is the default wherever rootless Docker runs (`engine_choice`; the qemu VM
-  measured ~2× the idle cost, `engine = vm` keeps it): rootless Docker runs gVisor only with
-  `--ignore-cgroups` (no box memory/CPU limits), its box is root (= the user), and its view is a
-  host FUSE mount; rootful Docker's socket is root-equivalent. (`microvm.md`, `docs/vm.md`)
+  Linux, no VM is the default (`engine_choice`, `host/engine.sh`; the qemu VM measured ~2× the
+  idle cost): rootless Docker when it runs, else a menu of rootless, rootful or the VM. Rootless
+  runs gVisor only with `--ignore-cgroups` (no box limits) and its box is root (= the user);
+  rootful's box is the user, its view FUSE `--allow-other`. (`microvm.md`, `docs/vm.md`)
 - **VM memory stays Lima's 4 GiB until an out-of-memory kill; Docker updates only at the idle
   stop** — the VM never hands memory back while running, and a Docker restart kills every
   session's `docker exec`, `live-restore` or not. (`microvm.md`)
