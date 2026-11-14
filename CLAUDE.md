@@ -23,6 +23,11 @@ A file's directory says which side of the trust boundary it is on. `kib/shared/`
 
 ## Hard constraints — working in this repo
 
+- 🔴 **Never hand the user a delete (`rm`, `rmdir`, `find -delete`, a glob) for a view
+  mountpoint or anything under kib's state dirs** (`views/*.mnt`, `kib-views/*`, `/mnt/kib/*`).
+  A mounted view IS the project: on 2026-11-14 a cleanup of `views/*.mnt` went through the live
+  mounts and wiped this repo, `.git` included; only `[protect]` files survived. An unmounted one
+  is an empty 4 KB folder — leave it. Measure kib's disk use with `du -shx`, never plain `du`.
 - **No `docker` binary or socket in here.** You cannot build the image or test a container
   end-to-end. Hand host-side commands to the user as a fenced block, pasteable as-is: no `!`
   prefix (that runs *in this container*), no `$` prompts, no placeholders.
