@@ -43,7 +43,8 @@ kib_identity() {
     VIEW_STATE="$KIB_HOST_ONLY/views/${SLUG}${SCRATCH_SUFFIX}"
     PATTERNS_STATE="$VIEW_STATE.patterns"
     VIEW_MNT="/mnt/kib/${PROJ_HASH}${SCRATCH_SUFFIX}"
-    ! engine_native || VIEW_MNT="$VIEW_STATE.mnt" # mounted here, by the view itself
+    # No VM: the view mounts itself here. Not under ~/.local/share: home backups walk into it.
+    ! engine_native || VIEW_MNT="${XDG_RUNTIME_DIR:-$KIB_HOST_ONLY}/kib-views/${SLUG}${SCRATCH_SUFFIX}"
     # Per-container files.
     local st="$STATE_DIR/${SLUG}${SCRATCH_SUFFIX}"
     RESOLV_STATE="$st.resolv"
